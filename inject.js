@@ -65,7 +65,7 @@
   const idToComments = new Map();
   const idToRemixes = new Map();
   const idToCameos = new Map(); // Array of cameo usernames
-  const idToMeta = new Map(); // { ageMin, userHandle }
+  const idToMeta = new Map(); // { ageMin, userHandle, createdAtMs }
   const idToDuration = new Map(); // Draft duration in seconds
   const idToDimensions = new Map(); // Video dimensions { width, height }
   const idToPrompt = new Map(); // Draft prompt text
@@ -210,8 +210,12 @@
 
   function fmtRefreshCountdown(ms) {
     const totalSeconds = Math.max(0, Math.floor(ms / 1000));
-    const m = Math.floor(totalSeconds / 60);
+    const h = Math.floor(totalSeconds / 3600);
+    const m = Math.floor((totalSeconds % 3600) / 60);
     const s = totalSeconds % 60;
+    if (h > 0) {
+      return `${h}h ${m.toString().padStart(2, '0')}m ${s.toString().padStart(2, '0')}s`;
+    }
     return `${m}m ${s.toString().padStart(2, '0')}s`;
   }
 
@@ -1362,7 +1366,25 @@
     return '';
   }
 
-  function expireEtaTooltip(ageMin) {
+  function formatPostedAtLocal(tsMs) {
+    if (!Number.isFinite(tsMs)) return null;
+    const d = new Date(tsMs);
+    if (isNaN(d.getTime())) return null;
+    const dateStr = d.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+    const timeStr = d
+      .toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
+      .replace(/\s([AP]M)$/i, '$1');
+    return `This was posted ${dateStr} at ${timeStr}`;
+  }
+
+  function postedAtFromMeta(meta, ageMin) {
+    const ts = meta && Number.isFinite(meta.createdAtMs) ? meta.createdAtMs : null;
+    if (ts != null) return ts;
+    if (!Number.isFinite(ageMin)) return null;
+    return Date.now() - ageMin * 60 * 1000;
+  }
+
+  function expireEtaTooltip(ageMin, meta) {
     if (!Number.isFinite(ageMin)) return null;
 
     if (isNearWholeDay(ageMin, 15)) return null;
@@ -1370,6 +1392,12 @@
     const MIN_PER_H = 60;
     const MIN_PER_D = 1440;
     const a = Math.max(0, Math.floor(ageMin));
+
+    if (a >= 7 * MIN_PER_D) {
+      const ts = postedAtFromMeta(meta, ageMin);
+      const formatted = formatPostedAtLocal(ts);
+      if (formatted) return formatted;
+    }
 
     if (a >= MIN_PER_D) {
       const d = Math.floor(a / MIN_PER_D);
@@ -1450,7 +1478,7 @@
       el.style.background = pillBg;
     }
     if (timeEmojiStr) {
-      const tip = Number.isFinite(ageMin) ? expireEtaTooltip(ageMin) : null;
+      const tip = Number.isFinite(ageMin) ? expireEtaTooltip(ageMin, meta) : null;
       const nearDay = isNearWholeDay(ageMin);
       const tipFinal = tip || (nearDay ? 'This gen was posted at this time of day!' : null);
       const el = createPill(badge, timeEmojiStr, tipFinal, !!tipFinal);
@@ -1795,12 +1823,12 @@
             if (tPost > 0) {
               // __sorauv_getPostTimeStrict returns milliseconds, __sorauv_toTs handles conversion
               const ageMin = Math.max(0, (Date.now() - tPost) / (1000 * 60));
-              idToMeta.set(postId, { ageMin });
+              idToMeta.set(postId, { ageMin, createdAtMs: tPost });
             } else if (latest.t) {
               // Fallback: use snapshot time if post_time not available
               // This is less accurate but better than nothing
               const ageMin = Math.max(0, (Date.now() - latest.t) / (1000 * 60));
-              idToMeta.set(postId, { ageMin });
+              idToMeta.set(postId, { ageMin, createdAtMs: latest.t });
             }
           }
           
@@ -2160,7 +2188,7 @@
     
     // 4. Time/Age Pill - match feed badge exactly
     if (timeEmojiStr) {
-      const tip = Number.isFinite(ageMin) ? expireEtaTooltip(ageMin) : null;
+      const tip = Number.isFinite(ageMin) ? expireEtaTooltip(ageMin, meta) : null;
       const nearDay = isNearWholeDay(ageMin);
       const tipFinal = tip || (nearDay ? 'This gen was posted at this time of day!' : null);
       
@@ -2604,12 +2632,14 @@
     // Filter dropdown items
     FILTER_LABELS.forEach((label, index) => {
       const option = document.createElement('button');
+      option.dataset.filterIndex = String(index);
       // Format dropdown labels: "All Posts" for first item, "Past X hours" for others
       let dropdownLabel;
       if (index === 0) {
         dropdownLabel = 'All Posts';
       } else if (FILTER_STEPS_MIN[index] === 'no_remixes') {
         dropdownLabel = 'No Remixes';
+        option.dataset.filterStep = 'no_remixes';
       } else {
         const hours = FILTER_STEPS_MIN[index] / 60; // Convert minutes to hours
         dropdownLabel = `Past ${hours} hours`;
@@ -2812,6 +2842,7 @@
       fontSize: '11px',
       color: 'rgba(255, 255, 255, 0.7)',
       lineHeight: '1',
+      whiteSpace: 'nowrap',
       background: 'transparent',
     });
     gatherControlsWrapper.appendChild(refreshTimerDisplay);
@@ -2822,6 +2853,7 @@
     const onSliderChange = () => {
       let p = getPrefs();
       p.gatherSpeed = slider.value;
+      p.gatherSpeedTouched = true;
       setPrefs(p);
       if (isGatheringActiveThisTab) startGathering(true);
     };
@@ -2873,6 +2905,15 @@
     gatherBtn.onclick = () => {
       if (gatherBtn.disabled) return;
       isGatheringActiveThisTab = !isGatheringActiveThisTab;
+      if (isGatheringActiveThisTab && isProfile()) {
+        const p = getPrefs();
+        const hasTouch = !!p.gatherSpeedTouched;
+        if (!hasTouch && (p.gatherSpeed == null || p.gatherSpeed === '0')) {
+          p.gatherSpeed = '50';
+          setPrefs(p);
+          if (slider && slider.value !== p.gatherSpeed) slider.value = p.gatherSpeed;
+        }
+      }
       const s = getGatherState();
       s.isGathering = isGatheringActiveThisTab;
       if (!isGatheringActiveThisTab) {
@@ -2932,12 +2973,16 @@
         // Use requestAnimationFrame to ensure the button has rendered with new label
         requestAnimationFrame(() => {
           const buttonWidth = gatherBtn.offsetWidth;
-          gatherControlsWrapper.style.width = `${buttonWidth}px`;
+          const minWidth = 220;
+          const desiredWidth = Math.max(buttonWidth, minWidth);
+          gatherControlsWrapper.style.width = `${desiredWidth}px`;
           gatherControlsWrapper.style.alignSelf = 'flex-start';
-          // Calculate the left offset to align with the button relative to the bar
+          // Center the controls under the Gather button
           const buttonRect = gatherBtn.getBoundingClientRect();
           const barRect = bar.getBoundingClientRect();
-          gatherControlsWrapper.style.marginLeft = `${buttonRect.left - barRect.left}px`;
+          const buttonCenter = buttonRect.left - barRect.left + buttonRect.width / 2;
+          const offsetLeft = buttonCenter - desiredWidth / 2;
+          gatherControlsWrapper.style.marginLeft = `${offsetLeft}px`;
         });
 
         if (isProfile()) {
@@ -2945,7 +2990,7 @@
           sliderContainer.style.display = 'flex';
         } else if (isTopFeed()) {
           gatherControlsWrapper.style.display = 'flex';
-          sliderContainer.style.display = 'none';
+          sliderContainer.style.display = 'flex';
         }
 
         startGathering(false);
@@ -4658,30 +4703,27 @@ async function renderAnalyzeTable(force = false) {
     }
 
     if (isTopFeed()) {
-      // === TOP: keep 10m loop ===
-      const refreshMs = 10 * 60 * 1000;
-      const TOP_PX_PER_STEP = 7; //  67% of 10.66 (33% slower)
+      // === TOP: slider-based loop (fastest = current 10m, slowest = 3h @ 10% scroll speed) ===
+      const prefs = getPrefs();
+      const speedValue = prefs.gatherSpeed != null ? prefs.gatherSpeed : '0';
+      const t = Math.min(1, Math.max(0, Number(speedValue) / 100));
 
-      const s0 = getGatherState() || {};
-      if (!forceNewDeadline && typeof s0.refreshDeadline === 'number' && s0.refreshDeadline > Date.now()) {
-        const remaining = s0.refreshDeadline - Date.now();
-        startSmoothAutoScroll(TOP_PX_PER_STEP);
-        gatherRefreshTimeoutId = setTimeout(() => location.reload(), remaining);
-        updateCountdownDisplay();
-        return;
-      }
-
-      startSmoothAutoScroll(TOP_PX_PER_STEP);
+      const TOP_REFRESH_FAST = 10 * 60 * 1000;
+      const TOP_REFRESH_SLOW = 3 * 60 * 60 * 1000;
+      const TOP_PX_PER_STEP_FAST = 7; // current speed baseline
+      const lerp = (a, b, u) => a + (b - a) * u;
 
       const now = Date.now();
       let sessionState = getGatherState() || {};
-      let refreshDelay = refreshMs;
+      let refreshDelay = lerp(TOP_REFRESH_SLOW, TOP_REFRESH_FAST, t);
       if (!forceNewDeadline && sessionState.refreshDeadline && sessionState.refreshDeadline > now) {
         refreshDelay = sessionState.refreshDeadline - now;
       } else {
         sessionState.refreshDeadline = now + refreshDelay;
         setGatherState(sessionState);
       }
+      const speedFactor = Math.max(0.1, TOP_REFRESH_FAST / refreshDelay);
+      startSmoothAutoScroll(TOP_PX_PER_STEP_FAST * speedFactor);
       gatherRefreshTimeoutId = setTimeout(() => location.reload(), refreshDelay);
       updateCountdownDisplay();
       return;
@@ -4707,9 +4749,9 @@ async function renderAnalyzeTable(force = false) {
     const pxPerStep = (pps * TICK_MS) / 1000; // per-tick movement
     startSmoothAutoScroll(pxPerStep);
 
-    // randomized refresh window (unchanged)
-    const speedSlow = { rMin: 15 * 60000, rMax: 17 * 60000 };
-    const speedMid  = { rMin: 7 * 60000,  rMax: 9 * 60000 };
+    // randomized refresh window (slowest ~1h, fastest ~5m)
+    const speedSlow = { rMin: 60 * 60000, rMax: 60 * 60000 };
+    const speedMid  = { rMin: 20 * 60000, rMax: 25 * 60000 };
     const speedFast = { rMin: 5 * 60000,  rMax: 6 * 60000 };
 
     let refreshMinMs, refreshMaxMs;
@@ -5243,7 +5285,8 @@ async function renderAnalyzeTable(force = false) {
       }
 
       if (shouldUpdateMeta) {
-        idToMeta.set(id, { ageMin, userHandle });
+        const createdAtMs = __sorauv_toTs(created_at) || existingMeta?.createdAtMs || null;
+        idToMeta.set(id, { ageMin, userHandle, createdAtMs });
       }
 
       const userKey = userHandle ? `h:${userHandle.toLowerCase()}` : userId != null ? `id:${userId}` : pageUserKey;
@@ -5371,7 +5414,8 @@ async function renderAnalyzeTable(force = false) {
           // Meta for remixes; not locked, but avoid overwriting if already set with a higher-quality value
           const existingRemixMeta = idToMeta.get(remixId);
           if (!existingRemixMeta) {
-            idToMeta.set(remixId, { ageMin: remixAgeMin, userHandle: remixUserHandle });
+            const remixCreatedAtMs = __sorauv_toTs(remixCreatedAt) || null;
+            idToMeta.set(remixId, { ageMin: remixAgeMin, userHandle: remixUserHandle, createdAtMs: remixCreatedAtMs });
           }
           
           const remixUserKey = remixUserHandle ? `h:${remixUserHandle.toLowerCase()}` : remixUserId != null ? `id:${remixUserId}` : pageUserKey;
@@ -6400,6 +6444,9 @@ async function renderAnalyzeTable(force = false) {
     const gatherBtn = bar.querySelector('.sora-uv-gather-btn');
     const gatherControlsWrapper = bar.querySelector('.sora-uv-gather-controls-wrapper');
     const sliderContainer = bar.querySelector('.sora-uv-slider-container');
+    const filterDropdown = bar.querySelector('.sora-uv-filter-dropdown');
+    const noRemixesOption = filterDropdown && filterDropdown.querySelector('[data-filter-step="no_remixes"]');
+    if (noRemixesOption) noRemixesOption.style.display = isProfile() ? 'none' : '';
 
     // Hide Filter/Gather entirely during Analyze mode
     if (analyzeActive) {
@@ -6454,7 +6501,7 @@ async function renderAnalyzeTable(force = false) {
       if (gatherBtn) gatherBtn.style.display = 'flex';
       if (filterContainer) filterContainer.style.display = '';
       if (gatherControlsWrapper) gatherControlsWrapper.style.display = isGatheringActiveThisTab ? 'flex' : 'none';
-      if (sliderContainer) sliderContainer.style.display = isProfile() ? 'flex' : 'none';
+      if (sliderContainer) sliderContainer.style.display = isProfile() || isTopFeed() ? 'flex' : 'none';
       bar.updateGatherState();
 
       // Position on the right (default)
@@ -6841,6 +6888,26 @@ async function renderAnalyzeTable(force = false) {
       dlog('feed', 'draft detail route detected; not initializing');
       return;
     }
+    // Allow auto-starting Gather on Top feed or Profile via URL param.
+    let shouldAutoGather = false;
+    try {
+      const u = new URL(location.href);
+      shouldAutoGather = u.searchParams.get('gather') === '1';
+    } catch {}
+    const shouldAutoGatherHere = shouldAutoGather && (isTopFeed() || isProfile());
+    if (shouldAutoGatherHere) {
+      const prefs = getPrefs();
+      if (!prefs.gatherSpeed || prefs.gatherSpeed === '0') {
+        prefs.gatherSpeed = '50';
+        prefs.gatherSpeedTouched = true;
+        setPrefs(prefs);
+      }
+      const s = getGatherState() || {};
+      s.isGathering = true;
+      if (s.filterIndex == null) s.filterIndex = 0;
+      setGatherState(s);
+      isGatheringActiveThisTab = true;
+    }
     // NOTE: we do NOT want to reset session here; we want Gather to survive a refresh.
     loadTaskToSourceDraft(); // Load task->draft mappings from localStorage
     installFetchSniffer();
@@ -6863,6 +6930,13 @@ async function renderAnalyzeTable(force = false) {
       // Force a new schedule after refresh so the loop "starts over"
       startGathering(true);
       if (!gatherCountdownIntervalId) gatherCountdownIntervalId = setInterval(updateCountdownDisplay, 1000);
+    }
+    if (shouldAutoGatherHere) {
+      setTimeout(() => {
+        if (!isGatheringActiveThisTab) return;
+        const bar = controlBar || ensureControlBar();
+        if (bar && typeof bar.updateGatherState === 'function') bar.updateGatherState();
+      }, 200);
     }
   }
 

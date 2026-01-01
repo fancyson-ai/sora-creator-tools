@@ -5,12 +5,15 @@
   const $ = (sel, el=document) => el.querySelector(sel);
   const $$ = (sel, el=document) => Array.from(el.querySelectorAll(sel));
   const TOP_TODAY_KEY = '__top_today__';
+  const EVERYONE_LABEL = 'Top Today';
   const TOP_TODAY_WINDOW_MS = 24 * 60 * 60 * 1000;
   const TOP_TODAY_MIN_UNIQUE_VIEWS = 100;
     const TOP_TODAY_MIN_LIKES = 15;
   const ULTRA_MODE_STORAGE_KEY = 'SCT_ULTRA_MODE_V1';
   const ULTRA_MODE_TAP_COUNT = 5;
     const SITE_ORIGIN = 'https://sora.chatgpt.com';
+  const DEFAULT_THUMB_URL = 'icons/blank.webp';
+  const CUSTOM_FILTER_PREFIX = 'custom:';
   const absUrl = (u, pid) => {
     if (!u && pid) return `${SITE_ORIGIN}/p/${pid}`;
     if (!u) return null;
@@ -21,9 +24,131 @@
   const COLORS = [
     '#7dc4ff','#ff8a7a','#ffd166','#95e06c','#c792ea','#64d3ff','#ffa7c4','#9fd3c7','#f6bd60','#84a59d','#f28482'
   ];
+  const THEME_STORAGE_KEY = 'SCT_DASHBOARD_THEME_V1';
+  const THEME_PRESETS = {
+    red: { label: 'Red', accent: '#ff6b6b', accentStrong: '#ff9b93', accentRgb: '255,107,107' },
+    orange: { label: 'Orange', accent: '#ff9f43', accentStrong: '#ffbf7a', accentRgb: '255,159,67' },
+    gold: { label: 'Gold', accent: '#ffcf8f', accentStrong: '#ffe1b5', accentRgb: '255,207,143' },
+    green: { label: 'Green', accent: '#9eea6a', accentStrong: '#c1f28f', accentRgb: '158,234,106' },
+    teal: { label: 'Teal', accent: '#5fe0d7', accentStrong: '#8cf0e9', accentRgb: '95,224,215' },
+    blue: { label: 'Blue', accent: '#7dc4ff', accentStrong: '#9ad5ff', accentRgb: '125,196,255' },
+    indigo: { label: 'Indigo', accent: '#9a7cff', accentStrong: '#b6a1ff', accentRgb: '154,124,255' },
+    pink: { label: 'Pink', accent: '#ff8fd3', accentStrong: '#ffb6e7', accentRgb: '255,143,211' },
+    gray: { label: 'Gray', accent: '#c9d1d9', accentStrong: '#e4e9ef', accentRgb: '201,209,217' },
+    darkRed: { label: 'Dark Red', accent: '#c44545', accentStrong: '#e07a7a', accentRgb: '196,69,69' },
+    darkOrange: { label: 'Dark Orange', accent: '#c26a2a', accentStrong: '#e49857', accentRgb: '194,106,42' },
+    darkGold: { label: 'Dark Gold', accent: '#c8a042', accentStrong: '#e0bc5e', accentRgb: '200,160,66' },
+    darkGreen: { label: 'Dark Green', accent: '#39ff14', accentStrong: '#7bff5f', accentRgb: '57,255,20' },
+    darkTeal: { label: 'Dark Teal', accent: '#1f9c8a', accentStrong: '#45b9aa', accentRgb: '31,156,138' },
+    darkBlue: { label: 'Dark Blue', accent: '#2f6fb3', accentStrong: '#5c8fca', accentRgb: '47,111,179' },
+    darkIndigo: { label: 'Dark Indigo', accent: '#4d2f7a', accentStrong: '#6e4aa6', accentRgb: '77,47,122' },
+    darkPink: { label: 'Dark Pink', accent: '#b64b8f', accentStrong: '#d476b4', accentRgb: '182,75,143' },
+    darkGray: { label: 'Dark Gray', accent: '#8d949c', accentStrong: '#aeb5bd', accentRgb: '141,148,156' }
+  };
+  const THEME_ALIASES = { amber: 'gold', rose: 'red', violet: 'indigo', grey: 'gray', deepPurple: 'indigo', darkPurple: 'darkPink' };
+  const BASE_RGB = {
+    bg: [10,15,20],
+    'bg-deep': [7,11,16],
+    'bg-alt': [10,14,19],
+    'bg-dark': [8,12,16],
+    'bg-ultra': [6,10,14],
+    panel: [18,25,38],
+    'panel-strong': [24,33,49],
+    'panel-deep': [12,16,22],
+    'panel-mid': [12,18,26],
+    'panel-soft': [20,28,40],
+    'panel-soft-alt': [20,28,38],
+    'panel-hover': [22,30,42],
+    'panel-edge': [24,34,46],
+    surface: [16,22,31],
+    'surface-strong': [18,26,36],
+    'bg-subtle': [18,24,32],
+    chip: [18,26,36]
+  };
+  const BASE_TINT = {
+    bg: 0.06,
+    'bg-deep': 0.05,
+    'bg-alt': 0.06,
+    'bg-dark': 0.05,
+    'bg-ultra': 0.04,
+    panel: 0.08,
+    'panel-strong': 0.08,
+    'panel-deep': 0.07,
+    'panel-mid': 0.07,
+    'panel-soft': 0.08,
+    'panel-soft-alt': 0.08,
+    'panel-hover': 0.08,
+    'panel-edge': 0.08,
+    surface: 0.09,
+    'surface-strong': 0.09,
+    'bg-subtle': 0.07,
+    chip: 0.09
+  };
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const SIDEBAR_WIDTH_KEY = 'SCT_DASHBOARD_SIDEBAR_WIDTH';
+  const SIDEBAR_MIN_WIDTH = 260;
+  const SIDEBAR_MAX_WIDTH = 520;
+  let metrics = { users: {} };
   const ESC_MAP = { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' };
   const esc = (s)=> String(s).replace(/[&<>"']/g, (c)=> ESC_MAP[c] || c);
+
+  function applyTheme(themeId){
+    const theme = THEME_PRESETS[themeId] || THEME_PRESETS.darkBlue;
+    const root = document.documentElement;
+    if (!root || !theme) return;
+    root.style.setProperty('--accent', theme.accent);
+    root.style.setProperty('--accent-strong', theme.accentStrong);
+    root.style.setProperty('--accent-rgb', theme.accentRgb);
+    root.style.setProperty('--glow-right', `rgba(${theme.accentRgb},0.2)`);
+    root.style.setProperty('--glow-right-soft', `rgba(${theme.accentRgb},0.16)`);
+    const accent = theme.accentRgb.split(',').map((v)=> Number(v.trim()) || 0);
+    const mix = (base, amt)=> base.map((v, i)=> Math.round(v + (accent[i] - v) * amt));
+    Object.entries(BASE_RGB).forEach(([key, base])=>{
+      const amt = BASE_TINT[key] ?? 0.08;
+      const mixed = mix(base, amt).join(',');
+      root.style.setProperty(`--${key}-rgb`, mixed);
+    });
+  }
+
+  function setTheme(themeId, persist = true){
+    const resolved = THEME_PRESETS[themeId] ? themeId : (THEME_ALIASES[themeId] || 'darkBlue');
+    applyTheme(resolved);
+    if (persist) {
+      try { localStorage.setItem(THEME_STORAGE_KEY, resolved); } catch {}
+    }
+    $$('.theme-swatch').forEach((btn)=>{
+      const active = btn.dataset.theme === resolved;
+      btn.classList.toggle('active', active);
+      btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
+    try { window.dispatchEvent(new CustomEvent('sct-theme-change', { detail: { themeId: resolved } })); } catch {}
+  }
+
+  function initThemePicker(){
+    const swatches = $$('.theme-swatch');
+    if (!swatches.length) return;
+    let stored = null;
+    try { stored = localStorage.getItem(THEME_STORAGE_KEY); } catch {}
+    setTheme(stored || 'darkBlue', false);
+    swatches.forEach((btn)=>{
+      btn.addEventListener('click', ()=>{
+        const themeId = btn.dataset.theme || 'blue';
+        setTheme(themeId);
+      });
+    });
+  }
+
+  function getCurrentThemeAccent(){
+    const root = document.documentElement;
+    if (!root) return THEME_PRESETS.darkBlue.accent;
+    const accent = getComputedStyle(root).getPropertyValue('--accent').trim();
+    return accent || THEME_PRESETS.darkBlue.accent;
+  }
+
+  function getCompareSeriesColor(idx){
+    if (idx === 0) return getCurrentThemeAccent();
+    return COLORS[idx % COLORS.length];
+  }
   
   // Blend two hex colors (50/50 mix)
   function blendColors(color1, color2){
@@ -47,6 +172,13 @@
       return word.slice(0, -1);
     }
     return word;
+  }
+  function unitLabelForValue(unit, value){
+    const lower = String(unit || '').toLowerCase();
+    if (isFinite(value) && value === 1 && lower.endsWith('s') && !/per person/.test(lower)) {
+      return singularize(lower);
+    }
+    return lower;
   }
 
   // (thumbnails are provided by the collector; no auto-rewrite here)
@@ -100,6 +232,23 @@
         toast.classList.remove('show');
       }, 2000);
     } catch {}
+  }
+
+  function hoistChartTooltips(){
+    const tooltips = $$('.tooltip');
+    tooltips.forEach((tooltip)=>{
+      if (tooltip.parentElement !== document.body) {
+        document.body.appendChild(tooltip);
+      }
+    });
+  }
+  function ensureTooltipInBody(tooltip){
+    if (!tooltip) return;
+    const body = document.body;
+    if (!body) return;
+    if (tooltip.parentElement !== body) {
+      body.appendChild(tooltip);
+    }
   }
 
   async function loadUltraModePreference(){
@@ -416,8 +565,25 @@
     } catch { return 0n; }
   }
 
+  function pruneEmptyUsers(metrics){
+    let removed = 0;
+    const users = metrics?.users || {};
+    for (const [key, user] of Object.entries(users)){
+      const posts = user?.posts || {};
+      if (!posts || Object.keys(posts).length === 0){
+        delete users[key];
+        removed++;
+      }
+    }
+    return removed;
+  }
+
   async function loadMetrics(){
     const { metrics = { users:{} } } = await chrome.storage.local.get('metrics');
+    const removed = pruneEmptyUsers(metrics);
+    if (removed) {
+      try { await chrome.storage.local.set({ metrics }); } catch {}
+    }
     return metrics;
   }
 
@@ -432,7 +598,8 @@
       const topToday = buildTopTodayUser(metrics);
       const opt = document.createElement('option');
       opt.value = TOP_TODAY_KEY;
-      opt.textContent = `${topToday.handle} (${Object.keys(topToday.posts||{}).length})`;
+      const postCount = Object.keys(topToday.posts||{}).length;
+      opt.textContent = formatUserOptionLabel(topToday.handle, postCount);
       sel.appendChild(opt);
     }
 
@@ -454,10 +621,63 @@
       const opt = document.createElement('option');
       opt.value = key;
       const postCount = Object.keys(u.posts||{}).length;
-      opt.textContent = `${u.handle || key} (${postCount})`;
+      opt.textContent = formatUserOptionLabel(u.handle || key, postCount);
       sel.appendChild(opt);
     }
     return users.length ? users[0][0] : null;
+  }
+
+  function updateMetricsHeader(userKey, user){
+    const header = $('#metricsHeader');
+    if (!header) return;
+    if (!userKey) {
+      header.textContent = 'Metrics for —';
+      return;
+    }
+    if (isTopTodayKey(userKey)) {
+      header.textContent = 'Metrics for Everyone Today';
+      return;
+    }
+    const raw = user?.handle || (userKey || '').replace(/^h:/i, '');
+    const name = raw || 'Unknown';
+    header.textContent = `Metrics for ${name}`;
+  }
+
+  function getGatherDisplayName(userKey, user){
+    if (!userKey) return '—';
+    if (isTopTodayKey(userKey)) return EVERYONE_LABEL;
+    const raw = user?.handle || (userKey || '').replace(/^h:/i, '');
+    return raw || 'Unknown';
+  }
+
+  function getProfileHandleFromKey(userKey, user){
+    if (!userKey || isTopTodayKey(userKey)) return '';
+    const raw = user?.handle || (userKey || '').replace(/^h:/i, '');
+    if (!raw) return '';
+    return raw.replace(/^@/, '').trim();
+  }
+
+  function updateMetricsGatherNote(userKey, user){
+    const noteText = $('#metricsGatherNoteText');
+    const link = $('#metricsGatherLink');
+    if (!noteText || !link) return;
+    const label = getGatherDisplayName(userKey, user);
+    noteText.textContent = `Based on all post you've seen from ${label}.`;
+    let url = '';
+    if (userKey) {
+      if (isTopTodayKey(userKey)) {
+        url = `${SITE_ORIGIN}/explore?feed=top&gather=1`;
+      } else {
+        const handle = getProfileHandleFromKey(userKey, user);
+        if (handle) url = `${SITE_ORIGIN}/profile/${encodeURIComponent(handle)}?gather=1`;
+      }
+    }
+    link.href = url || '#';
+    if (url) {
+      link.removeAttribute('aria-disabled');
+    } else {
+      link.setAttribute('aria-disabled', 'true');
+    }
   }
 
   function filterUsersByQuery(metrics, q){
@@ -475,6 +695,41 @@
       return (a[1].handle||a[0]||'').localeCompare(b[1].handle||b[0]||'');
     });
     return res;
+  }
+
+  function countUserPosts(user){
+    return Object.keys(user?.posts || {}).length;
+  }
+
+  function formatPostCount(count){
+    const num = Number(count) || 0;
+    return `${num} ${num === 1 ? 'post' : 'posts'}`;
+  }
+
+  function formatUserOptionLabel(name, count){
+    return `${name} - ${formatPostCount(count)}`;
+  }
+
+  function formatUserSelectionLabel(userKey, user){
+    if (!userKey) return '';
+    const count = countUserPosts(user);
+    const name = isTopTodayKey(userKey) ? EVERYONE_LABEL : (user?.handle || userKey);
+    return formatUserOptionLabel(name, count);
+  }
+
+  function buildUserSuggestionItems(metrics, query){
+    const needle = (query || '').trim().toLowerCase();
+    const items = [];
+    const everyoneSearch = 'top today everyone all users';
+    if (!needle || everyoneSearch.includes(needle)){
+      const topToday = buildTopTodayUser(metrics);
+      items.push({ key: TOP_TODAY_KEY, label: EVERYONE_LABEL, count: countUserPosts(topToday), hint: '' });
+    }
+    const list = filterUsersByQuery(metrics, query);
+    for (const [key, u] of list){
+      items.push({ key, label: u.handle || key, count: countUserPosts(u) });
+    }
+    return items;
   }
 
   // Helper function to build post label with cameo info
@@ -500,16 +755,213 @@
     return clean.slice(0, 100) + '...';
   }
 
-  function buildPostsList(user, colorFor, visibleSet, opts={}){
-    const wrap = $('#posts');
-    wrap.innerHTML='';
-    if (!user) return;
+  function initSidebarResizer(){
+    const sidebar = document.querySelector('.sidebar');
+    const resizer = document.querySelector('.sidebar-resizer');
+    if (!sidebar || !resizer) return;
+    const root = document.documentElement;
+    const clampWidth = (w)=>{
+      const maxByWindow = Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, window.innerWidth - 360));
+      return clamp(w, SIDEBAR_MIN_WIDTH, maxByWindow);
+    };
+    const applyWidth = (w)=>{
+      const next = clampWidth(w);
+      root.style.setProperty('--sidebar-width', `${next}px`);
+      root.style.setProperty('--sidebar-min', `${SIDEBAR_MIN_WIDTH}px`);
+      root.style.setProperty('--sidebar-max', `${SIDEBAR_MAX_WIDTH}px`);
+      resizer.setAttribute('aria-valuemin', String(SIDEBAR_MIN_WIDTH));
+      resizer.setAttribute('aria-valuemax', String(SIDEBAR_MAX_WIDTH));
+      resizer.setAttribute('aria-valuenow', String(Math.round(next)));
+      return next;
+    };
+
+    let current = SIDEBAR_MIN_WIDTH;
+    try {
+      const saved = Number(localStorage.getItem(SIDEBAR_WIDTH_KEY));
+      if (Number.isFinite(saved)) current = saved;
+    } catch {}
+    current = applyWidth(current);
+
+    let startX = 0;
+    let startWidth = 0;
+    const onMove = (e)=>{
+      const next = applyWidth(startWidth + (e.clientX - startX));
+      current = next;
+    };
+    const onUp = ()=>{
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      document.body.classList.remove('is-resizing');
+      try { localStorage.setItem(SIDEBAR_WIDTH_KEY, String(current)); } catch {}
+    };
+    resizer.addEventListener('mousedown', (e)=>{
+      e.preventDefault();
+      startX = e.clientX;
+      startWidth = sidebar.getBoundingClientRect().width;
+      document.body.classList.add('is-resizing');
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup', onUp);
+    });
+    window.addEventListener('resize', ()=>{ current = applyWidth(current); });
+  }
+
+  function buildPostLabelKey(p){
+    const cameoKey = Array.isArray(p.cameos) ? p.cameos.join('|') : '';
+    const caption = p.caption || p.pid || '';
+    return `${p.owner || ''}::${cameoKey}::${caption}`;
+  }
+
+  function buildPostLinkContent(link, p){
+    link.textContent = '';
+    if (p.owner) {
+      const ownerSpan = document.createElement('span');
+      ownerSpan.textContent = p.owner;
+      ownerSpan.style.fontWeight = '800';
+      link.appendChild(ownerSpan);
+
+      if (p.cameos && p.cameos.length > 0) {
+        const cameoWord = document.createElement('span');
+        cameoWord.textContent = ' cast ';
+        cameoWord.style.fontWeight = '300';
+        link.appendChild(cameoWord);
+
+        p.cameos.forEach((cameo, idx) => {
+          const cameoSpan = document.createElement('span');
+          cameoSpan.textContent = cameo;
+          cameoSpan.style.fontWeight = '800';
+          link.appendChild(cameoSpan);
+
+          if (idx < p.cameos.length - 1) {
+            const comma = document.createElement('span');
+            comma.textContent = ', ';
+            comma.style.fontWeight = '300';
+            link.appendChild(comma);
+          }
+        });
+      }
+
+      const sep = document.createElement('span');
+      sep.textContent = ' - ';
+      sep.style.fontWeight = '300';
+      link.appendChild(sep);
+
+      const captionSpan = document.createElement('span');
+      captionSpan.textContent = p.caption || p.pid;
+      captionSpan.style.fontWeight = '300';
+      link.appendChild(captionSpan);
+    } else {
+      const captionSpan = document.createElement('span');
+      captionSpan.textContent = p.caption || p.pid;
+      captionSpan.style.fontWeight = '300';
+      link.appendChild(captionSpan);
+    }
+  }
+
+  function ensureSortedPoints(points){
+    if (!Array.isArray(points) || points.length < 2) return points;
+    let sorted = true;
+    for (let i = 1; i < points.length; i++){
+      if (points[i].t < points[i-1].t){
+        sorted = false;
+        break;
+      }
+    }
+    if (sorted) return points;
+    return [...points].sort((a,b)=>a.t - b.t);
+  }
+
+  function updateSummaryMetrics(user, visibleSet){
+    try{
+      const uniqueViewsEl = $('#uniqueViewsTotal');
+      const totalViewsEl = $('#totalViewsTotal');
+      const likesEl = $('#likesTotal');
+      const repliesEl = $('#repliesTotal');
+      const remixesEl = $('#remixesTotal');
+      const interEl = $('#interactionsTotal');
+      const cameosEl = $('#userCameosTotal');
+      const followersEl = $('#userFollowersTotal');
+      const isTopToday = user?.__specialKey === TOP_TODAY_KEY;
+      if (isTopToday) {
+        const cutoff = Date.now() - TOP_TODAY_WINDOW_MS;
+        let totalUniqueViews = 0, totalViews = 0, totalLikes = 0, totalReplies = 0, totalRemixes = 0, totalInteractions = 0;
+        const activeUsers = new Set();
+        for (const [userKey, u] of Object.entries(metrics.users || {})) {
+          for (const p of Object.values(u.posts || {})) {
+            const postTime = getPostTimeForRecency(p);
+            if (!postTime || postTime < cutoff) continue;
+            activeUsers.add(userKey);
+            const last = latestSnapshot(p.snapshots);
+            totalUniqueViews += num(last?.uv);
+            totalViews += num(last?.views);
+            totalLikes += num(last?.likes);
+            totalReplies += num(last?.comments);
+            totalRemixes += num(latestRemixCountForPost(p));
+            totalInteractions += interactionsOfSnap(last);
+          }
+        }
+        if (uniqueViewsEl) uniqueViewsEl.textContent = fmt2(totalUniqueViews);
+        if (totalViewsEl) totalViewsEl.textContent = fmt2(totalViews);
+        if (likesEl) likesEl.textContent = fmt2(totalLikes);
+        if (repliesEl) repliesEl.textContent = fmtK2OrInt(totalReplies);
+        if (remixesEl) remixesEl.textContent = fmt2(totalRemixes);
+        if (interEl) interEl.textContent = fmt2(totalInteractions);
+        if (cameosEl) {
+          let totalCameos = 0;
+          for (const key of activeUsers) {
+            const arr = Array.isArray(metrics.users?.[key]?.cameos) ? metrics.users[key].cameos : [];
+            const last = arr.length > 0 ? arr[arr.length - 1] : null;
+            totalCameos += num(last?.count);
+          }
+          cameosEl.textContent = fmtK2OrInt(totalCameos);
+        }
+        if (followersEl) {
+          let totalFollowers = 0;
+          for (const key of activeUsers) {
+            const arr = Array.isArray(metrics.users?.[key]?.followers) ? metrics.users[key].followers : [];
+            const last = arr.length > 0 ? arr[arr.length - 1] : null;
+            totalFollowers += num(last?.count);
+          }
+          followersEl.textContent = fmtK2OrInt(totalFollowers);
+        }
+        return;
+      }
+      let totalUniqueViews = 0, totalViews = 0, totalLikes = 0, totalReplies = 0, totalRemixes = 0, totalInteractions = 0;
+      const current = visibleSet ? Array.from(visibleSet) : [];
+      for (const pid of current){
+        const post = user.posts?.[pid];
+        const last = latestSnapshot(post?.snapshots);
+        totalUniqueViews += num(last?.uv);
+        totalViews += num(last?.views);
+        totalLikes += num(last?.likes);
+        totalReplies += num(last?.comments);
+        totalRemixes += num(latestRemixCountForPost(post));
+        totalInteractions += interactionsOfSnap(last);
+      }
+      if (uniqueViewsEl) uniqueViewsEl.textContent = fmt2(totalUniqueViews);
+      if (totalViewsEl) totalViewsEl.textContent = fmt2(totalViews);
+      if (likesEl) likesEl.textContent = fmt2(totalLikes);
+      if (repliesEl) repliesEl.textContent = fmtK2OrInt(totalReplies);
+      if (remixesEl) remixesEl.textContent = fmt2(totalRemixes);
+      if (interEl) interEl.textContent = fmt2(totalInteractions);
+      if (cameosEl) {
+        const cameosArr = Array.isArray(user.cameos) ? user.cameos : [];
+        const lastCameo = cameosArr.length > 0 ? cameosArr[cameosArr.length - 1] : null;
+        cameosEl.textContent = lastCameo ? fmtK2OrInt(lastCameo.count) : '0';
+      }
+      if (followersEl) {
+        const followersArr = Array.isArray(user.followers) ? user.followers : [];
+        const lastFollower = followersArr.length > 0 ? followersArr[followersArr.length - 1] : null;
+        followersEl.textContent = lastFollower ? fmtK2OrInt(lastFollower.count) : '0';
+      }
+    } catch {}
+  }
+
+  function computeOrderedPosts(user, visibleSet, activeActionId){
+    if (!user) return [];
     const isTopToday = user?.__specialKey === TOP_TODAY_KEY;
-    // Build and sort: known-dated posts first (newest → oldest), undated go to bottom
+    // Build and sort: known-dated posts first (newest -> oldest), undated go to bottom
     const mapped = Object.entries(user.posts||{}).map(([pid,p])=>{
       const last = latestSnapshot(p.snapshots) || {};
-      const first = p.snapshots?.[0] || {};
-      const rawPT = p?.post_time ?? p?.postTime ?? p?.post?.post_time ?? p?.post?.postTime ?? p?.meta?.post_time ?? null;
       const postTime = (isTopToday ? (getPostTimeStrict(p) || getPostTimeForRecency(p)) : getPostTimeStrict(p)) || 0;
       const rate = interactionRate(last);
       const bi = pidBigInt(pid);
@@ -519,8 +971,7 @@
       const cap = (typeof p?.caption === 'string' && p.caption) ? p.caption.trim() : null;
       const cameos = Array.isArray(p?.cameo_usernames) ? p.cameo_usernames.filter(c => typeof c === 'string' && c.trim()) : [];
       const owner = user?.__specialKey === TOP_TODAY_KEY ? (p?.ownerHandle || '') : (user?.handle || '');
-      
-      // Build label with cameo info: "owner cameoed cameo1, cameo2 - caption"
+
       let label, title;
       const captionText = cap || pid;
       if (owner && cameos.length > 0) {
@@ -534,21 +985,25 @@
         label = captionText;
         title = captionText;
       }
-      
-      return { pid, url: absUrl(p.url, pid), thumb: p.thumb, label, title, last, first, postTime, pidBI: bi, rate, cameos, owner, caption: cap, views, likes, lastSeen };
+
+      return { pid, url: absUrl(p.url, pid), thumb: p.thumb, label, title, last, postTime, pidBI: bi, rate, cameos, owner, caption: cap, views, likes, lastSeen };
     });
-    // Sort newest first assuming larger post_time is newer
     const withTs = mapped.filter(x=>x.postTime>0).sort((a,b)=>b.postTime - a.postTime);
     const noTs  = mapped.filter(x=>x.postTime<=0).sort((a,b)=>{
       if (a.pidBI === b.pidBI) return a.pid.localeCompare(b.pid);
-      return a.pidBI < b.pidBI ? 1 : -1; // descending: bigger id => newer first
+      return a.pidBI < b.pidBI ? 1 : -1;
     });
     const posts = withTs.concat(noTs);
 
-    // If a list-action filter is active, surface selected posts to top.
     let orderedPosts = posts;
-    const activeActionId = opts.activeActionId || null;
-    if (activeActionId && visibleSet && visibleSet.size > 0) {
+    if (activeActionId) {
+      if (!visibleSet || visibleSet.size === 0) {
+        const unselected = posts.slice();
+        orderedPosts = [];
+        orderedPosts.push({ __separator: true });
+        orderedPosts.push(...unselected);
+        return orderedPosts;
+      }
       const pidToPost = new Map(posts.map(p=>[p.pid, p]));
       const bottomComparator = (a,b)=>{
         const dl = (a.likes - b.likes);
@@ -593,209 +1048,438 @@
           }
         }
       } else if (activeActionId === 'stale') {
-        const now = Date.now();
-        const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
-        selectedOrdered = posts
-          .filter(p=>visibleSet.has(p.pid))
-          .slice()
-          .sort((a,b)=>{
-            const at = Math.max(toTs(a.last?.t) || 0, toTs(a.lastSeen) || 0);
-            const bt = Math.max(toTs(b.last?.t) || 0, toTs(b.lastSeen) || 0);
-            const aAge = at ? now - at : Infinity;
-            const bAge = bt ? now - bt : Infinity;
-            const dAge = bAge - aAge; // most stale first
-            if (dAge !== 0) return dAge;
-            return bottomComparator(a,b);
-          })
-          .filter(p=>{
-            const t = Math.max(toTs(p.last?.t) || 0, toTs(p.lastSeen) || 0);
-            const ageMs = t ? now - t : Infinity;
-            return ageMs > TWENTY_FOUR_HOURS_MS;
-          });
+        // Keep the same default order as Show All/Hide All; visibleSet already holds stale pids.
+        selectedOrdered = posts.filter(p=>visibleSet.has(p.pid));
       } else {
-        // last5/last10 or other actions: keep default newest-first order.
         selectedOrdered = posts.filter(p=>visibleSet.has(p.pid));
       }
 
       const unselected = posts.filter(p=>!visibleSet.has(p.pid));
       orderedPosts = [];
       orderedPosts.push(...selectedOrdered);
-      if (selectedOrdered.length && unselected.length) orderedPosts.push({ __separator: true });
+      if ((selectedOrdered.length || visibleSet.size === 0) || unselected.length) orderedPosts.push({ __separator: true });
       orderedPosts.push(...unselected);
     }
 
-    // Update metric cards (sum of latest values for visible posts)
-    try{
-      const uniqueViewsEl = $('#uniqueViewsTotal');
-      const totalViewsEl = $('#totalViewsTotal');
-      const likesEl = $('#likesTotal');
-      const repliesEl = $('#repliesTotal');
-      const remixesEl = $('#remixesTotal');
-      const interEl = $('#interactionsTotal');
-      const cameosEl = $('#userCameosTotal');
-      const followersEl = $('#userFollowersTotal');
-      let totalUniqueViews = 0, totalViews = 0, totalLikes = 0, totalReplies = 0, totalRemixes = 0, totalInteractions = 0;
-      const current = visibleSet ? Array.from(visibleSet) : [];
-      for (const pid of current){
-        const post = user.posts?.[pid];
-        const last = latestSnapshot(post?.snapshots);
-        totalUniqueViews += num(last?.uv);
-        totalViews += num(last?.views);
-        totalLikes += num(last?.likes);
-        totalReplies += num(last?.comments); // non-recursive
-        totalRemixes += num(latestRemixCountForPost(post));
-        totalInteractions += interactionsOfSnap(last);
-      }
-      if (uniqueViewsEl) uniqueViewsEl.textContent = fmt2(totalUniqueViews);
-      if (totalViewsEl) totalViewsEl.textContent = fmt2(totalViews);
-      if (likesEl) likesEl.textContent = fmt2(totalLikes);
-      if (repliesEl) repliesEl.textContent = fmtK2OrInt(totalReplies);
-      if (remixesEl) remixesEl.textContent = fmt2(totalRemixes);
-      if (interEl) interEl.textContent = fmt2(totalInteractions);
-      // Update cameos and followers from user data (not post data)
-      if (cameosEl) {
-        const cameosArr = Array.isArray(user.cameos) ? user.cameos : [];
-        const lastCameo = cameosArr.length > 0 ? cameosArr[cameosArr.length - 1] : null;
-        cameosEl.textContent = lastCameo ? fmtK2OrInt(lastCameo.count) : '0';
-      }
-      if (followersEl) {
-        const followersArr = Array.isArray(user.followers) ? user.followers : [];
-        const lastFollower = followersArr.length > 0 ? followersArr[followersArr.length - 1] : null;
-        followersEl.textContent = lastFollower ? fmtK2OrInt(lastFollower.count) : '0';
-      }
-    } catch {}
+    return orderedPosts;
+  }
 
-    for (let i=0;i<orderedPosts.length;i++){
-      const p = orderedPosts[i];
-      if (p && p.__separator) {
-        const sep = document.createElement('div');
+  function computeVisibleSetForAction(user, actionId){
+    if (!user || !actionId) return null;
+    const isTopToday = isTopTodayKey(currentUserKey);
+    const posts = user.posts || {};
+    const makeSetFrom = (arr)=> {
+      const s = new Set();
+      arr.forEach(it=>{ if (it && it.pid) s.add(it.pid); });
+      return s;
+    };
+    if (actionId === 'showAll') return new Set(Object.keys(posts));
+    if (actionId === 'hideAll') return new Set();
+    if (actionId === 'pastDay' || actionId === 'pastWeek'){
+      const now = Date.now();
+      const windowMs = actionId === 'pastDay' ? (24 * 60 * 60 * 1000) : (7 * 24 * 60 * 60 * 1000);
+      const cutoff = now - windowMs;
+      const mapped = Object.entries(posts).map(([pid,p])=>({
+        pid,
+        postTime: (isTopToday ? (getPostTimeStrict(p) || getPostTimeForRecency(p)) : getPostTimeStrict(p)) || 0,
+        pidBI: pidBigInt(pid)
+      }));
+      const sorted = mapped.filter(x=>x.postTime>0 && x.postTime >= cutoff).sort((a,b)=>{
+        const dt = b.postTime - a.postTime;
+        if (dt !== 0) return dt;
+        if (a.pidBI === b.pidBI) return a.pid.localeCompare(b.pid);
+        return a.pidBI < b.pidBI ? 1 : -1;
+      });
+      return makeSetFrom(sorted);
+    }
+    if (actionId === 'last5' || actionId === 'last10'){
+      const mapped = Object.entries(posts).map(([pid,p])=>({
+        pid,
+        postTime: (isTopToday ? (getPostTimeStrict(p) || getPostTimeForRecency(p)) : getPostTimeStrict(p)) || 0,
+        pidBI: pidBigInt(pid)
+      }));
+      const withTs = mapped.filter(x=>x.postTime>0).sort((a,b)=>b.postTime - a.postTime);
+      const noTs = mapped.filter(x=>x.postTime<=0).sort((a,b)=>{
+        if (a.pidBI === b.pidBI) return a.pid.localeCompare(b.pid);
+        return a.pidBI < b.pidBI ? 1 : -1;
+      });
+      const sorted = withTs.concat(noTs);
+      return makeSetFrom(sorted.slice(0, actionId === 'last5' ? 5 : 10));
+    }
+    if (actionId === 'top5' || actionId === 'top10'){
+      const mapped = Object.entries(posts).map(([pid,p])=>{
+        const last = latestSnapshot(p.snapshots);
+        return {
+          pid,
+          views: num(last?.views),
+          likes: num(last?.likes),
+          postTime: getPostTimeStrict(p) || 0,
+          pidBI: pidBigInt(pid)
+        };
+      });
+      const sorted = mapped.sort((a,b)=>{
+        const dl = b.likes - a.likes;
+        if (dl !== 0) return dl;
+        const dv = b.views - a.views;
+        if (dv !== 0) return dv;
+        const dt = (b.postTime || 0) - (a.postTime || 0);
+        if (dt !== 0) return dt;
+        if (a.pidBI === b.pidBI) return b.pid.localeCompare(a.pid);
+        return a.pidBI < b.pidBI ? 1 : -1;
+      });
+      return makeSetFrom(sorted.slice(0, actionId === 'top5' ? 5 : 10));
+    }
+    if (actionId === 'bottom5' || actionId === 'bottom10'){
+      const now = Date.now();
+      const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
+      const mapped = Object.entries(posts).map(([pid,p])=>{
+        const postTime = (isTopToday ? (getPostTimeStrict(p) || getPostTimeForRecency(p)) : getPostTimeStrict(p)) || 0;
+        const ageMs = postTime ? now - postTime : Infinity;
+        const last = latestSnapshot(p.snapshots);
+        return {
+          pid,
+          postTime,
+          views: num(last?.views),
+          likes: num(last?.likes),
+          ageMs,
+          pidBI: pidBigInt(pid)
+        };
+      });
+      const pickCount = actionId === 'bottom5' ? 5 : 10;
+      const picked = (function(){
+        if (isTopToday){
+          const sorted = mapped.slice().sort((a,b)=>{
+            const dl = a.likes - b.likes;
+            if (dl !== 0) return dl;
+            const dv = a.views - b.views;
+            if (dv !== 0) return dv;
+            const dt = (a.postTime || 0) - (b.postTime || 0);
+            if (dt !== 0) return dt;
+            if (a.pidBI === b.pidBI) return a.pid.localeCompare(b.pid);
+            return a.pidBI < b.pidBI ? -1 : 1;
+          });
+          return sorted.slice(0, pickCount);
+        }
+        const olderThan24h = mapped.filter(x=>x.ageMs > TWENTY_FOUR_HOURS_MS);
+        const sortedOlder = olderThan24h.sort((a,b)=>{
+          const dl = a.likes - b.likes;
+          if (dl !== 0) return dl;
+          const dv = a.views - b.views;
+          if (dv !== 0) return dv;
+          const dt = (a.postTime || 0) - (b.postTime || 0);
+          if (dt !== 0) return dt;
+          if (a.pidBI === b.pidBI) return a.pid.localeCompare(b.pid);
+          return a.pidBI < b.pidBI ? -1 : 1;
+        });
+        const sortedAll = mapped.slice().sort((a,b)=>{
+          const dl = a.likes - b.likes;
+          if (dl !== 0) return dl;
+          const dv = a.views - b.views;
+          if (dv !== 0) return dv;
+          const dt = (a.postTime || 0) - (b.postTime || 0);
+          if (dt !== 0) return dt;
+          if (a.pidBI === b.pidBI) return a.pid.localeCompare(b.pid);
+          return a.pidBI < b.pidBI ? -1 : 1;
+        });
+        const out = [];
+        for (const it of sortedOlder) {
+          if (out.length >= pickCount) break;
+          out.push(it);
+        }
+        if (out.length < pickCount) {
+          const seen = new Set(out.map(p=>p.pid));
+          for (const it of sortedAll) {
+            if (out.length >= pickCount) break;
+            if (seen.has(it.pid)) continue;
+            out.push(it);
+          }
+        }
+        return out;
+      })();
+      return makeSetFrom(picked);
+    }
+    if (actionId === 'stale'){
+      const now = Date.now();
+      const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
+      const mapped = Object.entries(posts).map(([pid,p])=>{
+        const lastRefresh = lastRefreshMsForPost(p);
+        const ageMs = lastRefresh ? now - lastRefresh : Infinity;
+        return { pid, ageMs };
+      });
+      const stale = mapped.filter(x=>x.ageMs > TWENTY_FOUR_HOURS_MS);
+      return makeSetFrom(stale);
+    }
+    return null;
+  }
+
+  function applyPostRowUpdate(row, p, colorFor, visibleSet, opts){
+    const cache = row._sctCache || {};
+    row.dataset.pid = p.pid;
+    const thumbDiv = cache.thumbDiv || row.querySelector('.thumb');
+    const nextThumbUrl = p.thumb || DEFAULT_THUMB_URL;
+    if (thumbDiv) {
+      if (row._sctThumbUrl !== nextThumbUrl) {
+        const nextThumb = nextThumbUrl ? `url('${nextThumbUrl.replace(/'/g,"%27")}')` : '';
+        thumbDiv.style.backgroundImage = nextThumb;
+        row._sctThumbUrl = nextThumbUrl;
+      }
+      const dotDiv = cache.dotDiv || thumbDiv.querySelector('.dot');
+      if (dotDiv && typeof colorFor === 'function') {
+        const nextColor = colorFor(p.pid);
+        if (dotDiv.style.background !== nextColor) dotDiv.style.background = nextColor;
+      }
+    }
+    const link = cache.link || row.querySelector('.id a');
+    if (link) {
+      if (link.href !== p.url) link.href = p.url;
+      if (link.title !== p.title) link.title = p.title;
+      const labelKey = buildPostLabelKey(p);
+      if (row._sctLabelKey !== labelKey) {
+        buildPostLinkContent(link, p);
+        row._sctLabelKey = labelKey;
+      }
+    }
+    const statsDiv = cache.statsDiv || row.querySelector('.stats');
+    if (statsDiv) {
+      const nextStats = `Unique ${fmt(p.last?.uv)} • Likes ${fmt(p.last?.likes)} • IR ${p.rate==null?'-':p.rate.toFixed(1)+'%'}`;
+      if (statsDiv.textContent !== nextStats) statsDiv.textContent = nextStats;
+    }
+    const toggleDiv = cache.toggleDiv || row.querySelector('.toggle');
+    if (toggleDiv) {
+      toggleDiv.dataset.pid = p.pid;
+      if (visibleSet && !visibleSet.has(p.pid)) {
+        row.classList.add('hidden');
+        if (toggleDiv.textContent !== 'Show') toggleDiv.textContent = 'Show';
+      } else {
+        row.classList.remove('hidden');
+        if (toggleDiv.textContent !== 'Hide') toggleDiv.textContent = 'Hide';
+      }
+    }
+    row._sctPurgeSnippet = truncateForPurgeCaption(p.caption || p.label || p.pid);
+    if (opts && typeof opts.onPurge === 'function') row._sctOnPurge = opts.onPurge;
+  }
+
+  function createPostRow(p, colorFor, visibleSet, opts){
+    const row = document.createElement('div');
+    row.className = 'post';
+    row.dataset.pid = p.pid;
+    const color = typeof colorFor === 'function' ? colorFor(p.pid) : COLORS[0];
+    const thumbUrl = p.thumb || DEFAULT_THUMB_URL;
+
+    const thumbDiv = document.createElement('div');
+    thumbDiv.className = 'thumb';
+    if (thumbUrl) thumbDiv.style.backgroundImage = `url('${thumbUrl.replace(/'/g,"%27")}')`;
+    const dotDiv = document.createElement('div');
+    dotDiv.className = 'dot';
+    dotDiv.style.background = color;
+    thumbDiv.appendChild(dotDiv);
+
+    const metaDiv = document.createElement('div');
+    metaDiv.className = 'meta';
+
+    const idDiv = document.createElement('div');
+    idDiv.className = 'id';
+    const link = document.createElement('a');
+    link.href = p.url;
+    link.target = '_blank';
+    link.rel = 'noopener';
+    link.title = p.title;
+    buildPostLinkContent(link, p);
+    idDiv.appendChild(link);
+
+    const statsDiv = document.createElement('div');
+    statsDiv.className = 'stats';
+    statsDiv.textContent = `Unique ${fmt(p.last?.uv)} • Likes ${fmt(p.last?.likes)} • IR ${p.rate==null?'-':p.rate.toFixed(1)+'%'}`;
+
+    metaDiv.appendChild(idDiv);
+    metaDiv.appendChild(statsDiv);
+
+    const toggleDiv = document.createElement('div');
+    toggleDiv.className = 'toggle';
+    toggleDiv.dataset.pid = p.pid;
+    toggleDiv.textContent = 'Hide';
+
+    const purgeBtn = document.createElement('button');
+    purgeBtn.type = 'button';
+    purgeBtn.className = 'post-purge-btn';
+    purgeBtn.title = 'Purge data for this post';
+    purgeBtn.textContent = '×';
+    purgeBtn.addEventListener('click', (e)=>{
+      e.preventDefault();
+      e.stopPropagation();
+      const snippet = row._sctPurgeSnippet || truncateForPurgeCaption(p.caption || p.label || p.pid);
+      const onPurge = row._sctOnPurge;
+      if (onPurge) onPurge(p.pid, snippet);
+    });
+
+    row.appendChild(thumbDiv);
+    row.appendChild(metaDiv);
+    row.appendChild(toggleDiv);
+    row.appendChild(purgeBtn);
+    row._sctCache = { thumbDiv, dotDiv, link, statsDiv, toggleDiv };
+    row._sctLabelKey = buildPostLabelKey(p);
+    row._sctThumbUrl = thumbUrl;
+    row._sctPurgeSnippet = truncateForPurgeCaption(p.caption || p.label || p.pid);
+    if (opts && typeof opts.onPurge === 'function') row._sctOnPurge = opts.onPurge;
+
+    if (visibleSet && !visibleSet.has(p.pid)) { row.classList.add('hidden'); toggleDiv.textContent = 'Show'; }
+    return row;
+  }
+
+  function syncPostsListRows(user, orderedPosts, colorFor, visibleSet, opts={}){
+    const wrap = $('#posts');
+    if (!wrap || !user) return false;
+    wrap._sctOnHover = typeof opts.onHover === 'function' ? opts.onHover : null;
+    wrap._sctSeparatorContext = { user };
+
+    const prevRects = new Map();
+    const animTargets = Array.from(wrap.querySelectorAll('.post, .posts-separator'));
+    for (const el of animTargets) {
+      prevRects.set(el, el.getBoundingClientRect());
+    }
+
+    const existingSeps = Array.from(wrap.querySelectorAll('.posts-separator'));
+    const reusableSep = existingSeps.shift() || null;
+    existingSeps.forEach((el)=> el.remove());
+    const existingRows = new Map();
+    Array.from(wrap.querySelectorAll('.post')).forEach((row)=> existingRows.set(row.dataset.pid, row));
+    const used = new Set();
+    const abovePids = [];
+    let separatorUsed = false;
+    for (const item of orderedPosts){
+      if (item && item.__separator) {
+        const sep = reusableSep || document.createElement('div');
         sep.className = 'posts-separator';
+        sep.innerHTML = '';
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'posts-separator-btn';
+        if (abovePids.length && abovePids.length <= 20) {
+          btn.textContent = `Open ${abovePids.length} Above`;
+          btn.dataset.pids = JSON.stringify(abovePids);
+          sep.appendChild(btn);
+        } else if (!abovePids.length) {
+          btn.textContent = 'No Results';
+          btn.disabled = true;
+          btn.style.cursor = 'default';
+          btn.classList.add('no-results');
+          sep.appendChild(btn);
+        } else {
+          sep.classList.add('no-button');
+        }
         wrap.appendChild(sep);
+        separatorUsed = true;
         continue;
       }
-      const row = document.createElement('div');
-      row.className='post';
-      row.dataset.pid = p.pid;
-      const color = typeof colorFor === 'function' ? colorFor(p.pid) : COLORS[i % COLORS.length];
-      const thumbStyle = p.thumb ? `background-image:url('${p.thumb.replace(/'/g,"%27")}')` : '';
-      
-      // Create thumb div
-      const thumbDiv = document.createElement('div');
-      thumbDiv.className = 'thumb';
-      thumbDiv.style.cssText = thumbStyle;
-      const dotDiv = document.createElement('div');
-      dotDiv.className = 'dot';
-      dotDiv.style.background = color;
-      thumbDiv.appendChild(dotDiv);
-      
-      // Create meta div
-      const metaDiv = document.createElement('div');
-      metaDiv.className = 'meta';
-      
-      // Create id div with link
-      const idDiv = document.createElement('div');
-      idDiv.className = 'id';
-      const link = document.createElement('a');
-      link.href = p.url;
-      link.target = '_blank';
-      link.rel = 'noopener';
-      link.title = p.title;
-      
-      // Build link content with styled spans
-      if (p.owner) {
-        const ownerSpan = document.createElement('span');
-        ownerSpan.textContent = p.owner;
-        ownerSpan.style.fontWeight = '800';
-        link.appendChild(ownerSpan);
-        
-        if (p.cameos && p.cameos.length > 0) {
-          const cameoWord = document.createElement('span');
-          cameoWord.textContent = ' cast ';
-          cameoWord.style.fontWeight = '300';
-          link.appendChild(cameoWord);
-          
-          p.cameos.forEach((cameo, idx) => {
-            const cameoSpan = document.createElement('span');
-            cameoSpan.textContent = cameo;
-            cameoSpan.style.fontWeight = '800';
-            link.appendChild(cameoSpan);
-            
-            if (idx < p.cameos.length - 1) {
-              const comma = document.createElement('span');
-              comma.textContent = ', ';
-              comma.style.fontWeight = '300';
-              link.appendChild(comma);
-            }
+      const row = existingRows.get(item.pid) || createPostRow(item, colorFor, visibleSet, opts);
+      applyPostRowUpdate(row, item, colorFor, visibleSet, opts);
+      wrap.appendChild(row);
+      used.add(item.pid);
+      abovePids.push(item.pid);
+    }
+    for (const [pid, row] of existingRows){
+      if (!used.has(pid)) row.remove();
+    }
+    if (!separatorUsed && reusableSep) reusableSep.remove();
+
+    // If no separator used and no rows below, append an empty separator at end for consistent UI
+    if (!separatorUsed) {
+      const sep = reusableSep || document.createElement('div');
+      sep.className = 'posts-separator';
+      sep.innerHTML = '';
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'posts-separator-btn';
+      if (abovePids.length && abovePids.length <= 20) {
+        btn.textContent = `Open ${abovePids.length} Above`;
+        btn.dataset.pids = JSON.stringify(abovePids);
+        sep.appendChild(btn);
+      } else if (!abovePids.length) {
+        btn.textContent = 'No Results';
+        btn.disabled = true;
+        sep.appendChild(btn);
+      } else {
+        sep.classList.add('no-button');
+      }
+      wrap.appendChild(sep);
+    }
+
+    if (prevRects.size > 0) {
+      requestAnimationFrame(()=>{
+        for (const el of animTargets) {
+          const prev = prevRects.get(el);
+          if (!prev || !document.body.contains(el)) continue;
+          const next = el.getBoundingClientRect();
+          const dx = prev.left - next.left;
+          const dy = prev.top - next.top;
+          if (!dx && !dy) continue;
+          el.style.transition = 'none';
+          el.style.transform = `translate(${dx}px, ${dy}px)`;
+          requestAnimationFrame(()=>{
+            el.style.transition = '';
+            el.style.transform = '';
           });
         }
-        
-        const sep = document.createElement('span');
-        sep.textContent = ' - ';
-        sep.style.fontWeight = '300';
-        link.appendChild(sep);
-        
-        const captionSpan = document.createElement('span');
-        captionSpan.textContent = p.caption || p.pid;
-        captionSpan.style.fontWeight = '300';
-        link.appendChild(captionSpan);
-      } else {
-        const captionSpan = document.createElement('span');
-        captionSpan.textContent = p.caption || p.pid;
-        captionSpan.style.fontWeight = '300';
-        link.appendChild(captionSpan);
-      }
-      
-      idDiv.appendChild(link);
-      
-      // Create stats div
-      const statsDiv = document.createElement('div');
-      statsDiv.className = 'stats';
-      statsDiv.textContent = `Unique ${fmt(p.last?.uv)} • Likes ${fmt(p.last?.likes)} • IR ${p.rate==null?'-':p.rate.toFixed(1)+'%'}`;
-      
-      metaDiv.appendChild(idDiv);
-      metaDiv.appendChild(statsDiv);
-      
-      // Create toggle div
-      const toggleDiv = document.createElement('div');
-      toggleDiv.className = 'toggle';
-      toggleDiv.dataset.pid = p.pid;
-      toggleDiv.textContent = 'Hide';
+      });
+    }
 
-      // Create purge button (shown on hover)
-      const purgeBtn = document.createElement('button');
-      purgeBtn.type = 'button';
-      purgeBtn.className = 'post-purge-btn';
-      purgeBtn.title = 'Purge data for this post';
-      purgeBtn.textContent = '×';
-      purgeBtn.addEventListener('click', (e)=>{
+    updateSummaryMetrics(user, visibleSet);
+
+    if (!wrap._sctHoverBound){
+      wrap._sctHoverBound = true;
+      wrap.addEventListener('mouseover', (e)=>{
+        const el = e.target.closest('.post');
+        if (!el) return;
+        wrap.classList.add('is-hovering');
+        $$('.post', wrap).forEach(r=>r.classList.remove('hover'));
+        el.classList.add('hover');
+        if (wrap._sctOnHover) wrap._sctOnHover(el.dataset.pid);
+      });
+      wrap.addEventListener('mouseleave', ()=>{
+        wrap.classList.remove('is-hovering');
+        $$('.post', wrap).forEach(r=>r.classList.remove('hover'));
+        if (wrap._sctOnHover) wrap._sctOnHover(null);
+      });
+    }
+    if (!wrap._sctSeparatorBound){
+      wrap._sctSeparatorBound = true;
+      wrap.addEventListener('click', (e)=>{
+        const btn = e.target.closest('.posts-separator-btn');
+        if (!btn || !wrap.contains(btn)) return;
         e.preventDefault();
         e.stopPropagation();
-        const snippet = truncateForPurgeCaption(p.caption || p.label || p.pid);
-        if (opts.onPurge) opts.onPurge(p.pid, snippet);
+        let pids = [];
+        const raw = btn.dataset.pids;
+        if (raw) {
+          try { pids = JSON.parse(raw); } catch { pids = raw.split(',').map(s=>s.trim()).filter(Boolean); }
+        }
+        const ctx = wrap._sctSeparatorContext;
+        const user = ctx?.user;
+        if (!user || !pids.length) return;
+        for (const pid of pids) {
+          const url = absUrl(user.posts?.[pid]?.url, pid);
+          if (url) window.open(url, '_blank');
+        }
       });
-      
-      row.appendChild(thumbDiv);
-      row.appendChild(metaDiv);
-      row.appendChild(toggleDiv);
-      row.appendChild(purgeBtn);
-      
-      if (visibleSet && !visibleSet.has(p.pid)) { row.classList.add('hidden'); toggleDiv.textContent = 'Show'; }
-      wrap.appendChild(row);
     }
-    // Hover interactions to dim non-hovered rows and sync chart highlight
-    wrap.addEventListener('mouseover', (e)=>{
-      const el = e.target.closest('.post');
-      if (!el) return;
-      wrap.classList.add('is-hovering');
-      $$('.post', wrap).forEach(r=>r.classList.remove('hover'));
-      el.classList.add('hover');
-      if (opts.onHover) opts.onHover(el.dataset.pid);
-    });
-    wrap.addEventListener('mouseleave', ()=>{
-      wrap.classList.remove('is-hovering');
-      $$('.post', wrap).forEach(r=>r.classList.remove('hover'));
-      if (opts.onHover) opts.onHover(null);
-    });
+    return true;
+  }
+
+  function buildPostsList(user, colorFor, visibleSet, opts={}){
+    const wrap = $('#posts');
+    if (!wrap) return;
+    if (!user) {
+      wrap.innerHTML = '';
+      return;
+    }
+    const orderedPosts = computeOrderedPosts(user, visibleSet, opts.activeActionId || null);
+    syncPostsListRows(user, orderedPosts, colorFor, visibleSet, opts);
+  }
+
+  function updatePostsListRows(user, colorFor, visibleSet, opts={}){
+    if (!user) return false;
+    const orderedPosts = computeOrderedPosts(user, visibleSet, opts.activeActionId || null);
+    return syncPostsListRows(user, orderedPosts, colorFor, visibleSet, opts);
   }
 
   function computeTotalsForUser(user){
@@ -842,6 +1526,31 @@
     return res;
   }
 
+  function safeGetDomain(chart){
+    try {
+      return chart && typeof chart.getDomain === 'function' ? chart.getDomain() : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function expandZoomRightIfAtEdge(chart, prevDomain, newDomain){
+    try {
+      if (!chart || !prevDomain?.x || !newDomain?.x) return;
+      const z = chart.getZoom();
+      if (!z || !z.x) return;
+      const prevMax = prevDomain.x[1];
+      const newMax = newDomain.x[1];
+      const span = prevDomain.x[1] - prevDomain.x[0];
+      if (!isFinite(prevMax) || !isFinite(newMax) || !isFinite(span) || span <= 0) return;
+      if (newMax <= prevMax) return;
+      const eps = Math.max(span * 0.002, 1);
+      if (Math.abs(z.x[1] - prevMax) <= eps) {
+        chart.setZoom({ x: [z.x[0], newMax], y: z.y });
+      }
+    } catch {}
+  }
+
   function computeSeriesForUser(user, selectedPIDs, colorFor, useUniqueViews = true){
     const series=[];
     const entries = Object.entries(user.posts||{});
@@ -862,10 +1571,17 @@
   }
 
   function makeColorMap(user){
-    const pids = Object.keys(user.posts||{}).sort();
+    const key = user?.__specialKey || user?.handle || 'default';
+    if (!makeColorMap.cache) makeColorMap.cache = new Map();
+    const ids = Object.keys(user.posts||{}).sort();
+    const cacheKey = key + '::' + ids.join(',');
+    if (makeColorMap.cache.has(cacheKey)) return makeColorMap.cache.get(cacheKey);
     const map = new Map();
-    pids.forEach((pid, idx)=> map.set(pid, COLORS[idx % COLORS.length]));
-    return (pid) => map.get(pid) || COLORS[0];
+    ids.forEach((pid, idx)=> map.set(pid, COLORS[idx % COLORS.length]));
+    const fn = (pid) => map.get(pid) || COLORS[0];
+    makeColorMap.cache.clear(); // keep cache bounded; only one entry needed per current state
+    makeColorMap.cache.set(cacheKey, fn);
+    return fn;
   }
 
   function extent(arr, acc){
@@ -897,7 +1613,7 @@
     function setData(series){
       state.series = series.map(s=>({
         ...s,
-        points: [...s.points].sort((a,b)=>a.t-b.t)
+        points: ensureSortedPoints(s.points || [])
       }));
       const xs=[], ys=[];
       for (const s of state.series){
@@ -1065,6 +1781,7 @@
     }
 
     function showTooltip(h, clientX, clientY){
+      ensureTooltipInBody(tooltip);
       if (!h){ tooltip.style.display='none'; return; }
       tooltip.style.display='block';
       // Truncate label if longer than 150 chars (allow wrapping to multiple lines)
@@ -1073,17 +1790,20 @@
         labelText = labelText.substring(0, 150) + '...';
       }
       const header = `<div style="display:flex;align-items:flex-start;gap:6px"><span class="dot" style="background:${h.color};flex-shrink:0;margin-top:2px"></span><strong title="${esc(h.label||h.pid)}" style="word-wrap:break-word;overflow-wrap:break-word">${esc(labelText)}</strong></div>`;
-      const body = `<div>${tooltipLabel}: ${fmt(h.x)} • IR: ${h.y.toFixed(1)}%</div>`;
+      const engagements = Math.round(h.x * (h.y / 100));
+      const viewsLabel = Math.round(h.x) === 1 ? 'view' : 'views';
+      const engagementsLabel = engagements === 1 ? 'engagement' : 'engagements';
+      const body = `<div class="tooltip-stats">${fmt(h.x)} ${viewsLabel} • ${h.y.toFixed(1)}% IR • ${fmt(engagements)} ${engagementsLabel}</div>`;
       tooltip.innerHTML = header + body;
       const vw = window.innerWidth || document.documentElement.clientWidth || 0;
       const width = tooltip.offsetWidth || 0;
-      let left = clientX + 12;
+      let left = clientX + 8;
       if (left + width > vw - 8){
-        left = clientX - 12 - width;
+        left = clientX - 8 - width;
         if (left < 8) left = 8;
       }
       tooltip.style.left = left + 'px';
-      tooltip.style.top  = (clientY + 12) + 'px';
+      tooltip.style.top  = (clientY + 8) + 'px';
     }
 
     function handleMouseMove(e){
@@ -1093,7 +1813,7 @@
         const rect = canvas.getBoundingClientRect();
         const mx = (e.clientX - rect.left) * (canvas.width/rect.width) / DPR;
         const my = (e.clientY - rect.top) * (canvas.height/rect.height) / DPR;
-        if (drag){ drag.x1 = mx; drag.y1 = my; draw(); drawDragRect(drag); showTooltip(null); return; }
+        if (drag){ updateDragFromEvent(e); return; }
         const h = nearest(mx,my);
         let lineHover = null;
         if (!h) {
@@ -1126,10 +1846,33 @@
 
     // Zoom drag state
     let drag = null; // {x0,y0,x1,y1}
+    let dragRaf = 0;
+    let lastDragPos = null;
+
+    function updateDragFromEvent(e){
+      if (!drag || !e) return;
+      lastDragPos = { x: e.clientX, y: e.clientY };
+      if (dragRaf) return;
+      dragRaf = requestAnimationFrame(() => {
+        dragRaf = 0;
+        if (!drag || !lastDragPos) return;
+        const rect = canvas.getBoundingClientRect();
+        const mx = (lastDragPos.x - rect.left) * (canvas.width / rect.width) / DPR;
+        const my = (lastDragPos.y - rect.top) * (canvas.height / rect.height) / DPR;
+        drag.x1 = mx;
+        drag.y1 = my;
+        draw();
+        drawDragRect(drag);
+        showTooltip(null);
+      });
+    }
 
     canvas.addEventListener('mousemove', handleMouseMove);
-    canvas.addEventListener('mouseleave', ()=>{ rafPending = null; lastHover = null; state.hover=null; state.hoverSeries=null; if (hoverCb) hoverCb(null); draw(); showTooltip(null); });
+    window.addEventListener('mousemove', (e)=>{ if (drag) updateDragFromEvent(e); });
+    canvas.addEventListener('mouseleave', ()=>{ rafPending = null; lastHover = null; state.hover=null; state.hoverSeries=null; if (hoverCb) hoverCb(null); draw(); if (drag) drawDragRect(drag); showTooltip(null); });
     canvas.addEventListener('click', (e)=>{
+      // Skip link opens immediately after a drag selection
+      if (drag) return;
       if (state.hover && state.hover.url) {
         window.open(state.hover.url, '_blank');
         return;
@@ -1196,9 +1939,10 @@
     function setHoverSeries(pid){ state.hoverSeries = pid || null; draw(); }
     function onHover(cb){ hoverCb = cb; }
     function getZoom(){ return { x: state.zoomX ? [...state.zoomX] : null, y: state.zoomY ? [...state.zoomY] : null }; }
+    function getDomain(){ return { x: state.x ? [...state.x] : null, y: state.y ? [...state.y] : null }; }
     function setZoom(z){ if (!z) return; if (z.x && isFinite(z.x[0]) && isFinite(z.x[1])) state.zoomX = [z.x[0], z.x[1]]; if (z.y && isFinite(z.y[0]) && isFinite(z.y[1])) state.zoomY = [z.y[0], z.y[1]]; draw(); }
     function setAxisLabels(xAxis, tooltip){ xAxisLabel = xAxis; tooltipLabel = tooltip; draw(); }
-    return { setData, resetZoom, setHoverSeries, onHover, getZoom, setZoom, setAxisLabels };
+    return { setData, resetZoom, setHoverSeries, onHover, getZoom, getDomain, setZoom, setAxisLabels };
   }
 
 function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = 'Views', yFmt = fmt){
@@ -1413,16 +2157,17 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     let lastHover = null;
     
     function showTooltip(h, clientX, clientY, comparisonData){
+      ensureTooltipInBody(tooltip);
       if (comparisonData){
         const diff = Math.abs(comparisonData.top.val - comparisonData.bottom.val);
         const unit = yAxisLabel || 'Views';
-        const unitLower = singularize(unit.toLowerCase());
+        const unitLower = unitLabelForValue(unit, diff);
         const isViewsPerPerson = unit === 'Views Per Person';
         const diffFormatted = isViewsPerPerson ? Number(diff).toFixed(2) : fmt(Math.ceil(diff));
         const topColor = comparisonData.top.series.color || '#7dc4ff';
         const bottomColor = comparisonData.bottom.series.color || '#7dc4ff';
         tooltip.style.display='block';
-        tooltip.innerHTML = `<div style="display:flex;align-items:center;gap:8px">
+        tooltip.innerHTML = `<div class="tooltip-stats-row">
           <div style="position:relative;width:20px;height:20px;">
             <span class="dot" style="position:absolute;left:0;top:0;width:16px;height:16px;background:${topColor};z-index:2;"></span>
             <span class="dot" style="position:absolute;left:8px;top:0;width:16px;height:16px;background:${bottomColor};z-index:1;"></span>
@@ -1431,13 +2176,13 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         </div>`;
         const vw = window.innerWidth || document.documentElement.clientWidth || 0;
         const width = tooltip.offsetWidth || 0;
-        let left = clientX + 12;
+        let left = clientX + 8;
         if (left + width > vw - 8){
-          left = clientX - 12 - width;
+          left = clientX - 8 - width;
           if (left < 8) left = 8;
         }
         tooltip.style.left = left + 'px';
-        tooltip.style.top = (clientY + 12) + 'px';
+        tooltip.style.top = (clientY + 8) + 'px';
         return;
       }
       if (!h){ tooltip.style.display='none'; return; }
@@ -1448,11 +2193,11 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         let handle = h.label || h.pid || '';
         handle = handle.replace(/'s (Views|Likes|Cast in|Followers)$/i, '').trim();
         if (!handle.startsWith('@')) handle = '@' + handle;
-        const unit = yAxisLabel || 'Views';
-        const unitLower = unit.toLowerCase();
+        const rawUnit = yAxisLabel || 'Views';
+        const unit = (/views/i.test(rawUnit) && !/views per person/i.test(rawUnit)) ? 'Views' : rawUnit;
+        const unitLower = unitLabelForValue(unit, Number(h.y));
         const dateStr = fmtDateTime(h.x);
-        // Format number with commas
-        const numStr = Math.round(h.y).toLocaleString();
+        const numStr = yFmt(h.y);
         // Truncate handle if longer than 150 chars (allow wrapping to multiple lines)
         let displayHandle = handle;
         let displayText = `${displayHandle} ${numStr} ${unitLower}`;
@@ -1463,7 +2208,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
             displayText = displayText.substring(0, 150) + '...';
           }
         }
-        tooltip.innerHTML = `<div style="display:flex;align-items:flex-start;gap:6px"><span class="dot" style="background:${h.color};flex-shrink:0;margin-top:2px"></span><strong title="${esc(handle)} ${numStr} ${unitLower}" style="word-wrap:break-word;overflow-wrap:break-word">${esc(displayText)}</strong></div><div style="color:#a7b0ba;font-size:11px;margin-top:2px">on ${dateStr}</div>`;
+        tooltip.innerHTML = `<div style="display:flex;align-items:flex-start;gap:6px"><span class="dot" style="background:${h.color};flex-shrink:0;margin-top:2px"></span><strong title="${esc(handle)} ${numStr} ${unitLower}" style="word-wrap:break-word;overflow-wrap:break-word">${esc(displayText)}</strong></div><div class="tooltip-subtext">on ${dateStr}</div>`;
       } else {
         // Truncate label if longer than 150 chars (allow wrapping to multiple lines)
         let labelText = h.label || h.pid || '';
@@ -1471,19 +2216,21 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           labelText = labelText.substring(0, 150) + '...';
         }
         const header = `<div style="display:flex;align-items:flex-start;gap:6px"><span class="dot" style="background:${h.color};flex-shrink:0;margin-top:2px"></span><strong title="${esc(h.label||h.pid)}" style="word-wrap:break-word;overflow-wrap:break-word">${esc(labelText)}</strong></div>`;
-        const unit = yAxisLabel || 'Views';
-        const body = `<div>${fmtDateTime(h.x)} • ${unit}: ${yFmt(h.y)}</div>`;
+        const rawUnit = yAxisLabel || 'Views';
+        const unit = (/views/i.test(rawUnit) && !/views per person/i.test(rawUnit)) ? 'Views' : rawUnit;
+        const unitLower = unitLabelForValue(unit, Number(h.y));
+        const body = `<div class="tooltip-stats">${fmtDateTime(h.x)} • ${yFmt(h.y)} ${unitLower}</div>`;
         tooltip.innerHTML = header + body;
       }
       const vw = window.innerWidth || document.documentElement.clientWidth || 0;
       const width = tooltip.offsetWidth || 0;
-      let left = clientX + 12;
+      let left = clientX + 8;
       if (left + width > vw - 8){
-        left = clientX - 12 - width;
+        left = clientX - 8 - width;
         if (left < 8) left = 8;
       }
       tooltip.style.left = left + 'px';
-      tooltip.style.top = (clientY + 12) + 'px';
+      tooltip.style.top = (clientY + 8) + 'px';
     }
     
     function handleMouseMove(e){
@@ -1492,7 +2239,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         rafPending = null;
         const rect=canvas.getBoundingClientRect();
         const mx=(e.clientX-rect.left)*(canvas.width/rect.width)/DPR; const my=(e.clientY-rect.top)*(canvas.height/rect.height)/DPR;
-        if (drag){ drag.x1=mx; drag.y1=my; draw(); drawDragRect(drag); showTooltip(null); state.comparisonLine=null; return; }
+        if (drag){ updateDragFromEvent(e); return; }
         
         const h = nearest(mx,my);
         let lineHover = null;
@@ -1543,8 +2290,30 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     }
     
     let drag=null;
+    let dragRaf = 0;
+    let lastDragPos = null;
+
+    function updateDragFromEvent(e){
+      if (!drag || !e) return;
+      lastDragPos = { x: e.clientX, y: e.clientY };
+      if (dragRaf) return;
+      dragRaf = requestAnimationFrame(() => {
+        dragRaf = 0;
+        if (!drag || !lastDragPos) return;
+        const rect = canvas.getBoundingClientRect();
+        const mx = (lastDragPos.x - rect.left) * (canvas.width / rect.width) / DPR;
+        const my = (lastDragPos.y - rect.top) * (canvas.height / rect.height) / DPR;
+        drag.x1 = mx;
+        drag.y1 = my;
+        state.comparisonLine = null;
+        draw();
+        drawDragRect(drag);
+        showTooltip(null);
+      });
+    }
     canvas.addEventListener('mousemove', handleMouseMove);
-    canvas.addEventListener('mouseleave', ()=>{ rafPending = null; lastHover = null; state.hover=null; state.hoverSeries=null; state.comparisonLine=null; if (hoverCb) hoverCb(null); draw(); showTooltip(null); });
+    window.addEventListener('mousemove', (e)=>{ if (drag) updateDragFromEvent(e); });
+    canvas.addEventListener('mouseleave', ()=>{ rafPending = null; lastHover = null; state.hover=null; state.hoverSeries=null; state.comparisonLine=null; if (hoverCb) hoverCb(null); draw(); if (drag) drawDragRect(drag); showTooltip(null); });
     // Track recent double-click to avoid opening posts while resetting zoom
     let lastDblClickTs = 0;
     canvas.addEventListener('dblclick', ()=>{ lastDblClickTs = Date.now(); state.zoomX=null; state.zoomY=null; draw(); });
@@ -1630,9 +2399,10 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     function setHoverSeries(pid){ state.hoverSeries=pid||null; draw(); }
     function onHover(cb){ hoverCb=cb; }
     function getZoom(){ return { x: state.zoomX ? [...state.zoomX] : null, y: state.zoomY ? [...state.zoomY] : null }; }
+    function getDomain(){ return { x: state.x ? [...state.x] : null, y: state.y ? [...state.y] : null }; }
     function setZoom(z){ if (!z) return; if (z.x && isFinite(z.x[0]) && isFinite(z.x[1])) state.zoomX = [z.x[0], z.x[1]]; if (z.y && isFinite(z.y[0]) && isFinite(z.y[1])) state.zoomY = [z.y[0], z.y[1]]; draw(); }
     function setYAxisLabel(label){ yAxisLabel = label; draw(); }
-    return { setData, resetZoom, setHoverSeries, onHover, getZoom, setZoom, setYAxisLabel };
+    return { setData, resetZoom, setHoverSeries, onHover, getZoom, getDomain, setZoom, setYAxisLabel };
   }
 
   // First 24 hours views chart (x-axis = minutes since post creation, y-axis = views)
@@ -1853,16 +2623,17 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     let lastHover = null;
     
     function showTooltip(h, clientX, clientY, comparisonData){
+      ensureTooltipInBody(tooltip);
       if (comparisonData){
         const diff = Math.abs(comparisonData.top.val - comparisonData.bottom.val);
         const unit = yAxisLabel || 'Views';
-        const unitLower = singularize(unit.toLowerCase());
+        const unitLower = unitLabelForValue(unit, diff);
         const isViewsPerPerson = unit === 'Views Per Person';
         const diffFormatted = isViewsPerPerson ? Number(diff).toFixed(2) : fmt(Math.ceil(diff));
         const topColor = comparisonData.top.series.color || '#7dc4ff';
         const bottomColor = comparisonData.bottom.series.color || '#7dc4ff';
         tooltip.style.display='block';
-        tooltip.innerHTML = `<div style="display:flex;align-items:center;gap:8px">
+        tooltip.innerHTML = `<div class="tooltip-stats-row">
           <div style="position:relative;width:20px;height:20px;">
             <span class="dot" style="position:absolute;left:0;top:0;width:16px;height:16px;background:${topColor};z-index:2;"></span>
             <span class="dot" style="position:absolute;left:8px;top:0;width:16px;height:16px;background:${bottomColor};z-index:1;"></span>
@@ -1871,13 +2642,13 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         </div>`;
         const vw = window.innerWidth || document.documentElement.clientWidth || 0;
         const width = tooltip.offsetWidth || 0;
-        let left = clientX + 12;
+        let left = clientX + 8;
         if (left + width > vw - 8){
-          left = clientX - 12 - width;
+          left = clientX - 8 - width;
           if (left < 8) left = 8;
         }
         tooltip.style.left = left + 'px';
-        tooltip.style.top = (clientY + 12) + 'px';
+        tooltip.style.top = (clientY + 8) + 'px';
         return;
       }
       if (!h){ tooltip.style.display='none'; return; }
@@ -1886,16 +2657,17 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         let handle = h.label || h.pid || '';
         handle = handle.replace(/'s (Views|Likes|Cast in|Followers)$/i, '').trim();
         if (!handle.startsWith('@')) handle = '@' + handle;
-        const unit = yAxisLabel || 'Unique Views';
-        const unitLower = unit.toLowerCase();
+        const rawUnit = yAxisLabel || 'Views';
+        const unit = (/views/i.test(rawUnit) && !/views per person/i.test(rawUnit)) ? 'Views' : rawUnit;
+        const unitLower = unitLabelForValue(unit, Number(h.y));
         const timeStr = fmtTime(h.minutesSinceCreation || 0);
-        const numStr = Math.round(h.y).toLocaleString();
+        const numStr = yFmt(h.y);
         // Truncate if longer than 150 chars (allow wrapping to multiple lines)
         let displayText = `${handle} ${numStr} ${unitLower}`;
         if (displayText.length > 150) {
           displayText = displayText.substring(0, 150) + '...';
         }
-        tooltip.innerHTML = `<div style="display:flex;align-items:flex-start;gap:6px"><span class="dot" style="background:${h.color};flex-shrink:0;margin-top:2px"></span><strong title="${esc(handle)} ${numStr} ${unitLower}" style="word-wrap:break-word;overflow-wrap:break-word">${esc(displayText)}</strong></div><div style="color:#a7b0ba;font-size:11px;margin-top:2px">${timeStr} after creation</div>`;
+        tooltip.innerHTML = `<div style="display:flex;align-items:flex-start;gap:6px"><span class="dot" style="background:${h.color};flex-shrink:0;margin-top:2px"></span><strong title="${esc(handle)} ${numStr} ${unitLower}" style="word-wrap:break-word;overflow-wrap:break-word">${esc(displayText)}</strong></div><div class="tooltip-subtext">${timeStr} after creation</div>`;
       } else {
         // Truncate label if longer than 150 chars (allow wrapping to multiple lines)
         let labelText = h.label || h.pid || '';
@@ -1903,20 +2675,22 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           labelText = labelText.substring(0, 150) + '...';
         }
         const header = `<div style="display:flex;align-items:flex-start;gap:6px"><span class="dot" style="background:${h.color};flex-shrink:0;margin-top:2px"></span><strong title="${esc(h.label||h.pid)}" style="word-wrap:break-word;overflow-wrap:break-word">${esc(labelText)}</strong></div>`;
-        const unit = yAxisLabel || 'Unique Views';
+        const rawUnit = yAxisLabel || 'Views';
+        const unit = (/views/i.test(rawUnit) && !/views per person/i.test(rawUnit)) ? 'Views' : rawUnit;
         const timeStr = fmtTime(h.minutesSinceCreation || 0);
-        const body = `<div>${timeStr} after creation • ${unit}: ${yFmt(h.y)}</div>`;
+        const unitLower = unitLabelForValue(unit, Number(h.y));
+        const body = `<div class="tooltip-stats">${timeStr} after creation • ${yFmt(h.y)} ${unitLower}</div>`;
         tooltip.innerHTML = header + body;
       }
       const vw = window.innerWidth || document.documentElement.clientWidth || 0;
       const width = tooltip.offsetWidth || 0;
-      let left = clientX + 12;
+      let left = clientX + 8;
       if (left + width > vw - 8){
-        left = clientX - 12 - width;
+        left = clientX - 8 - width;
         if (left < 8) left = 8;
       }
       tooltip.style.left = left + 'px';
-      tooltip.style.top = (clientY + 12) + 'px';
+      tooltip.style.top = (clientY + 8) + 'px';
     }
     
     function handleMouseMove(e){
@@ -1925,7 +2699,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         rafPending = null;
         const rect=canvas.getBoundingClientRect();
         const mx=(e.clientX-rect.left)*(canvas.width/rect.width)/DPR; const my=(e.clientY-rect.top)*(canvas.height/rect.height)/DPR;
-        if (drag){ drag.x1=mx; drag.y1=my; draw(); drawDragRect(drag); showTooltip(null); state.comparisonLine=null; return; }
+        if (drag){ updateDragFromEvent(e); return; }
         
         const h = nearest(mx,my);
         let lineHover = null;
@@ -1970,8 +2744,30 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     }
     
     let drag=null;
+    let dragRaf = 0;
+    let lastDragPos = null;
+
+    function updateDragFromEvent(e){
+      if (!drag || !e) return;
+      lastDragPos = { x: e.clientX, y: e.clientY };
+      if (dragRaf) return;
+      dragRaf = requestAnimationFrame(() => {
+        dragRaf = 0;
+        if (!drag || !lastDragPos) return;
+        const rect = canvas.getBoundingClientRect();
+        const mx = (lastDragPos.x - rect.left) * (canvas.width / rect.width) / DPR;
+        const my = (lastDragPos.y - rect.top) * (canvas.height / rect.height) / DPR;
+        drag.x1 = mx;
+        drag.y1 = my;
+        state.comparisonLine = null;
+        draw();
+        drawDragRect(drag);
+        showTooltip(null);
+      });
+    }
     canvas.addEventListener('mousemove', handleMouseMove);
-    canvas.addEventListener('mouseleave', ()=>{ rafPending = null; lastHover = null; state.hover=null; state.hoverSeries=null; state.comparisonLine=null; if (hoverCb) hoverCb(null); draw(); showTooltip(null); });
+    window.addEventListener('mousemove', (e)=>{ if (drag) updateDragFromEvent(e); });
+    canvas.addEventListener('mouseleave', ()=>{ rafPending = null; lastHover = null; state.hover=null; state.hoverSeries=null; state.comparisonLine=null; if (hoverCb) hoverCb(null); draw(); if (drag) drawDragRect(drag); showTooltip(null); });
     let lastDblClickTs = 0;
     canvas.addEventListener('dblclick', ()=>{ lastDblClickTs = Date.now(); state.zoomX=null; state.zoomY=null; draw(); });
     canvas.addEventListener('click', (e)=>{
@@ -2052,9 +2848,10 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     function setHoverSeries(pid){ state.hoverSeries=pid||null; draw(); }
     function onHover(cb){ hoverCb=cb; }
     function getZoom(){ return { x: state.zoomX ? [...state.zoomX] : null, y: state.zoomY ? [...state.zoomY] : null }; }
+    function getDomain(){ return { x: state.x ? [...state.x] : null, y: state.y ? [...state.y] : null }; }
     function setZoom(z){ if (!z) return; if (z.x && isFinite(z.x[0]) && isFinite(z.x[1])) state.zoomX = [z.x[0], z.x[1]]; if (z.y && isFinite(z.y[0]) && isFinite(z.y[1])) state.zoomY = [z.y[0], z.y[1]]; draw(); }
     function setYAxisLabel(label){ yAxisLabel = label; draw(); }
-    return { setData, resetZoom, setHoverSeries, onHover, getZoom, setZoom, setYAxisLabel };
+    return { setData, resetZoom, setHoverSeries, onHover, getZoom, getDomain, setZoom, setYAxisLabel };
   }
 
   // Followers time chart (multi-series, Y-axis = Followers)
@@ -2112,7 +2909,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         mouseX
       };
     }
-    function setData(series){ state.series = series.map(s=>({...s, points: [...s.points].sort((a,b)=>a.t-b.t)})); const xs=[], ys=[]; for (const s of state.series){ for (const p of s.points){ xs.push(p.x); ys.push(p.y); } } state.x=extent(xs,d=>d); state.y=extent(ys,d=>d); draw(); }
+    function setData(series){ state.series = series.map(s=>({...s, points: ensureSortedPoints(s.points||[])})); const xs=[], ys=[]; for (const s of state.series){ for (const p of s.points){ xs.push(p.x); ys.push(p.y); } } state.x=extent(xs,d=>d); state.y=extent(ys,d=>d); draw(); }
     function mapX(x){ const [a,b]=(state.zoomX||state.x); return M.left + ((x-a)/(b-a||1))*(W-(M.left+M.right)); }
     function mapY(y){ const [a,b]=(state.zoomY||state.y); return H - M.bottom - ((y-a)/(b-a||1))*(H-(M.top+M.bottom)); }
     function clampToPlot(px,py){ const x=Math.max(M.left,Math.min(W-M.right,px)); const y=Math.max(M.top,Math.min(H-M.bottom,py)); return [x,y]; }
@@ -2281,18 +3078,20 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       return best;
     }
     function showTooltip(h,cx,cy,comparisonData){
+      ensureTooltipInBody(tooltip);
       if (comparisonData){
         const diff = Math.abs(comparisonData.top.val - comparisonData.bottom.val);
         const diffRounded = Math.ceil(diff);
+        const unitLabel = unitLabelForValue('Followers', diffRounded);
         const topColor = comparisonData.top.series.color || '#ffd166';
         const bottomColor = comparisonData.bottom.series.color || '#ffd166';
         tooltip.style.display='block';
-        tooltip.innerHTML = `<div style="display:flex;align-items:center;gap:8px">
+        tooltip.innerHTML = `<div class="tooltip-stats-row">
           <div style="position:relative;width:20px;height:20px;">
             <span class="dot" style="position:absolute;left:0;top:0;width:16px;height:16px;background:${topColor};z-index:2;"></span>
             <span class="dot" style="position:absolute;left:8px;top:0;width:16px;height:16px;background:${bottomColor};z-index:1;"></span>
           </div>
-          <strong>${fmt(diffRounded)} follower gap</strong>
+          <strong>${fmt(diffRounded)} ${unitLabel} gap</strong>
         </div>`;
         const vw = window.innerWidth || document.documentElement.clientWidth || 0;
         const width = tooltip.offsetWidth || 0;
@@ -2302,7 +3101,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           if (left < 8) left = 8;
         }
         tooltip.style.left = left + 'px';
-        tooltip.style.top = (cy + 12) + 'px';
+        tooltip.style.top = (cy + 8) + 'px';
         return;
       }
       if (!h){ tooltip.style.display='none'; return; }
@@ -2314,12 +3113,13 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         handle = handle.replace(/'s Followers$/i, '').trim();
         if (!handle.startsWith('@')) handle = '@' + handle;
         const dateStr = fmtDateTime(h.x);
-        // Format number with commas
-        const numStr = Math.round(h.y).toLocaleString();
-        tooltip.innerHTML = `<div style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:${h.color||'#ffd166'}"></span><strong>${esc(handle)} ${numStr} followers</strong></div><div style="color:#a7b0ba;font-size:11px;margin-top:2px">on ${dateStr}</div>`;
+        const numStr = fmt(h.y);
+        const unitLabel = unitLabelForValue('Followers', Number(h.y));
+        tooltip.innerHTML = `<div style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:${h.color||'#ffd166'}"></span><strong>${esc(handle)} ${numStr} ${unitLabel}</strong></div><div class="tooltip-subtext">on ${dateStr}</div>`;
       } else {
         const header = `<div style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:${h.color||'#ffd166'}"></span><strong>${esc(h.label||'Followers')}</strong></div>`;
-        const body = `<div>${fmtDateTime(h.x)} • Followers: ${fmt2(h.y)}</div>`;
+        const unitLabel = unitLabelForValue('Followers', Number(h.y));
+        const body = `<div class="tooltip-stats">${fmtDateTime(h.x)} • ${fmt(h.y)} ${unitLabel}</div>`;
         tooltip.innerHTML = header + body;
       }
       const vw = window.innerWidth || document.documentElement.clientWidth || 0;
@@ -2330,7 +3130,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         if (left < 8) left = 8;
       }
       tooltip.style.left = left + 'px';
-      tooltip.style.top = (cy + 12) + 'px';
+      tooltip.style.top = (cy + 8) + 'px';
     }
     
     function handleMouseMove(e){
@@ -2339,7 +3139,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         rafPending = null;
         const rect=canvas.getBoundingClientRect();
         const mx=(e.clientX-rect.left)*(canvas.width/rect.width)/DPR; const my=(e.clientY-rect.top)*(canvas.height/rect.height)/DPR;
-        if (drag){ drag.x1=mx; drag.y1=my; draw(); drawDragRect(drag); showTooltip(null); state.comparisonLine=null; return; }
+        if (drag){ updateDragFromEvent(e); return; }
         
         const h=nearest(mx,my);
         let lineHover = null;
@@ -2390,13 +3190,36 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     }
     
     let drag=null;
+    let dragRaf = 0;
+    let lastDragPos = null;
+
+    function updateDragFromEvent(e){
+      if (!drag || !e) return;
+      lastDragPos = { x: e.clientX, y: e.clientY };
+      if (dragRaf) return;
+      dragRaf = requestAnimationFrame(() => {
+        dragRaf = 0;
+        if (!drag || !lastDragPos) return;
+        const rect = canvas.getBoundingClientRect();
+        const mx = (lastDragPos.x - rect.left) * (canvas.width / rect.width) / DPR;
+        const my = (lastDragPos.y - rect.top) * (canvas.height / rect.height) / DPR;
+        drag.x1 = mx;
+        drag.y1 = my;
+        state.comparisonLine = null;
+        draw();
+        drawDragRect(drag);
+        showTooltip(null);
+      });
+    }
     canvas.addEventListener('mousemove', handleMouseMove);
-    canvas.addEventListener('mouseleave', ()=>{ rafPending = null; lastHover = null; state.hover=null; state.hoverSeries=null; state.comparisonLine=null; if (hoverCb) hoverCb(null); draw(); showTooltip(null); });
+    window.addEventListener('mousemove', (e)=>{ if (drag) updateDragFromEvent(e); });
+    canvas.addEventListener('mouseleave', ()=>{ rafPending = null; lastHover = null; state.hover=null; state.hoverSeries=null; state.comparisonLine=null; if (hoverCb) hoverCb(null); draw(); if (drag) drawDragRect(drag); showTooltip(null); });
     canvas.addEventListener('mousedown',(e)=>{ const rect=canvas.getBoundingClientRect(); let x0=(e.clientX-rect.left)*(canvas.width/rect.width)/DPR; let y0=(e.clientY-rect.top)*(canvas.height/rect.height)/DPR; drag={x0,y0,x1:null,y1:null}; });
     window.addEventListener('mouseup',(e)=>{ if (!drag) return; const rect=canvas.getBoundingClientRect(); let x1=(e.clientX-rect.left)*(canvas.width/rect.width)/DPR; let y1=(e.clientY-rect.top)*(canvas.height/rect.height)/DPR; const [cx0,cy0]=clampToPlot(drag.x0,drag.y0); const [cx1,cy1]=clampToPlot(x1,y1); drag.x1=cx1; drag.y1=cy1; const minW=10,minH=10; const w=Math.abs(cx1-cx0), h=Math.abs(cy1-cy0); if (w>minW && h>minH){ const [X0,X1]=[cx0,cx1].sort((a,b)=>a-b); const [Y0,Y1]=[cy0,cy1].sort((a,b)=>a-b); const invMapX=(px)=>{ const [a,b]=(state.zoomX||state.x); return a + ((px-M.left)/(W-(M.left+M.right)))*(b-a); }; const invMapY=(py)=>{ const [a,b]=(state.zoomY||state.y); return a + (((H-M.bottom)-py)/(H-(M.top+M.bottom)))*(b-a); }; state.zoomX=[invMapX(X0),invMapX(X1)]; state.zoomY=[invMapY(Y1),invMapY(Y0)]; } drag=null; draw(); showTooltip(null); });
     function drawDragRect(d){ if (!d||d.x1==null||d.y1==null) return; ctx.save(); ctx.strokeStyle='#7dc4ff'; ctx.fillStyle='#7dc4ff22'; ctx.lineWidth=1; ctx.setLineDash([4,3]); const x0=Math.max(M.left,Math.min(W-M.right,d.x0)); const y0=Math.max(M.top,Math.min(H-M.bottom,d.y0)); const x1=Math.max(M.left,Math.min(W-M.right,d.x1)); const y1=Math.max(M.top,Math.min(H-M.bottom,d.y1)); const x=Math.min(x0,x1), y=Math.min(y0,y1), w=Math.abs(x1-x0), h=Math.abs(y1-y0); ctx.strokeRect(x,y,w,h); ctx.fillRect(x,y,w,h); ctx.restore(); }
     canvas.addEventListener('dblclick', ()=>{ state.zoomX=null; state.zoomY=null; draw(); });
     canvas.addEventListener('click', (e)=>{
+      if (drag) return;
       if (state.hover && state.hover.url) {
         window.open(state.hover.url, '_blank');
         return;
@@ -3146,7 +3969,10 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
   }
 
   async function main(){
-    let metrics = await loadMetrics();
+    initSidebarResizer();
+    initThemePicker();
+    hoistChartTooltips();
+    metrics = await loadMetrics();
     let ultraModeEnabled = await loadUltraModePreference();
     const modeTapEl = $('#dashboardModeTap');
     if (modeTapEl) {
@@ -3167,11 +3993,108 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     }
     // Build list and try to restore last user
     let currentUserKey = buildUserOptions(metrics);
+    const searchInput = $('#search');
+    const suggestions = $('#suggestions');
+    let zoomStates = {};
+    let customVisibilityByUser = {};
+    let customFiltersByUser = {};
+    let customFiltersReloaded = false;
+    const sessionCustomFiltersByUser = (function(){
+      try { return JSON.parse(sessionStorage.getItem('customFiltersByUserSession') || '{}'); } catch { return {}; }
+    })();
+    const localCustomFiltersByUser = (function(){
+      try { return JSON.parse(localStorage.getItem('sctCustomFiltersByUser') || '{}'); } catch { return {}; }
+    })();
     try {
-      const { lastUserKey } = await chrome.storage.local.get('lastUserKey');
-      if (lastUserKey && (metrics.users[lastUserKey] || isTopTodayKey(lastUserKey))) currentUserKey = lastUserKey;
+      const st = await chrome.storage.local.get(['lastUserKey', 'zoomStates', 'customVisibilityByUser', 'customFiltersByUser', 'lastFilterAction']);
+      if (st.lastUserKey && (metrics.users[st.lastUserKey] || isTopTodayKey(st.lastUserKey))) currentUserKey = st.lastUserKey;
+      zoomStates = st.zoomStates || {};
+      if (st.lastFilterAction && !lastFilterAction) lastFilterAction = st.lastFilterAction;
+      customVisibilityByUser = (function(raw){
+        const out = {};
+        if (!raw || typeof raw !== 'object') return out;
+        for (const [userKey, entry] of Object.entries(raw)){
+          if (Array.isArray(entry)) out[userKey] = { ids: entry };
+          else if (entry && typeof entry === 'object'){
+            const ids = Array.isArray(entry.ids) ? entry.ids : [];
+            out[userKey] = { ids };
+          }
+        }
+        return out;
+      })(st.customVisibilityByUser);
+      const storageFilters = (function(raw){
+        const out = {};
+        if (!raw || typeof raw !== 'object') return out;
+        for (const [userKey, entry] of Object.entries(raw)){
+          const filters = Array.isArray(entry?.filters) ? entry.filters : [];
+          const normalized = [];
+          for (const f of filters){
+            if (!f || typeof f !== 'object') continue;
+            const id = typeof f.id === 'string' && f.id ? f.id : null;
+            const name = typeof f.name === 'string' && f.name ? f.name : null;
+            const ids = Array.isArray(f.ids) ? f.ids.filter(Boolean) : [];
+            if (!id || !name) continue;
+            normalized.push({ id, name, ids });
+          }
+          out[userKey] = { filters: normalized };
+        }
+        return out;
+      })(st.customFiltersByUser);
+      const sessionFilters = (function(raw){
+        const out = {};
+        if (!raw || typeof raw !== 'object') return out;
+        for (const [userKey, entry] of Object.entries(raw)){
+          const filters = Array.isArray(entry?.filters) ? entry.filters : [];
+          const normalized = [];
+          for (const f of filters){
+            if (!f || typeof f !== 'object') continue;
+            const id = typeof f.id === 'string' && f.id ? f.id : null;
+            const name = typeof f.name === 'string' && f.name ? f.name : null;
+            const ids = Array.isArray(f.ids) ? f.ids.filter(Boolean) : [];
+            if (!id || !name) continue;
+            normalized.push({ id, name, ids });
+          }
+          out[userKey] = { filters: normalized };
+        }
+        return out;
+      })(sessionCustomFiltersByUser);
+      const localFilters = (function(raw){
+        const out = {};
+        if (!raw || typeof raw !== 'object') return out;
+        for (const [userKey, entry] of Object.entries(raw)){
+          const filters = Array.isArray(entry?.filters) ? entry.filters : [];
+          const normalized = [];
+          for (const f of filters){
+            if (!f || typeof f !== 'object') continue;
+            const id = typeof f.id === 'string' && f.id ? f.id : null;
+            const name = typeof f.name === 'string' && f.name ? f.name : null;
+            const ids = Array.isArray(f.ids) ? f.ids.filter(Boolean) : [];
+            if (!id || !name) continue;
+            normalized.push({ id, name, ids });
+          }
+          out[userKey] = { filters: normalized };
+        }
+        return out;
+      })(localCustomFiltersByUser);
+      customFiltersByUser = storageFilters;
+      for (const [userKey, entry] of Object.entries(sessionFilters)){
+        const existing = storageFilters[userKey];
+        const existingCount = Array.isArray(existing?.filters) ? existing.filters.length : 0;
+        const sessionCount = Array.isArray(entry?.filters) ? entry.filters.length : 0;
+        if (!existing || sessionCount > existingCount) {
+          customFiltersByUser[userKey] = entry;
+        }
+      }
+      for (const [userKey, entry] of Object.entries(localFilters)){
+        const existing = customFiltersByUser[userKey];
+        const existingCount = Array.isArray(existing?.filters) ? existing.filters.length : 0;
+        const localCount = Array.isArray(entry?.filters) ? entry.filters.length : 0;
+        if (!existing || localCount > existingCount) {
+          customFiltersByUser[userKey] = entry;
+        }
+      }
     } catch {}
-    const selEl = $('#userSelect'); if (currentUserKey) selEl.value = currentUserKey;
+    syncUserSelectionUI();
     let viewsChartType = 'unique'; // 'unique' or 'total'
     const compareViewsChartType = 'total'; // Always use total views for compare section
     let chart = makeChart($('#chart'), 'Unique viewers', 'Unique');
@@ -3182,39 +4105,32 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     let allViewsChart = makeTimeChart($('#allViewsChart'), '#allViewsTooltip', 'Total Views', fmt2);
     const allLikesChart = makeTimeChart($('#allLikesChart'), '#allLikesTooltip', 'Likes', fmt2);
     const cameosChart = makeTimeChart($('#cameosChart'), '#cameosTooltip', 'Cast in', fmt2);
-    const PRESET_VISIBILITY_ACTIONS = new Set(['last5','last10','top5','top10','bottom5','bottom10','stale']);
-    // Load persisted zoom states
-    let zoomStates = {};
-    try { const st = await chrome.storage.local.get('zoomStates'); zoomStates = st.zoomStates || {}; } catch {}
+    const PRESET_VISIBILITY_ACTIONS = new Set(['pastDay','pastWeek','last5','last10','top5','top10','bottom5','bottom10','stale']);
     const visibleSet = new Set();
-    let visibilityByUser = {};
-    const sessionVisibilityByUser = (function(){
-      try { return JSON.parse(sessionStorage.getItem('visibilityByUserSession') || '{}'); } catch { return {}; }
+    const sessionCustomVisibilityByUser = (function(){
+      try { return JSON.parse(sessionStorage.getItem('customVisibilityByUserSession') || '{}'); } catch { return {}; }
     })();
-    try {
-      const st = await chrome.storage.local.get('visibilityByUser');
-      visibilityByUser = (function(raw){
-        const out = {};
-        if (!raw || typeof raw !== 'object') return out;
-        for (const [userKey, entry] of Object.entries(raw)){
-          if (Array.isArray(entry)) out[userKey] = { ids: entry, source: 'legacy' };
-          else if (entry && typeof entry === 'object'){
-            const ids = Array.isArray(entry.ids) ? entry.ids : [];
-            const source = typeof entry.source === 'string' ? entry.source : 'legacy';
-            out[userKey] = { ids, source };
-          }
-        }
-        return out;
-      })(st.visibilityByUser);
-    } catch {}
-    let listActionByUser = (function(){
-      try { return JSON.parse(sessionStorage.getItem('listActionByUserSession') || '{}'); } catch { return {}; }
+    let lastFilterAction = (function(){
+      try { return sessionStorage.getItem('sctLastFilterAction') || null; } catch { return null; }
     })();
-    function persistListActionForUser(userKey, actionId){
-      if (!userKey) return;
-      if (actionId) listActionByUser[userKey] = actionId;
-      else delete listActionByUser[userKey];
-      try { sessionStorage.setItem('listActionByUserSession', JSON.stringify(listActionByUser)); } catch {}
+    function normalizeFilterAction(action){
+      if (!action) return null;
+      if (isCustomFilterAction(action)) return action;
+      if (action === 'showAll' || action === 'hideAll' || action === 'custom') return action;
+      if (isPresetVisibilitySource(action)) return action;
+      return null;
+    }
+    function setLastFilterAction(action){
+      const next = normalizeFilterAction(action);
+      if (!next) return;
+      lastFilterAction = next;
+      try { sessionStorage.setItem('sctLastFilterAction', next); } catch {}
+      try { chrome.storage.local.set({ lastFilterAction: next }); } catch {}
+    }
+    function getSessionFilterAction(){
+      const normalized = normalizeFilterAction(lastFilterAction);
+      if (!normalized) return 'showAll';
+      return normalized;
     }
     let currentVisibilitySource = 'showAll';
     let pendingPostPurge = null;
@@ -3224,26 +4140,201 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     const compareUsers = new Set();
     const MAX_COMPARE_USERS = 10;
 
-    function getSavedVisibilityEntry(userKey){
-      const entry = sessionVisibilityByUser?.[userKey] || visibilityByUser?.[userKey];
+    function getCustomVisibilityEntry(userKey){
+      const entry = sessionCustomVisibilityByUser?.[userKey] || customVisibilityByUser?.[userKey];
       if (!entry) return null;
       const ids = Array.isArray(entry.ids) ? entry.ids : [];
-      const source = typeof entry.source === 'string' ? entry.source : 'legacy';
-      const out = { ids, source };
-      if (sessionVisibilityByUser?.[userKey]) out.__fromSession = true;
-      return out;
+      return { ids };
+    }
+    function isCustomFilterAction(action){
+      return typeof action === 'string' && action.startsWith(CUSTOM_FILTER_PREFIX);
+    }
+    function getCustomFilterId(action){
+      if (!isCustomFilterAction(action)) return null;
+      return action.slice(CUSTOM_FILTER_PREFIX.length);
+    }
+    function getCustomFiltersForUser(userKey){
+      const entry = customFiltersByUser?.[userKey];
+      const filters = Array.isArray(entry?.filters) ? entry.filters : [];
+      return filters;
+    }
+    function setCustomFiltersForUser(userKey, filters){
+      if (!userKey) return;
+      customFiltersByUser[userKey] = { filters: Array.isArray(filters) ? filters : [] };
+      try { sessionStorage.setItem('customFiltersByUserSession', JSON.stringify(customFiltersByUser)); } catch {}
+      try { localStorage.setItem('sctCustomFiltersByUser', JSON.stringify(customFiltersByUser)); } catch {}
+      try { chrome.storage.local.set({ customFiltersByUser }); } catch {}
+    }
+    function updateCustomFilterIdsForUser(userKey, filterId, ids){
+      if (!userKey || !filterId) return;
+      const filters = getCustomFiltersForUser(userKey).slice();
+      const idx = filters.findIndex(f => f.id === filterId);
+      if (idx < 0) return;
+      filters[idx] = { ...filters[idx], ids: Array.from(ids || []) };
+      setCustomFiltersForUser(userKey, filters);
+    }
+    function setCustomFilterActive(filterId){
+      const wrap = $('#customFiltersWrap');
+      if (!wrap) return;
+      $$('.custom-filter-btn', wrap).forEach(btn=>{
+        if (filterId && btn.dataset.filterId === filterId) btn.classList.add('active');
+        else btn.classList.remove('active');
+      });
+    }
+    function wireCustomFilterInput(input){
+      if (!input) return;
+      let committed = false;
+      const finalize = (commit)=>{
+        const name = input.value.trim().slice(0, 16);
+        if (committed) return;
+        committed = true;
+        input.remove();
+        if (!commit || !name) return;
+        if (!currentUserKey) return;
+        const filters = getCustomFiltersForUser(currentUserKey).slice();
+        const id = `cf_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        filters.push({ id, name, ids: Array.from(visibleSet) });
+        setCustomFiltersForUser(currentUserKey, filters);
+        renderCustomFilters(currentUserKey);
+        setCustomFilterActive(id);
+        const user = resolveUserForKey(metrics, currentUserKey);
+        if (user) {
+          const actionId = `${CUSTOM_FILTER_PREFIX}${id}`;
+          requestAnimationFrame(()=>{
+            applyUserFilterState(currentUserKey, user, actionId);
+            refreshUserUI({ preserveEmpty: true });
+            persistVisibility();
+          });
+        }
+      };
+      input.addEventListener('keydown', (e)=>{
+        if (e.key === 'Enter') { e.preventDefault(); finalize(true); }
+        if (e.key === 'Escape') { e.preventDefault(); finalize(false); }
+      });
+      input.addEventListener('blur', ()=> { if (!committed) finalize(false); });
+    }
+    function renderCustomFilters(userKey){
+      const wrap = $('#customFiltersWrap');
+      if (!wrap) return;
+      const pendingInput = wrap.querySelector('.custom-filter-input');
+      const pendingValue = pendingInput ? pendingInput.value : '';
+      const wasFocused = pendingInput ? document.activeElement === pendingInput : false;
+      wrap.innerHTML = '';
+      if (!userKey) return;
+      let filters = getCustomFiltersForUser(userKey);
+      if (!filters.length && !customFiltersReloaded) {
+        customFiltersReloaded = true;
+        try {
+          chrome.storage.local.get('customFiltersByUser').then((st)=>{
+            const raw = st?.customFiltersByUser;
+            if (raw && typeof raw === 'object') {
+              customFiltersByUser = raw;
+              renderCustomFilters(userKey);
+            }
+          });
+        } catch {}
+      }
+      const activeId = getCustomFilterId(currentVisibilitySource);
+      let tooltipTimer = null;
+      let tooltipEl = null;
+      const hideTooltip = ()=>{
+        if (tooltipTimer) {
+          clearTimeout(tooltipTimer);
+          tooltipTimer = null;
+        }
+        if (tooltipEl) tooltipEl.style.display = 'none';
+      };
+      const showTooltip = (target, text)=>{
+        if (!tooltipEl) {
+          tooltipEl = document.createElement('div');
+          tooltipEl.className = 'tooltip';
+          document.body.appendChild(tooltipEl);
+        }
+        tooltipEl.textContent = text;
+        const r = target.getBoundingClientRect();
+        tooltipEl.style.display = 'block';
+        const width = tooltipEl.offsetWidth || 0;
+        const left = Math.max(8, Math.min(window.innerWidth - width - 8, r.left + r.width / 2 - width / 2));
+        tooltipEl.style.left = left + 'px';
+        tooltipEl.style.top = (r.bottom + 8) + 'px';
+      };
+      const wireTooltip = (el, text)=>{
+        if (!el) return;
+        el.addEventListener('mouseenter', ()=>{
+          if (tooltipTimer) clearTimeout(tooltipTimer);
+          tooltipTimer = setTimeout(()=>showTooltip(el, text), 500);
+        });
+        el.addEventListener('mouseleave', hideTooltip);
+        el.addEventListener('blur', hideTooltip);
+      };
+      filters.forEach((f)=>{
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'custom-filter-btn';
+        btn.textContent = f.name;
+        btn.dataset.filterId = f.id;
+        if (activeId && activeId === f.id) btn.classList.add('active');
+        btn.addEventListener('click', ()=>{
+          if (!userKey) return;
+          const user = resolveUserForKey(metrics, userKey);
+          if (!user) return;
+          const actionId = `${CUSTOM_FILTER_PREFIX}${f.id}`;
+          applyUserFilterState(userKey, user, actionId);
+          setCustomFilterActive(f.id);
+          refreshUserUI({ preserveEmpty: true });
+          persistVisibility();
+        });
+        btn.addEventListener('dblclick', ()=>{
+          const next = getCustomFiltersForUser(userKey).filter(it=>it.id !== f.id);
+          setCustomFiltersForUser(userKey, next);
+          if (getCustomFilterId(currentVisibilitySource) === f.id){
+            currentVisibilitySource = 'showAll';
+            setListActionActive('showAll');
+            triggerFilterClick('showAll');
+          }
+          renderCustomFilters(userKey);
+        });
+        wireTooltip(btn, 'Double-click to Reset');
+        wrap.appendChild(btn);
+      });
+      setCustomFilterActive(activeId);
+      const saveBtn = $('#saveCustomFilter');
+      wireTooltip(saveBtn, 'Create Custom Filter');
+      if (pendingInput) {
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.maxLength = 16;
+        input.placeholder = 'Name your filter...';
+        input.className = 'custom-filter-input';
+        input.value = pendingValue;
+        wrap.appendChild(input);
+        wireCustomFilterInput(input);
+        if (wasFocused) input.focus();
+      }
     }
     function isPresetVisibilitySource(source){
       return PRESET_VISIBILITY_ACTIONS.has(source);
     }
-    function isDefaultVisibilitySource(source){
-      if (!source || source === 'showAll' || source === 'hideAll') return true;
-      if (source === 'legacy') return true;
-      return isPresetVisibilitySource(source);
-    }
     function buildPresetIds(action, user){
       if (!user) return [];
       const isTopToday = user?.__specialKey === TOP_TODAY_KEY;
+      if (action === 'pastDay' || action === 'pastWeek'){
+        const now = Date.now();
+        const windowMs = action === 'pastDay' ? (24 * 60 * 60 * 1000) : (7 * 24 * 60 * 60 * 1000);
+        const cutoff = now - windowMs;
+        const mapped = Object.entries(user.posts||{}).map(([pid,p])=>({
+          pid,
+          postTime: (isTopToday ? (getPostTimeStrict(p) || getPostTimeForRecency(p)) : getPostTimeStrict(p)) || 0,
+          pidBI: pidBigInt(pid)
+        }));
+        const sorted = mapped.filter(x=>x.postTime>0 && x.postTime >= cutoff).sort((a,b)=>{
+          const dt = b.postTime - a.postTime;
+          if (dt !== 0) return dt;
+          if (a.pidBI === b.pidBI) return a.pid.localeCompare(b.pid);
+          return a.pidBI < b.pidBI ? 1 : -1;
+        });
+        return sorted.map(it=>it.pid);
+      }
       if (action === 'last5' || action === 'last10'){
         const mapped = Object.entries(user.posts||{}).map(([pid,p])=>({
           pid,
@@ -3345,26 +4436,154 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       }
       return [];
     }
-    function isLegacyDefaultVisibility(user, ids){
-      if (!user) return false;
+    function deriveVisibilitySource(user, ids){
+      if (!user) return 'custom';
       const idsSet = new Set((ids||[]).filter(Boolean));
       const allPids = Object.keys(user.posts||{});
-      if (idsSet.size === 0) return true; // Hide all legacy state
-      if (idsSet.size === allPids.length && allPids.every(pid=>idsSet.has(pid))) return true; // Show all legacy state
+      if (idsSet.size === 0) return 'hideAll';
+      if (idsSet.size === allPids.length && allPids.every(pid=>idsSet.has(pid))) return 'showAll';
       for (const action of PRESET_VISIBILITY_ACTIONS){
         const presetIds = buildPresetIds(action, user);
         if (!presetIds.length) continue;
-        if (presetIds.length === idsSet.size && presetIds.every(pid=>idsSet.has(pid))) return true;
+        if (presetIds.length === idsSet.size && presetIds.every(pid=>idsSet.has(pid))) return action;
       }
-      return false;
+      return 'custom';
     }
     function persistVisibility(){
-      if (isTopTodayKey(currentUserKey)) return;
-      const source = currentVisibilitySource || currentListActionId || 'custom';
-      const payload = { ids: Array.from(visibleSet), source };
-      visibilityByUser[currentUserKey] = payload;
-      try { sessionVisibilityByUser[currentUserKey] = payload; sessionStorage.setItem('visibilityByUserSession', JSON.stringify(sessionVisibilityByUser)); } catch {}
-      try { chrome.storage.local.set({ visibilityByUser }); } catch {}
+      const source = currentVisibilitySource || currentListActionId || 'showAll';
+      setLastFilterAction(source);
+    }
+    function persistCustomVisibilityForUser(userKey, ids){
+      if (!userKey) return;
+      const payload = { ids: Array.from(ids || []) };
+      customVisibilityByUser[userKey] = payload;
+      try { sessionCustomVisibilityByUser[userKey] = payload; sessionStorage.setItem('customVisibilityByUserSession', JSON.stringify(sessionCustomVisibilityByUser)); } catch {}
+      try { chrome.storage.local.set({ customVisibilityByUser }); } catch {}
+    }
+
+    function updateCustomButtonLabel(userKey){
+      const btn = $('#custom');
+      if (!btn) return;
+      const entry = getCustomVisibilityEntry(userKey);
+      const hasCustom = Array.isArray(entry?.ids) && entry.ids.length > 0;
+      btn.textContent = hasCustom ? 'Custom' : 'Save';
+    }
+
+    function applySavedVisibilityForUser(userKey, user, overrideAction, opts={}){
+      if (!userKey || !user) return;
+      const { seedAll = false } = opts;
+      const rawSource = normalizeFilterAction(overrideAction) || getSessionFilterAction();
+      let source = rawSource;
+      const isCustomSource = source === 'custom' || isCustomFilterAction(source);
+      currentVisibilitySource = source;
+      currentListActionId = (source === 'showAll' || source === 'hideAll' || isPresetVisibilitySource(source) || isCustomSource) ? (isCustomSource ? 'custom' : source) : null;
+      setListActionActive(currentListActionId || source);
+      visibleSet.clear();
+      if (seedAll) {
+        Object.keys(user.posts||{}).forEach(pid=>visibleSet.add(pid));
+      }
+      if (source === 'showAll') {
+        if (!seedAll) Object.keys(user.posts||{}).forEach(pid=>visibleSet.add(pid));
+      } else if (source === 'hideAll') {
+        visibleSet.clear();
+      } else if (isPresetVisibilitySource(source)) {
+        visibleSet.clear();
+        const nextSet = computeVisibleSetForAction(user, source);
+        if (nextSet) {
+          for (const pid of nextSet) visibleSet.add(pid);
+        }
+      } else if (source === 'custom' || isCustomFilterAction(source)) {
+        const filterId = getCustomFilterId(source);
+        if (filterId) {
+          const f = getCustomFiltersForUser(userKey).find(it=>it.id === filterId);
+          if (!f) {
+            currentVisibilitySource = 'showAll';
+            currentListActionId = 'showAll';
+            setListActionActive('showAll');
+            source = 'showAll';
+            visibleSet.clear();
+            Object.keys(user.posts||{}).forEach(pid=>visibleSet.add(pid));
+          } else {
+            visibleSet.clear();
+            (f.ids || []).forEach(pid=>{
+              if (pid && Object.prototype.hasOwnProperty.call(user.posts||{}, pid)) visibleSet.add(pid);
+            });
+          }
+        } else {
+          const customEntry = getCustomVisibilityEntry(userKey);
+          const ids = Array.isArray(customEntry?.ids) ? customEntry.ids : [];
+          if (ids.length) {
+            visibleSet.clear();
+            ids.forEach(pid=>{
+              if (pid && Object.prototype.hasOwnProperty.call(user.posts||{}, pid)) visibleSet.add(pid);
+            });
+          }
+        }
+      }
+      if (!normalizeFilterAction(lastFilterAction) || lastFilterAction === 'custom' || lastFilterAction !== source) setLastFilterAction(source);
+      updateCustomButtonLabel(userKey);
+      if (isCustomFilterAction(source)) setCustomFilterActive(getCustomFilterId(source));
+      else setCustomFilterActive(null);
+    }
+
+    function applyUserFilterState(userKey, user, actionId){
+      if (!userKey || !user) return;
+      const rawSource = normalizeFilterAction(actionId) || getSessionFilterAction();
+      let source = rawSource;
+      const isCustomSource = source === 'custom' || isCustomFilterAction(source);
+      currentVisibilitySource = source;
+      currentListActionId = (source === 'showAll' || source === 'hideAll' || isPresetVisibilitySource(source) || isCustomSource) ? (isCustomSource ? 'custom' : source) : null;
+      setListActionActive(currentListActionId || source);
+      visibleSet.clear();
+      Object.keys(user.posts||{}).forEach(pid=>visibleSet.add(pid));
+      if (source === 'hideAll') {
+        visibleSet.clear();
+      } else if (isPresetVisibilitySource(source)) {
+        const nextSet = computeVisibleSetForAction(user, source);
+        visibleSet.clear();
+        if (nextSet) {
+          for (const pid of nextSet) visibleSet.add(pid);
+        }
+      } else if (source === 'custom' || isCustomFilterAction(source)) {
+        const filterId = getCustomFilterId(source);
+        if (filterId) {
+          const f = getCustomFiltersForUser(userKey).find(it=>it.id === filterId);
+          if (!f) {
+            currentVisibilitySource = 'showAll';
+            currentListActionId = 'showAll';
+            setListActionActive('showAll');
+            source = 'showAll';
+            visibleSet.clear();
+            Object.keys(user.posts||{}).forEach(pid=>visibleSet.add(pid));
+          } else {
+            visibleSet.clear();
+            (f.ids || []).forEach(pid=>{
+              if (pid && Object.prototype.hasOwnProperty.call(user.posts||{}, pid)) visibleSet.add(pid);
+            });
+          }
+        } else {
+          const customEntry = getCustomVisibilityEntry(userKey);
+          const ids = Array.isArray(customEntry?.ids) ? customEntry.ids : [];
+          if (ids.length) {
+            visibleSet.clear();
+            ids.forEach(pid=>{
+              if (pid && Object.prototype.hasOwnProperty.call(user.posts||{}, pid)) visibleSet.add(pid);
+            });
+          }
+        }
+      }
+      updateCustomButtonLabel(userKey);
+      if (isCustomFilterAction(source)) setCustomFilterActive(getCustomFilterId(source));
+      else setCustomFilterActive(null);
+    }
+
+    function triggerFilterClick(actionId){
+      const id = normalizeFilterAction(actionId) || getSessionFilterAction() || 'showAll';
+      if (id === 'custom' || isCustomFilterAction(id)) return false;
+      const btn = document.getElementById(id);
+      if (!btn || typeof btn.click !== 'function') return false;
+      btn.click();
+      return true;
     }
 
     function renderComparePills(){
@@ -3375,7 +4594,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       users.forEach((userKey, idx)=>{
         const user = resolveUserForKey(metrics, userKey);
         const handle = user?.handle || (isTopTodayKey(userKey) ? 'Top Today' : userKey);
-        const color = COLORS[idx % COLORS.length];
+        const color = getCompareSeriesColor(idx);
         const pill = document.createElement('div');
         pill.className = 'compare-pill';
         pill.dataset.userKey = userKey;
@@ -3400,7 +4619,6 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
             addCompareUser(currentUserKey);
           } else {
             renderComparePills();
-            buildCompareDropdown();
             updateCompareCharts();
           }
         };
@@ -3428,7 +4646,6 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       if (compareUsers.has(userKey)) return;
       compareUsers.add(userKey);
       renderComparePills();
-      buildCompareDropdown();
       updateCompareCharts();
       $('#compareSearch').value = '';
       $('#compareSuggestions').style.display = 'none';
@@ -3472,7 +4689,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
             return out;
           })();
           if (pts.length){
-            const color = COLORS[idx % COLORS.length];
+            const color = getCompareSeriesColor(idx);
             const handle = user.handle || (isTopTodayKey(userKey) ? 'Top Today' : userKey);
             const profileUrl = handle ? `${SITE_ORIGIN}/profile/${handle}` : null;
             const isTopToday = isTopTodayKey(userKey);
@@ -3516,7 +4733,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
             return out;
           })();
           if (ptsLikes.length){
-            const color = COLORS[idx % COLORS.length];
+            const color = getCompareSeriesColor(idx);
             const handle = user.handle || (isTopTodayKey(userKey) ? 'Top Today' : userKey);
             const profileUrl = handle ? `${SITE_ORIGIN}/profile/${handle}` : null;
             const isTopToday = isTopTodayKey(userKey);
@@ -3535,7 +4752,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           const arr = Array.isArray(user.cameos) ? user.cameos : [];
           const pts = arr.map(it=>({ x:Number(it.t), y:Number(it.count), t:Number(it.t) })).filter(p=>isFinite(p.x)&&isFinite(p.y));
           if (pts.length){
-            const color = COLORS[idx % COLORS.length];
+            const color = getCompareSeriesColor(idx);
             const handle = user.handle || (isTopTodayKey(userKey) ? 'Top Today' : userKey);
             const profileUrl = handle ? `${SITE_ORIGIN}/profile/${handle}` : null;
             const isTopToday = isTopTodayKey(userKey);
@@ -3554,7 +4771,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           const arr = Array.isArray(user.followers) ? user.followers : [];
           const pts = arr.map(it=>({ x:Number(it.t), y:Number(it.count), t:Number(it.t) })).filter(p=>isFinite(p.x)&&isFinite(p.y));
           if (pts.length){
-            const color = COLORS[idx % COLORS.length];
+            const color = getCompareSeriesColor(idx);
             const handle = user.handle || (isTopTodayKey(userKey) ? 'Top Today' : userKey);
             const profileUrl = handle ? `${SITE_ORIGIN}/profile/${handle}` : null;
             const isTopToday = isTopTodayKey(userKey);
@@ -3602,185 +4819,13 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       } catch {}
     }
 
-    // Function to calculate best time to post from ALL users' data (runs once on load)
-    // Returns an object with three time-bound calculations: year, month, week
-    function calculateBestPostTimeFromAllUsers(){
-      if (!metrics || !metrics.users) return { year: null, month: null, week: null };
-      
-      const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-      const now = Date.now();
-      
-      // Helper function to calculate best time for a given time range
-      function calculateBestTimeForRange(daysBack){
-        const cutoffTime = now - (daysBack * 24 * 60 * 60 * 1000);
-        const timeStats = new Map(); // "hour:minuteBucket" -> { count, totalViews, dayOfWeek: Map, times: [] }
-        const timeWindowMinutes = 1440; // 24 hours
-        const bucketSizeMinutes = 15; // Group posts into 15-minute buckets for more meaningful results
-        let totalPostsUsed = 0; // Track total posts used in calculation
-        
-        // Iterate through ALL users and ALL posts within the time range
-        for (const [userKey, user] of Object.entries(metrics.users||{})){
-          for (const [pid, p] of Object.entries(user.posts||{})){
-            const postTime = getPostTimeStrict(p);
-            // Only include posts that are within the time range (postTime >= cutoffTime means post is newer than cutoff)
-            if (!postTime || postTime < cutoffTime) continue;
-            
-            // Find unique views at the end of 24 hours
-            const windowEndTime = postTime + (timeWindowMinutes * 60 * 1000);
-            let maxViews = 0;
-            for (const s of (p.snapshots||[])){
-              if (s.t <= windowEndTime && s.uv != null){
-                maxViews = Math.max(maxViews, Number(s.uv));
-              }
-            }
-            
-            if (maxViews > 0){
-              totalPostsUsed++; // Count this post
-              const postDate = new Date(postTime);
-              const hour = postDate.getHours();
-              const minute = postDate.getMinutes();
-              const dayOfWeek = postDate.getDay();
-              
-              // Round to nearest bucket (e.g., 3:07 -> 3:00, 3:22 -> 3:15, 3:38 -> 3:30)
-              const minuteBucket = Math.floor(minute / bucketSizeMinutes) * bucketSizeMinutes;
-              const timeKey = `${hour}:${minuteBucket}`;
-              
-              if (!timeStats.has(timeKey)){
-                timeStats.set(timeKey, { 
-                  count: 0, 
-                  totalViews: 0,
-                  dayOfWeek: new Map(), // dayOfWeek -> count
-                  times: [] // Store actual times for calculating median
-                });
-              }
-              const stats = timeStats.get(timeKey);
-              stats.count++;
-              stats.totalViews += maxViews;
-              stats.times.push({ hour, minute, dayOfWeek });
-              
-              // Track day of week for this time
-              if (!stats.dayOfWeek.has(dayOfWeek)){
-                stats.dayOfWeek.set(dayOfWeek, 0);
-              }
-              stats.dayOfWeek.set(dayOfWeek, stats.dayOfWeek.get(dayOfWeek) + 1);
-            }
-          }
-        }
-        
-        if (timeStats.size === 0) return null;
-        
-        // Find top 3 time buckets with highest average views
-        const timeBuckets = Array.from(timeStats.entries())
-          .map(([timeKey, stats]) => ({
-            timeKey,
-            avg: stats.totalViews / stats.count,
-            count: stats.count,
-            stats
-          }))
-          .sort((a, b) => b.avg - a.avg)
-          .slice(0, 3);
+    try {
+      window.addEventListener('sct-theme-change', ()=>{
+        renderComparePills();
+        updateCompareCharts();
+      });
+    } catch {}
 
-        if (timeBuckets.length === 0) return null;
-
-        // Create time range from top buckets - use tighter range for better accuracy
-        const times = timeBuckets.flatMap(bucket => bucket.stats.times)
-          .sort((a, b) => {
-            if (a.hour !== b.hour) return a.hour - b.hour;
-            return a.minute - b.minute;
-          });
-
-        // Format as time range
-        const formatTime = (hour, minute) => {
-          const hour12 = hour % 12 || 12;
-          const minuteStr = String(minute).padStart(2, '0');
-          const ampm = hour >= 12 ? 'PM' : 'AM';
-          return `${hour12}:${minuteStr} ${ampm}`;
-        };
-
-        // Calculate median time for more accurate best time
-        const medianIdx = Math.floor(times.length / 2);
-        const medianTime = times[medianIdx];
-        const bestHour = medianTime.hour;
-        const bestMinute = medianTime.minute;
-
-        let timeRangeStr;
-        if (times.length <= 5) {
-          // If few posts, show single time
-          timeRangeStr = formatTime(medianTime.hour, medianTime.minute);
-        } else {
-          // Use interquartile range (25th to 75th percentile) for tighter, more accurate range
-          const q1Idx = Math.floor(times.length * 0.25);
-          const q3Idx = Math.floor(times.length * 0.75);
-          const q1Time = times[q1Idx];
-          const q3Time = times[q3Idx];
-          
-          // If the range is still too broad (>3 hours), use median ±1 hour
-          const q1Minutes = q1Time.hour * 60 + q1Time.minute;
-          const q3Minutes = q3Time.hour * 60 + q3Time.minute;
-          const rangeMinutes = q3Minutes - q1Minutes;
-          
-          if (rangeMinutes > 180) { // More than 3 hours
-            // Use median ±1 hour for tighter range
-            const medianMinutes = bestHour * 60 + bestMinute;
-            const startMinutes = Math.max(0, medianMinutes - 60);
-            const endMinutes = Math.min(1439, medianMinutes + 60);
-            const startHour = Math.floor(startMinutes / 60) % 24;
-            const startMin = startMinutes % 60;
-            const endHour = Math.floor(endMinutes / 60) % 24;
-            const endMin = endMinutes % 60;
-            timeRangeStr = `${formatTime(startHour, startMin)} - ${formatTime(endHour, endMin)}`;
-          } else {
-            // Use interquartile range
-            timeRangeStr = `${formatTime(q1Time.hour, q1Time.minute)} - ${formatTime(q3Time.hour, q3Time.minute)}`;
-          }
-        }
-
-        // Find most common day of week across all top buckets
-        const dayOfWeekMap = new Map();
-        for (const bucket of timeBuckets) {
-          for (const [day, count] of bucket.stats.dayOfWeek.entries()) {
-            dayOfWeekMap.set(day, (dayOfWeekMap.get(day) || 0) + count);
-          }
-        }
-
-        let bestDayOfWeek = null;
-        let bestDayCount = 0;
-        for (const [day, count] of dayOfWeekMap.entries()){
-          if (count > bestDayCount){
-            bestDayCount = count;
-            bestDayOfWeek = day;
-          }
-        }
-        
-        // Format time in user's local timezone
-        const date = new Date();
-        date.setHours(bestHour, bestMinute, 0, 0);
-        
-        // Get timezone abbreviation (ET, PT, etc.)
-        const tzStr = date.toLocaleTimeString('en-US', {
-          timeZoneName: 'short'
-        }).split(' ').pop();
-
-        const dayStr = bestDayOfWeek != null ? dayNames[bestDayOfWeek] : '';
-
-        return {
-          timeStr: `${timeRangeStr} ${tzStr}`,
-          dayStr: dayStr ? ` on ${dayStr}` : '',
-          postCount: totalPostsUsed
-        };
-      }
-      
-      // Calculate for year (365 days), month (30 days), and week (7 days)
-      const yearResult = calculateBestTimeForRange(365);
-      const monthResult = calculateBestTimeForRange(30);
-      const weekResult = calculateBestTimeForRange(7);
-      
-      return {
-        year: yearResult,
-        month: monthResult,
-        week: weekResult
-      };
-    }
 
     // Function to calculate best time to post for LIKES from ALL users' data
     function calculateBestPostTimeForLikes(){
@@ -3788,6 +4833,38 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       
       const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
       const now = Date.now();
+      const HEATMAP_START_HOUR = 0;
+      const HEATMAP_END_HOUR = 24;
+      const HEATMAP_BUCKETS = HEATMAP_END_HOUR - HEATMAP_START_HOUR;
+
+      function buildHeatmap(daysBack){
+        const cutoffTime = now - (daysBack * 24 * 60 * 60 * 1000);
+        const matrix = Array.from({ length: 7 }, () => Array(HEATMAP_BUCKETS).fill(0));
+        for (const [, user] of Object.entries(metrics.users||{})){
+          for (const [, p] of Object.entries(user.posts||{})){
+            const postTime = getPostTimeStrict(p);
+            if (!postTime || postTime < cutoffTime) continue;
+            const windowEndTime = postTime + (24 * 60 * 60 * 1000);
+            let maxLikes = 0;
+            for (const s of (p.snapshots||[])){
+              if (s.t <= windowEndTime && s.likes != null){
+                maxLikes = Math.max(maxLikes, Number(s.likes));
+              }
+            }
+            if (maxLikes <= 0) continue;
+            const postDate = new Date(postTime);
+            const hour = postDate.getHours();
+            const day = postDate.getDay();
+            const col = hour - HEATMAP_START_HOUR;
+            matrix[day][col] += maxLikes;
+          }
+        }
+        let max = 0;
+        for (const row of matrix){
+          for (const v of row) max = Math.max(max, v);
+        }
+        return { matrix, max };
+      }
       
       function calculateBestTimeForRange(daysBack){
         const cutoffTime = now - (daysBack * 24 * 60 * 60 * 1000);
@@ -3843,26 +4920,17 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         if (timeStats.size === 0) return null;
         
         // Find top 3 time buckets with highest average likes
-        const timeBuckets = Array.from(timeStats.entries())
+        const allBuckets = Array.from(timeStats.entries())
           .map(([timeKey, stats]) => ({
             timeKey,
             avg: stats.totalLikes / stats.count,
             count: stats.count,
             stats
           }))
-          .sort((a, b) => b.avg - a.avg)
-          .slice(0, 3);
+          .sort((a, b) => b.avg - a.avg);
 
-        if (timeBuckets.length === 0) return null;
+        if (allBuckets.length === 0) return null;
 
-        // Create time range from top buckets - use tighter range for better accuracy
-        const times = timeBuckets.flatMap(bucket => bucket.stats.times)
-          .sort((a, b) => {
-            if (a.hour !== b.hour) return a.hour - b.hour;
-            return a.minute - b.minute;
-          });
-
-        // Format as time range
         const formatTime = (hour, minute) => {
           const hour12 = hour % 12 || 12;
           const minuteStr = String(minute).padStart(2, '0');
@@ -3870,378 +4938,491 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           return `${hour12}:${minuteStr} ${ampm}`;
         };
 
-        // Calculate median time for more accurate best time
-        const medianIdx = Math.floor(times.length / 2);
-        const medianTime = times[medianIdx];
-        const bestHour = medianTime.hour;
-        const bestMinute = medianTime.minute;
+        const buildRecommendation = (buckets, totalPosts)=>{
+          if (!buckets || buckets.length === 0) return null;
+          const times = buckets.flatMap(bucket => bucket.stats.times)
+            .sort((a, b) => {
+              if (a.hour !== b.hour) return a.hour - b.hour;
+              return a.minute - b.minute;
+            });
+          if (!times.length) return null;
 
-        let timeRangeStr;
-        if (times.length <= 5) {
-          // If few posts, show single time
-          timeRangeStr = formatTime(medianTime.hour, medianTime.minute);
-        } else {
-          // Use interquartile range (25th to 75th percentile) for tighter, more accurate range
-          const q1Idx = Math.floor(times.length * 0.25);
-          const q3Idx = Math.floor(times.length * 0.75);
-          const q1Time = times[q1Idx];
-          const q3Time = times[q3Idx];
-          
-          // If the range is still too broad (>3 hours), use median ±1 hour
-          const q1Minutes = q1Time.hour * 60 + q1Time.minute;
-          const q3Minutes = q3Time.hour * 60 + q3Time.minute;
-          const rangeMinutes = q3Minutes - q1Minutes;
-          
-          if (rangeMinutes > 180) { // More than 3 hours
-            // Use median ±1 hour for tighter range
-            const medianMinutes = bestHour * 60 + bestMinute;
-            const startMinutes = Math.max(0, medianMinutes - 60);
-            const endMinutes = Math.min(1439, medianMinutes + 60);
-            const startHour = Math.floor(startMinutes / 60) % 24;
-            const startMin = startMinutes % 60;
-            const endHour = Math.floor(endMinutes / 60) % 24;
-            const endMin = endMinutes % 60;
-            timeRangeStr = `${formatTime(startHour, startMin)} - ${formatTime(endHour, endMin)}`;
+          const medianIdx = Math.floor(times.length / 2);
+          const medianTime = times[medianIdx];
+          const bestHour = medianTime.hour;
+          const bestMinute = medianTime.minute;
+          const recommendMinute = bestMinute < 30 ? 1 : 31;
+
+          let timeRangeStr;
+          if (times.length <= 5) {
+            timeRangeStr = formatTime(medianTime.hour, medianTime.minute);
           } else {
-            // Use interquartile range
-            timeRangeStr = `${formatTime(q1Time.hour, q1Time.minute)} - ${formatTime(q3Time.hour, q3Time.minute)}`;
+            const q1Idx = Math.floor(times.length * 0.25);
+            const q3Idx = Math.floor(times.length * 0.75);
+            const q1Time = times[q1Idx];
+            const q3Time = times[q3Idx];
+            const q1Minutes = q1Time.hour * 60 + q1Time.minute;
+            const q3Minutes = q3Time.hour * 60 + q3Time.minute;
+            const rangeMinutes = q3Minutes - q1Minutes;
+            if (rangeMinutes > 180) {
+              const medianMinutes = bestHour * 60 + bestMinute;
+              const startMinutes = Math.max(0, medianMinutes - 60);
+              const endMinutes = Math.min(1439, medianMinutes + 60);
+              const startHour = Math.floor(startMinutes / 60) % 24;
+              const startMin = startMinutes % 60;
+              const endHour = Math.floor(endMinutes / 60) % 24;
+              const endMin = endMinutes % 60;
+              timeRangeStr = `${formatTime(startHour, startMin)} - ${formatTime(endHour, endMin)}`;
+            } else {
+              timeRangeStr = `${formatTime(q1Time.hour, q1Time.minute)} - ${formatTime(q3Time.hour, q3Time.minute)}`;
+            }
           }
-        }
 
-        // Find most common day of week across all top buckets
-        const dayOfWeekMap = new Map();
-        for (const bucket of timeBuckets) {
-          for (const [day, count] of bucket.stats.dayOfWeek.entries()) {
-            dayOfWeekMap.set(day, (dayOfWeekMap.get(day) || 0) + count);
+          const recommendTimeStr = formatTime(bestHour, recommendMinute);
+
+          const dayOfWeekMap = new Map();
+          for (const bucket of buckets) {
+            for (const [day, count] of bucket.stats.dayOfWeek.entries()) {
+              dayOfWeekMap.set(day, (dayOfWeekMap.get(day) || 0) + count);
+            }
           }
-        }
 
-        let bestDayOfWeek = null;
-        let bestDayCount = 0;
-        for (const [day, count] of dayOfWeekMap.entries()){
-          if (count > bestDayCount){
-            bestDayCount = count;
-            bestDayOfWeek = day;
+          let bestDayOfWeek = null;
+          let bestDayCount = 0;
+          for (const [day, count] of dayOfWeekMap.entries()){
+            if (count > bestDayCount){
+              bestDayCount = count;
+              bestDayOfWeek = day;
+            }
           }
-        }
 
-        const date = new Date();
-        date.setHours(bestHour, bestMinute, 0, 0);
+          const date = new Date();
+          date.setHours(bestHour, bestMinute, 0, 0);
 
-        const tzStr = date.toLocaleTimeString('en-US', {
-          timeZoneName: 'short'
-        }).split(' ').pop();
+          const tzStr = date.toLocaleTimeString('en-US', {
+            timeZoneName: 'short'
+          }).split(' ').pop();
 
-        const dayStr = bestDayOfWeek != null ? dayNames[bestDayOfWeek] : '';
+          const dayStr = bestDayOfWeek != null ? dayNames[bestDayOfWeek] : '';
+          const postCount = buckets.reduce((sum, bucket)=>sum + (bucket.count || 0), 0);
 
-        return {
-          timeStr: `${timeRangeStr} ${tzStr}`,
-          dayStr: dayStr ? ` on ${dayStr}` : '',
-          postCount: totalPostsUsed
+          return {
+            timeStr: `${timeRangeStr} ${tzStr}`,
+            recommendTimeStr: `${recommendTimeStr} ${tzStr}`,
+            dayStr: dayStr ? ` on ${dayStr}` : '',
+            postCount,
+            totalPostsUsed: totalPosts,
+            bestHour,
+            bestMinute,
+            bestDayOfWeek
+          };
         };
+
+        const primary = buildRecommendation(allBuckets.slice(0, 3), totalPostsUsed);
+        let secondary = null;
+        if (primary && allBuckets.length > 0) {
+          const minHourDistance = 6;
+          const primaryHour = primary.bestHour;
+          const primaryDayStr = primary.dayStr ? primary.dayStr.replace(' on ', '') : '';
+          const getHourDistance = (hour)=>{
+            const diff = Math.abs(hour - primaryHour);
+            return Math.min(diff, 24 - diff);
+          };
+          const eligibleBuckets = allBuckets.filter((bucket)=>{
+            const hours = bucket.stats.times.map(t=>t.hour);
+            const avgHour = hours.reduce((sum, h)=>sum + h, 0) / (hours.length || 1);
+            const dayCounts = bucket.stats.dayOfWeek;
+            let topDay = null;
+            let topCount = 0;
+            for (const [day, count] of dayCounts.entries()){
+              if (count > topCount){
+                topCount = count;
+                topDay = day;
+              }
+            }
+            const dayStr = topDay != null ? dayNames[topDay] : '';
+            return (!primaryDayStr || dayStr !== primaryDayStr);
+          });
+          const farBucket = eligibleBuckets.find((bucket)=>{
+            const hours = bucket.stats.times.map(t=>t.hour);
+            const avgHour = hours.reduce((sum, h)=>sum + h, 0) / (hours.length || 1);
+            return getHourDistance(avgHour) > minHourDistance;
+          }) || eligibleBuckets[0];
+          secondary = farBucket ? buildRecommendation([farBucket], totalPostsUsed) : null;
+        }
+
+        return { primary, secondary };
       }
       
       const yearResult = calculateBestTimeForRange(365);
       const monthResult = calculateBestTimeForRange(30);
       const weekResult = calculateBestTimeForRange(7);
+      const yearHeatmap = buildHeatmap(365);
+      const monthHeatmap = buildHeatmap(30);
+      const weekHeatmap = buildHeatmap(7);
       
       return {
-        year: yearResult,
-        month: monthResult,
-        week: weekResult
+        year: { ...yearResult, heatmap: yearHeatmap },
+        month: { ...monthResult, heatmap: monthHeatmap },
+        week: { ...weekResult, heatmap: weekHeatmap }
       };
     }
 
-    // Function to calculate best time to post for REMIXES from ALL users' data
-    function calculateBestPostTimeForRemixes(){
-      if (!metrics || !metrics.users) return { year: null, month: null, week: null };
-      
+
+  // Function to update best time to post section
+    let lastBestTimeUpdate = 0;
+    let bestTimeData = null;
+    let bestTimeRange = 'year';
+    let bestTimeRec = 'primary';
+    let bestTimeHeatmapTooltip = null;
+    function openTopFeedGatherWindow(){
+      const url = 'https://sora.chatgpt.com/explore?feed=top&gather=1';
+      try {
+        if (chrome?.windows?.create) {
+          chrome.windows.create({ url, focused: true });
+          return;
+        }
+      } catch {}
+      try { window.open(url, '_blank', 'noopener,noreferrer'); } catch {}
+    }
+    function openProfileGatherWindow(handle){
+      const cleanHandle = (handle || '').replace(/^@/, '').trim();
+      if (!cleanHandle) return;
+      const url = `${SITE_ORIGIN}/profile/${encodeURIComponent(cleanHandle)}?gather=1`;
+      try {
+        if (chrome?.windows?.create) {
+          chrome.windows.create({ url, focused: true });
+          return;
+        }
+      } catch {}
+      try { window.open(url, '_blank', 'noopener,noreferrer'); } catch {}
+    }
+    function initBestTimeGatherLink(){
+      const link = $('#bestTimeGatherLink');
+      if (!link) return;
+      link.addEventListener('click', (e)=>{
+        e.preventDefault();
+        openTopFeedGatherWindow();
+      });
+    }
+    function initMetricsGatherLink(){
+      const link = $('#metricsGatherLink');
+      if (!link) return;
+      link.addEventListener('click', (e)=>{
+        e.preventDefault();
+        if (!currentUserKey) return;
+        if (isTopTodayKey(currentUserKey)) {
+          openTopFeedGatherWindow();
+          return;
+        }
+        const user = resolveUserForKey(metrics, currentUserKey);
+        const handle = getProfileHandleFromKey(currentUserKey, user);
+        if (!handle) return;
+        openProfileGatherWindow(handle);
+      });
+    }
+    function bindBestTimeHeatmapTooltip(heatmapEl){
+      if (!heatmapEl || heatmapEl.dataset.tooltipBound === '1') return;
+      heatmapEl.dataset.tooltipBound = '1';
+      if (!bestTimeHeatmapTooltip) {
+        bestTimeHeatmapTooltip = document.createElement('div');
+        bestTimeHeatmapTooltip.className = 'tooltip';
+        bestTimeHeatmapTooltip.style.display = 'none';
+        document.body.appendChild(bestTimeHeatmapTooltip);
+      }
+      let activeCell = null;
+      const hide = ()=>{
+        if (bestTimeHeatmapTooltip) bestTimeHeatmapTooltip.style.display = 'none';
+        activeCell = null;
+      };
+      const showAt = (cell, clientX, clientY)=>{
+        const text = cell?.dataset?.tooltip || '';
+        if (!text || !bestTimeHeatmapTooltip) return;
+        bestTimeHeatmapTooltip.textContent = text;
+        bestTimeHeatmapTooltip.style.display = 'block';
+        const width = bestTimeHeatmapTooltip.offsetWidth || 0;
+        const left = Math.max(8, Math.min(window.innerWidth - width - 8, clientX - width / 2));
+        bestTimeHeatmapTooltip.style.left = left + 'px';
+        bestTimeHeatmapTooltip.style.top = (clientY + 8) + 'px';
+      };
+      heatmapEl.addEventListener('mousemove', (e)=>{
+        const cell = e.target.closest('.best-time-heatmap-cell');
+        if (!cell) { hide(); return; }
+        if (heatmapEl.dataset.todayMode === '1' && cell.classList.contains('today-inactive')) {
+          hide();
+          return;
+        }
+        if (activeCell !== cell) activeCell = cell;
+        showAt(cell, e.clientX, e.clientY);
+      });
+      heatmapEl.addEventListener('mouseleave', hide);
+      heatmapEl.addEventListener('blur', hide, true);
+    }
+    function formatBestTime(hour, minute){
+      const hour12 = hour % 12 || 12;
+      const minuteStr = String(minute).padStart(2, '0');
+      const ampm = hour >= 12 ? 'PM' : 'AM';
+      return `${hour12}:${minuteStr} ${ampm}`;
+    }
+    function buildTodayRecommendation(heatmap, totalPostsUsed){
+      if (!heatmap || !Array.isArray(heatmap.matrix)) return null;
+      if (!heatmap.max || heatmap.max <= 0) return null;
       const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-      const now = Date.now();
-      
-      function calculateBestTimeForRange(daysBack){
-        const cutoffTime = now - (daysBack * 24 * 60 * 60 * 1000);
-        const timeStats = new Map();
-        const timeWindowMinutes = 1440;
-        const bucketSizeMinutes = 15;
-        let totalPostsUsed = 0;
-        
-        for (const [userKey, user] of Object.entries(metrics.users||{})){
-          for (const [pid, p] of Object.entries(user.posts||{})){
-            const postTime = getPostTimeStrict(p);
-            if (!postTime || postTime < cutoffTime) continue;
-            
-            const windowEndTime = postTime + (timeWindowMinutes * 60 * 1000);
-            let maxRemixes = 0;
-            for (const s of (p.snapshots||[])){
-              const remixCount = s.remix_count ?? s.remixes ?? null;
-              if (s.t <= windowEndTime && remixCount != null){
-                maxRemixes = Math.max(maxRemixes, Number(remixCount));
-              }
-            }
-            
-            if (maxRemixes > 0){
-              totalPostsUsed++;
-              const postDate = new Date(postTime);
-              const hour = postDate.getHours();
-              const minute = postDate.getMinutes();
-              const dayOfWeek = postDate.getDay();
-              
-              const minuteBucket = Math.floor(minute / bucketSizeMinutes) * bucketSizeMinutes;
-              const timeKey = `${hour}:${minuteBucket}`;
-              
-              if (!timeStats.has(timeKey)){
-                timeStats.set(timeKey, { 
-                  count: 0, 
-                  totalRemixes: 0,
-                  dayOfWeek: new Map(),
-                  times: []
-                });
-              }
-              const stats = timeStats.get(timeKey);
-              stats.count++;
-              stats.totalRemixes += maxRemixes;
-              stats.times.push({ hour, minute, dayOfWeek });
-              
-              if (!stats.dayOfWeek.has(dayOfWeek)){
-                stats.dayOfWeek.set(dayOfWeek, 0);
-              }
-              stats.dayOfWeek.set(dayOfWeek, stats.dayOfWeek.get(dayOfWeek) + 1);
-            }
-          }
-        }
-        
-        if (timeStats.size === 0) return null;
-        
-        // Find top 3 time buckets with highest average remixes
-        const timeBuckets = Array.from(timeStats.entries())
-          .map(([timeKey, stats]) => ({
-            timeKey,
-            avg: stats.totalRemixes / stats.count,
-            count: stats.count,
-            stats
-          }))
-          .sort((a, b) => b.avg - a.avg)
-          .slice(0, 3);
-
-        if (timeBuckets.length === 0) return null;
-
-        // Create time range from top buckets - use tighter range for better accuracy
-        const times = timeBuckets.flatMap(bucket => bucket.stats.times)
-          .sort((a, b) => {
-            if (a.hour !== b.hour) return a.hour - b.hour;
-            return a.minute - b.minute;
-          });
-
-        // Format as time range
-        const formatTime = (hour, minute) => {
-          const hour12 = hour % 12 || 12;
-          const minuteStr = String(minute).padStart(2, '0');
-          const ampm = hour >= 12 ? 'PM' : 'AM';
-          return `${hour12}:${minuteStr} ${ampm}`;
-        };
-
-        // Calculate median time for more accurate best time
-        const medianIdx = Math.floor(times.length / 2);
-        const medianTime = times[medianIdx];
-        const bestHour = medianTime.hour;
-        const bestMinute = medianTime.minute;
-
-        let timeRangeStr;
-        if (times.length <= 5) {
-          // If few posts, show single time
-          timeRangeStr = formatTime(medianTime.hour, medianTime.minute);
-        } else {
-          // Use interquartile range (25th to 75th percentile) for tighter, more accurate range
-          const q1Idx = Math.floor(times.length * 0.25);
-          const q3Idx = Math.floor(times.length * 0.75);
-          const q1Time = times[q1Idx];
-          const q3Time = times[q3Idx];
-          
-          // If the range is still too broad (>3 hours), use median ±1 hour
-          const q1Minutes = q1Time.hour * 60 + q1Time.minute;
-          const q3Minutes = q3Time.hour * 60 + q3Time.minute;
-          const rangeMinutes = q3Minutes - q1Minutes;
-          
-          if (rangeMinutes > 180) { // More than 3 hours
-            // Use median ±1 hour for tighter range
-            const medianMinutes = bestHour * 60 + bestMinute;
-            const startMinutes = Math.max(0, medianMinutes - 60);
-            const endMinutes = Math.min(1439, medianMinutes + 60);
-            const startHour = Math.floor(startMinutes / 60) % 24;
-            const startMin = startMinutes % 60;
-            const endHour = Math.floor(endMinutes / 60) % 24;
-            const endMin = endMinutes % 60;
-            timeRangeStr = `${formatTime(startHour, startMin)} - ${formatTime(endHour, endMin)}`;
+      const now = new Date();
+      const day = now.getDay();
+      const scores = heatmap.matrix?.[day] || [];
+      const candidates = scores
+        .map((score, hour)=>({ hour, score }))
+        .filter((entry)=> entry.score > 0)
+        .sort((a, b)=> (b.score - a.score) || (a.hour - b.hour));
+      if (!candidates.length) return null;
+      const tzStr = now.toLocaleTimeString('en-US', { timeZoneName: 'short' }).split(' ').pop();
+      const nowMs = now.getTime();
+      const buildForHour = (hour)=>{
+        const start = new Date(now);
+        start.setHours(hour, 0, 0, 0);
+        const end = new Date(now);
+        end.setHours(hour + 1, 0, 0, 0);
+        if (nowMs >= end.getTime()) return null;
+        let recommendMinute = 1;
+        let recommendTime = new Date(start);
+        recommendTime.setMinutes(recommendMinute, 0, 0);
+        if (nowMs > recommendTime.getTime()) {
+          const secondMark = new Date(start);
+          secondMark.setMinutes(31, 0, 0);
+          if (nowMs <= secondMark.getTime()) {
+            recommendMinute = 31;
+            recommendTime = secondMark;
           } else {
-            // Use interquartile range
-            timeRangeStr = `${formatTime(q1Time.hour, q1Time.minute)} - ${formatTime(q3Time.hour, q3Time.minute)}`;
+            return null;
           }
         }
-
-        // Find most common day of week across all top buckets
-        const dayOfWeekMap = new Map();
-        for (const bucket of timeBuckets) {
-          for (const [day, count] of bucket.stats.dayOfWeek.entries()) {
-            dayOfWeekMap.set(day, (dayOfWeekMap.get(day) || 0) + count);
-          }
-        }
-
-        let bestDayOfWeek = null;
-        let bestDayCount = 0;
-        for (const [day, count] of dayOfWeekMap.entries()){
-          if (count > bestDayCount){
-            bestDayCount = count;
-            bestDayOfWeek = day;
-          }
-        }
-        
-        const date = new Date();
-        date.setHours(bestHour, bestMinute, 0, 0);
-
-        const tzStr = date.toLocaleTimeString('en-US', {
-          timeZoneName: 'short'
-        }).split(' ').pop();
-
-        const dayStr = bestDayOfWeek != null ? dayNames[bestDayOfWeek] : '';
-
+        const endHour = (hour + 1) % 24;
         return {
-          timeStr: `${timeRangeStr} ${tzStr}`,
-          dayStr: dayStr ? ` on ${dayStr}` : '',
-          postCount: totalPostsUsed
+          timeStr: `${formatBestTime(hour, 0)} - ${formatBestTime(endHour, 0)} ${tzStr}`,
+          recommendTimeStr: `${formatBestTime(hour, recommendMinute)} ${tzStr}`,
+          dayStr: ` on ${dayNames[day]}`,
+          postCount: 0,
+          totalPostsUsed,
+          bestHour: hour,
+          bestMinute: recommendMinute
+        };
+      };
+      let picked = null;
+      for (const candidate of candidates){
+        const candidateRec = buildForHour(candidate.hour);
+        if (candidateRec) { picked = candidateRec; break; }
+      }
+      if (!picked) {
+        const fallback = candidates[0];
+        const endHour = (fallback.hour + 1) % 24;
+        picked = {
+          timeStr: `${formatBestTime(fallback.hour, 0)} - ${formatBestTime(endHour, 0)} ${tzStr}`,
+          recommendTimeStr: `${formatBestTime(fallback.hour, 1)} ${tzStr}`,
+          dayStr: ` on ${dayNames[day]}`,
+          postCount: 0,
+          totalPostsUsed,
+          bestHour: fallback.hour,
+          bestMinute: 1
         };
       }
-      
-      const yearResult = calculateBestTimeForRange(365);
-      const monthResult = calculateBestTimeForRange(30);
-      const weekResult = calculateBestTimeForRange(7);
-      
-      return {
-        year: yearResult,
-        month: monthResult,
-        week: weekResult
-      };
+      return picked;
     }
-
-    // Function to render best time grid
-    function renderBestTimeGrid(gridElement, bestTimes, postCountYear, postCountMonth, postCountWeek){
-      if (!gridElement) return;
-
-      gridElement.innerHTML = '';
-
-      const renderTimeString = (timeData) => {
-        if (!timeData) return null;
-
-        // Handle time ranges (contains dash) vs single times
-        // Format: "12:30 AM - 2:29 PM ET" or "3:03 PM ET"
-        if (timeData.timeStr.includes(' - ')) {
-          // Range format: "12:30 AM - 2:29 PM ET"
-          const parts = timeData.timeStr.split(' - ');
-          const startPart = parts[0].trim(); // "12:30 AM"
-          const endPart = parts[1].trim(); // "2:29 PM ET"
-          
-          // Parse start time: keep space between time and AM/PM
-          const startParts = startPart.split(' ');
-          const startTime = `${startParts[0]} ${startParts[1]}`; // "12:30 AM"
-          
-          // Parse end time: keep space between time and AM/PM, extract timezone
-          const endParts = endPart.split(' ');
-          const endTime = `${endParts[0]} ${endParts[1]}`; // "2:29 PM"
-          const timezone = endParts[2] || ''; // "ET" or user's timezone
-          
-          return `${startTime} - ${endTime} ${timezone}`;
-        } else {
-          // Single time format: "3:03 PM ET"
-          const parts = timeData.timeStr.split(' ');
-          const hourMinute = parts[0]; // "3:03"
-          const ampm = parts[1]; // "PM"
-          const timezone = parts[2] || ''; // "ET" or user's timezone
-          return `${hourMinute} ${ampm} ${timezone}`;
+    function pickPreferredTodayRec(data){
+      if (!data) return null;
+      const today = new Date().getDay();
+      if (Number.isFinite(data.primary?.bestDayOfWeek) && data.primary.bestDayOfWeek === today) {
+        return data.primary;
+      }
+      if (Number.isFinite(data.secondary?.bestDayOfWeek) && data.secondary.bestDayOfWeek === today) {
+        return data.secondary;
+      }
+      return null;
+    }
+    function renderBestTimeWidget(bestTimes, range){
+      if (!bestTimes) return;
+      const data = bestTimes[range];
+      const heroEl = $('.best-time-hero');
+      const dayEl = $('#bestTimeDay');
+      const timeEl = $('#bestTimeTime');
+      const windowEl = $('#bestTimeWindow');
+      const countEl = $('#bestTimeCount');
+      const insightEl = $('#bestTimeInsight');
+      const heatmapEl = $('#bestTimeHeatmap');
+      const tabWeek = $('#bestTimeTabWeek');
+      const tabMonth = $('#bestTimeTabMonth');
+      const tabYear = $('#bestTimeTabYear');
+      [tabWeek, tabMonth, tabYear].forEach((btn)=>{
+        if (!btn) return;
+        const id = btn.id === 'bestTimeTabWeek' ? 'week' : (btn.id === 'bestTimeTabMonth' ? 'month' : 'year');
+        if (id === range) btn.classList.add('active');
+        else btn.classList.remove('active');
+      });
+      const parseTimeStrings = (timeStr, recommendTimeStr)=>{
+        if (!timeStr && !recommendTimeStr) return { primary: '—', window: '—' };
+        const primary = recommendTimeStr || timeStr || '—';
+        if (timeStr && timeStr.includes(' - ')) {
+          return { primary, window: timeStr };
+        }
+        return { primary, window: timeStr || primary };
+      };
+      const recLabel = $('#bestTimeRecLabel');
+      const recPrimaryBtn = $('#bestTimeRecPrimary');
+      const recSecondaryBtn = $('#bestTimeRecSecondary');
+      const recTodayBtn = $('#bestTimeRecToday');
+      const isSecondary = bestTimeRec === 'secondary';
+      const isToday = bestTimeRec === 'today';
+      const applyRecUi = ()=>{
+        if (recLabel) {
+          recLabel.textContent = isSecondary ? 'Next Recommendation' : (isToday ? "Today's Recommendation" : 'Top Recommendation');
+        }
+        if (recPrimaryBtn) {
+          recPrimaryBtn.classList.toggle('active', bestTimeRec === 'primary');
+        }
+        if (recSecondaryBtn) {
+          recSecondaryBtn.classList.toggle('active', isSecondary);
+        }
+        if (recTodayBtn) {
+          recTodayBtn.classList.toggle('active', isToday);
         }
       };
-
-      const renderDayString = (timeData) => {
-        if (!timeData) return null;
-        if (timeData.dayStr) {
-          return timeData.dayStr.replace(' on ', '');
+      if (!data) {
+        if (heroEl) heroEl.classList.remove('secondary');
+        if (dayEl) dayEl.textContent = '—';
+        if (timeEl) timeEl.textContent = '—';
+        if (windowEl) windowEl.textContent = '—';
+        if (countEl) countEl.textContent = '0 posts';
+        if (insightEl) insightEl.textContent = 'Not enough data yet.';
+        if (heatmapEl) heatmapEl.innerHTML = '';
+        applyRecUi();
+        return;
+      }
+      const preferredTodayRec = bestTimeRec === 'today' ? pickPreferredTodayRec(data) : null;
+      const todayRec = bestTimeRec === 'today' ? buildTodayRecommendation(data.heatmap, data.primary?.totalPostsUsed ?? data.secondary?.totalPostsUsed ?? 0) : null;
+      const selected = bestTimeRec === 'today'
+        ? (todayRec || preferredTodayRec || data.primary)
+        : (bestTimeRec === 'secondary' && data.secondary ? data.secondary : data.primary);
+      const dayStr = selected?.dayStr ? selected.dayStr.replace(' on ', '') : 'No strong preference';
+      const timeParts = parseTimeStrings(selected?.timeStr, selected?.recommendTimeStr);
+      if (dayEl) dayEl.textContent = dayStr;
+      if (timeEl) timeEl.textContent = timeParts.primary;
+      if (windowEl) windowEl.textContent = timeParts.window;
+      const totalPosts = selected?.totalPostsUsed ?? selected?.postCount ?? 0;
+      const rangeLabel = range === 'week' ? 'this week' : (range === 'year' ? 'this year' : 'this month');
+      if (countEl) countEl.textContent = `${(totalPosts || 0).toLocaleString()} posts ${rangeLabel}`;
+      if (insightEl) {
+        const base = dayStr === 'No strong preference' ? 'Engagement stays evenly spread across the week.' : `Engagement peaks on ${dayStr}.`;
+        insightEl.textContent = base;
+      }
+      applyRecUi();
+      if (heatmapEl) heatmapEl.dataset.todayMode = isToday ? '1' : '0';
+      if (heatmapEl && data.heatmap) {
+        const dayNamesShort = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+        const dayNamesFull = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+        const tz = new Date().toLocaleTimeString('en-US', { timeZoneName: 'short' }).split(' ').pop();
+        const todayActiveHours = isToday ? new Set() : null;
+        if (todayActiveHours) {
+          const now = new Date();
+          for (let i = 0; i < 24; i++){
+            const d = new Date(now.getTime() + i * 60 * 60 * 1000);
+            todayActiveHours.add(`${d.getDay()}-${d.getHours()}`);
+          }
         }
-        return 'No strong preference';
-      };
-
-      // Create column for Week
-      const weekColumn = document.createElement('div');
-      weekColumn.className = 'best-time-column';
-      
-      if (bestTimes.week) {
-        weekColumn.innerHTML = `
-          <div class="best-time-column-label">Based on</div>
-          <div class="best-time-column-count">${postCountWeek.toLocaleString()} posts</div>
-          <div class="best-time-column-period">this week</div>
-          <div class="best-time-column-label" style="margin-top: 12px;">Post between</div>
-          <div class="best-time-column-time">${renderTimeString(bestTimes.week)}</div>
-          <div class="best-time-column-day">on ${renderDayString(bestTimes.week)}</div>
-        `;
-      } else {
-        weekColumn.innerHTML = '<div class="best-time-column-na">N/A</div>';
+        const formatRangeShort = (startHour, endHour)=>{
+          const normStart = startHour % 24;
+          const normEnd = endHour % 24;
+          const start12 = normStart % 12 || 12;
+          const end12 = normEnd % 12 || 12;
+          const startAmpm = normStart >= 12 ? 'PM' : 'AM';
+          const endAmpm = normEnd >= 12 ? 'PM' : 'AM';
+          if (startAmpm === endAmpm) {
+            return `${start12}-${end12}${endAmpm}`;
+          }
+          return `${start12}${startAmpm}-${end12}${endAmpm}`;
+        };
+        heatmapEl.innerHTML = '';
+        let max = data.heatmap.max || 0;
+        if (todayActiveHours) {
+          max = 0;
+          data.heatmap.matrix.forEach((row, dayIdx)=>{
+            row.forEach((v, colIdx)=>{
+              if (todayActiveHours.has(`${dayIdx}-${colIdx}`)) {
+                max = Math.max(max, v);
+              }
+            });
+          });
+        }
+        data.heatmap.matrix.forEach((row, dayIdx)=>{
+          const rowEl = document.createElement('div');
+          rowEl.className = 'best-time-heatmap-row';
+          const dayEl = document.createElement('div');
+          dayEl.className = 'best-time-heatmap-day';
+          dayEl.textContent = dayNamesShort[dayIdx];
+          if (dayStr.startsWith(dayNamesShort[dayIdx])) dayEl.classList.add('highlight');
+          rowEl.appendChild(dayEl);
+          const cells = document.createElement('div');
+          cells.className = 'best-time-heatmap-cells';
+          row.forEach((v, colIdx)=>{
+            const cell = document.createElement('div');
+            cell.className = 'best-time-heatmap-cell';
+            let isTodayActive = true;
+            if (todayActiveHours) {
+              const key = `${dayIdx}-${colIdx}`;
+              isTodayActive = todayActiveHours.has(key);
+              cell.classList.add(isTodayActive ? 'today-active' : 'today-inactive');
+            }
+            const startHour = colIdx;
+            const endHour = startHour + 1;
+            const likes = Math.round(v || 0);
+            const likesDisplay = likes < 1000 ? likes.toLocaleString() : fmt2(likes);
+            const likesStr = `${likesDisplay} like${likes === 1 ? '' : 's'}`;
+            const timeStr = formatRangeShort(startHour, endHour);
+            const tooltip = `${dayNamesFull[dayIdx]} ${timeStr} ${tz} averages ${likesStr}`;
+            if (!isToday || isTodayActive) {
+              cell.dataset.tooltip = tooltip;
+              cell.setAttribute('aria-label', tooltip);
+            } else {
+              cell.dataset.tooltip = '';
+              cell.setAttribute('aria-label', '');
+            }
+            if (max > 0) {
+              const pct = v / max;
+              if (pct > 0.66) cell.classList.add('level-3');
+              else if (pct > 0.33) cell.classList.add('level-2');
+              else if (pct > 0.1) cell.classList.add('level-1');
+            }
+            cells.appendChild(cell);
+          });
+          rowEl.appendChild(cells);
+          heatmapEl.appendChild(rowEl);
+        });
+        bindBestTimeHeatmapTooltip(heatmapEl);
       }
-      gridElement.appendChild(weekColumn);
-
-      // Create column for Month
-      const monthColumn = document.createElement('div');
-      monthColumn.className = 'best-time-column';
-      
-      if (bestTimes.month) {
-        monthColumn.innerHTML = `
-          <div class="best-time-column-label">Based on</div>
-          <div class="best-time-column-count">${postCountMonth.toLocaleString()} posts</div>
-          <div class="best-time-column-period">this month</div>
-          <div class="best-time-column-label" style="margin-top: 12px;">Post between</div>
-          <div class="best-time-column-time">${renderTimeString(bestTimes.month)}</div>
-          <div class="best-time-column-day">on ${renderDayString(bestTimes.month)}</div>
-        `;
-      } else {
-        monthColumn.innerHTML = '<div class="best-time-column-na">N/A</div>';
-      }
-      gridElement.appendChild(monthColumn);
-
-      // Create column for Year
-      const yearColumn = document.createElement('div');
-      yearColumn.className = 'best-time-column';
-      
-      if (bestTimes.year) {
-        yearColumn.innerHTML = `
-          <div class="best-time-column-label">Based on</div>
-          <div class="best-time-column-count">${postCountYear.toLocaleString()} posts</div>
-          <div class="best-time-column-period">this year</div>
-          <div class="best-time-column-label" style="margin-top: 12px;">Post between</div>
-          <div class="best-time-column-time">${renderTimeString(bestTimes.year)}</div>
-          <div class="best-time-column-day">on ${renderDayString(bestTimes.year)}</div>
-        `;
-      } else {
-        yearColumn.innerHTML = '<div class="best-time-column-na">N/A</div>';
-      }
-      gridElement.appendChild(yearColumn);
     }
-
-    // Function to update best time to post section
     function updateBestTimeToPostSection(){
-      const bestTimesViews = calculateBestPostTimeFromAllUsers();
-      const bestTimesLikes = calculateBestPostTimeForLikes();
-      const bestTimesRemixes = calculateBestPostTimeForRemixes();
+      const now = Date.now();
+      const shouldRefresh = !lastBestTimeUpdate || now - lastBestTimeUpdate >= 60000;
+      if (shouldRefresh) {
+        lastBestTimeUpdate = now;
+        bestTimeData = calculateBestPostTimeForLikes();
+      }
       
       // Render grids
-      renderBestTimeGrid($('#bestTimeViewsGrid'), bestTimesViews, 
-        bestTimesViews.year?.postCount || 0, 
-        bestTimesViews.month?.postCount || 0, 
-        bestTimesViews.week?.postCount || 0);
-      renderBestTimeGrid($('#bestTimeLikesGrid'), bestTimesLikes,
-        bestTimesLikes.year?.postCount || 0,
-        bestTimesLikes.month?.postCount || 0,
-        bestTimesLikes.week?.postCount || 0);
-      renderBestTimeGrid($('#bestTimeRemixesGrid'), bestTimesRemixes,
-        bestTimesRemixes.year?.postCount || 0,
-        bestTimesRemixes.month?.postCount || 0,
-        bestTimesRemixes.week?.postCount || 0);
+      renderBestTimeWidget(bestTimeData, bestTimeRange);
+    }
+    function initBestTimeTabs(){
+      const weekBtn = $('#bestTimeTabWeek');
+      const monthBtn = $('#bestTimeTabMonth');
+      const yearBtn = $('#bestTimeTabYear');
+      if (weekBtn) weekBtn.addEventListener('click', ()=>{ bestTimeRange = 'week'; renderBestTimeWidget(bestTimeData, bestTimeRange); });
+      if (monthBtn) monthBtn.addEventListener('click', ()=>{ bestTimeRange = 'month'; renderBestTimeWidget(bestTimeData, bestTimeRange); });
+      if (yearBtn) yearBtn.addEventListener('click', ()=>{ bestTimeRange = 'year'; renderBestTimeWidget(bestTimeData, bestTimeRange); });
+      const recPrimaryBtn = $('#bestTimeRecPrimary');
+      const recSecondaryBtn = $('#bestTimeRecSecondary');
+      const recTodayBtn = $('#bestTimeRecToday');
+      if (recPrimaryBtn) recPrimaryBtn.addEventListener('click', ()=>{ bestTimeRec = 'primary'; renderBestTimeWidget(bestTimeData, bestTimeRange); });
+      if (recSecondaryBtn) recSecondaryBtn.addEventListener('click', ()=>{ bestTimeRec = 'secondary'; renderBestTimeWidget(bestTimeData, bestTimeRange); });
+      if (recTodayBtn) recTodayBtn.addEventListener('click', ()=>{ bestTimeRec = 'today'; renderBestTimeWidget(bestTimeData, bestTimeRange); });
     }
 
     // Function to update first 24 hours chart
@@ -4303,14 +5484,29 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       viewsPerPersonChart.setData(vppSeries, timeWindowMinutes);
     }
 
+    function updateStaleButtonCount(user){
+      const staleBtn = $('#stale');
+      if (!staleBtn || !user) return;
+      const now = Date.now();
+      const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
+      const count = Object.entries(user.posts||{}).reduce((acc, [,p])=>{
+        const lastRefresh = lastRefreshMsForPost(p);
+        const ageMs = lastRefresh ? now - lastRefresh : Infinity;
+        return acc + (ageMs > TWENTY_FOUR_HOURS_MS ? 1 : 0);
+      }, 0);
+      staleBtn.textContent = `Stale (${count})`;
+    }
+
 	    async function refreshUserUI(opts={}){
-	      const { preserveEmpty=false, skipRestoreZoom=false } = opts;
-	      const user = resolveUserForKey(metrics, currentUserKey);
-	      if (!user){
-          setListActionActive('showAll');
-          currentVisibilitySource = 'showAll';
-	        buildPostsList(null, ()=>COLORS[0], new Set()); chart.setData([]); return;
-	      }
+	      const { preserveEmpty=false, skipRestoreZoom=false, skipPostListRebuild=false, autoRefresh=false } = opts;
+      const user = resolveUserForKey(metrics, currentUserKey);
+      if (!user){
+        updateMetricsHeader(currentUserKey, null);
+        updateMetricsGatherNote(currentUserKey, null);
+        setListActionActive('showAll');
+        currentVisibilitySource = 'showAll';
+        buildPostsList(null, ()=>COLORS[0], new Set()); chart.setData([]); return;
+      }
       // No precompute needed for IR; use latest available remix count only for cards
       // Integrity check: remove posts incorrectly attributed to this user
       // Reconcile ownership (selected user only), then reclaim, then remove empty posts
@@ -4321,16 +5517,44 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       }
 	      const colorFor = makeColorMap(user);
         const isTopToday = isTopTodayKey(currentUserKey);
-        const savedVisibility = getSavedVisibilityEntry(currentUserKey);
-        let effectiveSaved = savedVisibility;
-        if (savedVisibility && savedVisibility.source === 'legacy'){
-          if (isLegacyDefaultVisibility(user, savedVisibility.ids)){
-            effectiveSaved = null;
-          } else {
-            effectiveSaved = { ids: savedVisibility.ids, source: 'custom' };
+        updateMetricsHeader(currentUserKey, user);
+        updateMetricsGatherNote(currentUserKey, user);
+        if (!normalizeFilterAction(currentVisibilitySource)) {
+          const sessionAction = getSessionFilterAction();
+          currentVisibilitySource = sessionAction;
+          currentListActionId = (sessionAction === 'showAll' || sessionAction === 'hideAll' || isPresetVisibilitySource(sessionAction)) ? sessionAction : null;
+        }
+        if (currentVisibilitySource === 'showAll' || currentVisibilitySource === 'hideAll' || isPresetVisibilitySource(currentVisibilitySource)) {
+          currentListActionId = currentVisibilitySource;
+        }
+        if (visibleSet.size) {
+          for (const pid of Array.from(visibleSet)) {
+            if (!Object.prototype.hasOwnProperty.call(user.posts || {}, pid)) {
+              visibleSet.delete(pid);
+            }
           }
         }
-        const canRestoreSaved = effectiveSaved && (!isDefaultVisibilitySource(effectiveSaved.source) || savedVisibility?.__fromSession);
+        if (!preserveEmpty && visibleSet.size === 0) {
+          if (currentVisibilitySource === 'showAll') {
+            visibleSet.clear();
+            Object.keys(user.posts||{}).forEach(pid=>visibleSet.add(pid));
+          } else if (isPresetVisibilitySource(currentVisibilitySource)) {
+            const nextSet = computeVisibleSetForAction(user, currentVisibilitySource);
+            if (nextSet) {
+              visibleSet.clear();
+              for (const pid of nextSet) visibleSet.add(pid);
+            }
+          } else if (currentVisibilitySource === 'custom') {
+            const customEntry = getCustomVisibilityEntry(currentUserKey);
+            const ids = Array.isArray(customEntry?.ids) ? customEntry.ids : [];
+            if (ids.length) {
+              visibleSet.clear();
+              ids.forEach(pid=>{
+                if (pid && Object.prototype.hasOwnProperty.call(user.posts||{}, pid)) visibleSet.add(pid);
+              });
+            }
+          }
+        }
 
         // Top Today is a dynamic, virtual user: keep selections, but reconcile against the live post set.
         if (isTopToday){
@@ -4345,38 +5569,53 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
             setListActionActive('showAll');
             currentVisibilitySource = 'showAll';
           }
-        } else if (visibleSet.size === 0){
-          if (canRestoreSaved){
-            visibleSet.clear();
-            (effectiveSaved.ids || []).forEach(pid=>{
-              if (pid && Object.prototype.hasOwnProperty.call(user.posts||{}, pid)) visibleSet.add(pid);
-            });
-            currentVisibilitySource = effectiveSaved.source || 'custom';
-            currentListActionId = effectiveSaved.source || null;
-            setListActionActive(currentListActionId);
-            persistListActionForUser(currentUserKey, currentListActionId);
-            if (visibleSet.size === 0 && !preserveEmpty){
-              visibleSet.clear();
-              Object.keys(user.posts||{}).forEach(pid=>visibleSet.add(pid));
-              setListActionActive('showAll');
-              currentVisibilitySource = 'showAll';
-            }
-          } else if (!preserveEmpty){
-            visibleSet.clear();
-            Object.keys(user.posts||{}).forEach(pid=>visibleSet.add(pid));
-            setListActionActive('showAll');
-            currentVisibilitySource = 'showAll';
-          }
+        } else if (visibleSet.size === 0 && !preserveEmpty && currentVisibilitySource === 'showAll'){
+          visibleSet.clear();
+          Object.keys(user.posts||{}).forEach(pid=>visibleSet.add(pid));
+          setListActionActive('showAll');
+          currentVisibilitySource = 'showAll';
+          persistVisibility();
         }
-      if (listActionByUser[currentUserKey]) {
-        currentListActionId = listActionByUser[currentUserKey];
-        setListActionActive(currentListActionId);
+      const uiActionId = currentListActionId || currentVisibilitySource;
+      const isValidAction = uiActionId === 'showAll' || uiActionId === 'hideAll' || uiActionId === 'custom' || isPresetVisibilitySource(uiActionId);
+      if (isValidAction) {
+        setListActionActive(uiActionId);
+      } else {
+        currentVisibilitySource = 'showAll';
+        currentListActionId = 'showAll';
+        visibleSet.clear();
+        Object.keys(user.posts||{}).forEach(pid=>visibleSet.add(pid));
+        setListActionActive('showAll');
+        persistVisibility();
       }
-      buildPostsList(user, colorFor, visibleSet, { 
-        activeActionId: currentListActionId,
+      updateCustomButtonLabel(currentUserKey);
+      const visibilityActionId = currentListActionId || currentVisibilitySource;
+      const listActionId = (function(){
+        if (currentListActionId === 'showAll' || currentListActionId === 'hideAll' || currentListActionId === 'custom') return currentListActionId;
+        if (isPresetVisibilitySource(currentListActionId)) return currentListActionId;
+        if (currentVisibilitySource === 'showAll' || currentVisibilitySource === 'hideAll') return currentVisibilitySource;
+        if (isPresetVisibilitySource(currentVisibilitySource)) return currentVisibilitySource;
+        if (currentVisibilitySource === 'custom') return 'custom';
+        return null;
+      })();
+      if (autoRefresh) {
+        const nextSet = computeVisibleSetForAction(user, visibilityActionId);
+        if (nextSet) {
+          visibleSet.clear();
+          for (const pid of nextSet) visibleSet.add(pid);
+        }
+      }
+      const listOpts = { 
+        activeActionId: listActionId,
         onHover: (pid)=> { chart.setHoverSeries(pid); viewsChart.setHoverSeries(pid); first24HoursChart.setHoverSeries(pid); viewsPerPersonChart.setHoverSeries(pid); },
         onPurge: (pid, snippet) => showPostPurgeConfirm(snippet, pid)
-      });
+      };
+      if (skipPostListRebuild && updatePostsListRows(user, colorFor, visibleSet, listOpts)) {
+        // keep existing list to avoid flicker
+      } else {
+        buildPostsList(user, colorFor, visibleSet, listOpts);
+      }
+      updateStaleButtonCount(user);
       const useUnique = viewsChartType === 'unique';
       const series = computeSeriesForUser(user, [], colorFor, useUnique)
         .filter(s=>visibleSet.has(s.id))
@@ -4564,14 +5803,31 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         currentViewsPerPersonChart.setHoverSeries(pid);
         currentViewsChart.setHoverSeries(pid);
       });
-      // wire visibility toggles
-      $$('#posts .toggle').forEach(btn=>{
-        btn.addEventListener('click', ()=>{
-          currentVisibilitySource = 'custom';
-          setListActionActive(null);
-          const pid = btn.dataset.pid; const row = btn.closest('.post');
-          if (visibleSet.has(pid)) { visibleSet.delete(pid); row.classList.add('hidden'); btn.textContent='Show'; }
-          else { visibleSet.add(pid); row.classList.remove('hidden'); btn.textContent='Hide'; }
+      // wire visibility toggles (delegated)
+      const postsWrap = $('#posts');
+      if (postsWrap) {
+        postsWrap._sctOnToggle = (pid, row, btn)=>{
+          if (!user || !user.posts || !pid) return;
+          const isCustomMode = currentVisibilitySource === 'custom' || isCustomFilterAction(currentVisibilitySource) || currentListActionId === 'custom' || listOpts?.activeActionId === 'custom';
+          if (isCustomMode) {
+            if (currentVisibilitySource !== 'custom' && !isCustomFilterAction(currentVisibilitySource)) {
+              currentVisibilitySource = 'custom';
+            }
+            setListActionActive('custom');
+            if (listOpts) listOpts.activeActionId = 'custom';
+          }
+          if (visibleSet.has(pid)) {
+            visibleSet.delete(pid);
+            if (row) row.classList.add('hidden');
+            if (btn) btn.textContent = 'Show';
+          } else {
+            visibleSet.add(pid);
+            if (row) row.classList.remove('hidden');
+            if (btn) btn.textContent = 'Hide';
+          }
+          const nextOpts = listOpts || {};
+          if (isCustomMode) nextOpts.activeActionId = 'custom';
+          updatePostsListRows(user, colorFor, visibleSet, nextOpts);
           // Fit to visible
           chart.resetZoom();
           viewsPerPersonChart.resetZoom();
@@ -4594,39 +5850,9 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           // Update first 24 hours chart
           updateFirst24HoursChart(parseInt($('#first24HoursSlider')?.value) || 1440);
           // (likes total chart is unfiltered; no need to refresh here)
-          // Update metric cards to reflect current visibility
-          try{
-            const uniqueViewsEl = $('#uniqueViewsTotal');
-            const totalViewsEl = $('#totalViewsTotal');
-            const likesEl = $('#likesTotal');
-            const repliesEl = $('#repliesTotal');
-            const remixesEl = $('#remixesTotal');
-            const interEl = $('#interactionsTotal');
-            const cameosEl = $('#cameosTotal');
+          updateSummaryMetrics(user, visibleSet);
+          try {
             const followersEl = $('#followersTotal');
-            let totalUniqueViews = 0, totalViews = 0, totalLikes = 0, totalReplies = 0, totalRemixes = 0, totalInteractions = 0;
-            for (const vpid of Array.from(visibleSet)){
-              const post = user.posts?.[vpid];
-              const last = latestSnapshot(post?.snapshots);
-              totalUniqueViews += num(last?.uv);
-              totalViews += num(last?.views);
-              totalLikes += num(last?.likes);
-              totalReplies += num(last?.comments);
-              totalRemixes += num(latestRemixCountForPost(post));
-              totalInteractions += interactionsOfSnap(last);
-            }
-            if (uniqueViewsEl) uniqueViewsEl.textContent = fmt2(totalUniqueViews);
-            if (totalViewsEl) totalViewsEl.textContent = fmt2(totalViews);
-            if (likesEl) likesEl.textContent = fmt2(totalLikes);
-            if (repliesEl) repliesEl.textContent = fmtK2OrInt(totalReplies);
-            if (remixesEl) remixesEl.textContent = fmt2(totalRemixes);
-            if (interEl) interEl.textContent = fmt2(totalInteractions);
-            // Update cameos and followers from user data (not post data)
-            if (cameosEl) {
-              const cameosArr = Array.isArray(user.cameos) ? user.cameos : [];
-              const lastCameo = cameosArr.length > 0 ? cameosArr[cameosArr.length - 1] : null;
-              cameosEl.textContent = lastCameo ? fmtK2OrInt(lastCameo.count) : '0';
-            }
             if (followersEl) {
               const followersArr = Array.isArray(user.followers) ? user.followers : [];
               const lastFollower = followersArr.length > 0 ? followersArr[followersArr.length - 1] : null;
@@ -4634,34 +5860,102 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
             }
           } catch {}
           persistVisibility();
-        });
-      });
+          if (isCustomMode) {
+            if (isCustomFilterAction(currentVisibilitySource)) {
+              updateCustomFilterIdsForUser(currentUserKey, getCustomFilterId(currentVisibilitySource), visibleSet);
+            } else {
+              persistCustomVisibilityForUser(currentUserKey, visibleSet);
+              updateCustomButtonLabel(currentUserKey);
+            }
+          }
+        };
+        if (!postsWrap._sctToggleBound){
+          postsWrap._sctToggleBound = true;
+          postsWrap.addEventListener('click', (e)=>{
+            const btn = e.target.closest('.toggle');
+            if (!btn || !postsWrap.contains(btn)) return;
+            e.preventDefault();
+            e.stopPropagation();
+            const row = btn.closest('.post');
+            const pid = btn.dataset.pid || (row && row.dataset.pid);
+            if (!pid) return;
+            if (postsWrap._sctOnToggle) postsWrap._sctOnToggle(pid, row, btn);
+          });
+        }
+      }
+    }
+
+    function clearListActionActiveUI(){
+      try {
+        const wrap = document.querySelector('.list-actions');
+        if (!wrap) return;
+        wrap.querySelectorAll('button').forEach(btn=>btn.classList.remove('active'));
+      } catch {}
+    }
+
+    function syncUserSelectionUI(){
+      const selEl = $('#userSelect');
+      if (selEl) selEl.value = currentUserKey || '';
+      if (!searchInput) return;
+      const user = resolveUserForKey(metrics, currentUserKey);
+      const label = formatUserSelectionLabel(currentUserKey, user);
+      if (label) {
+        searchInput.value = label;
+        searchInput.dataset.selectedKey = currentUserKey || '';
+        searchInput.dataset.selectedLabel = label;
+      } else {
+        searchInput.value = '';
+        delete searchInput.dataset.selectedKey;
+        delete searchInput.dataset.selectedLabel;
+      }
+    }
+
+    function reconcileCompareUsers(){
+      for (const key of Array.from(compareUsers)){
+        if (!(metrics.users[key] || isTopTodayKey(key))) compareUsers.delete(key);
+      }
+      const hasCurrent = currentUserKey && resolveUserForKey(metrics, currentUserKey);
+      if (compareUsers.size === 1 && hasCurrent){
+        compareUsers.clear();
+        compareUsers.add(currentUserKey);
+      } else if (compareUsers.size === 0 && hasCurrent){
+        compareUsers.add(currentUserKey);
+      }
+      renderComparePills();
+    }
+
+    async function switchUserSelection(nextUserKey){
+      const nextAction = normalizeFilterAction(currentVisibilitySource) || normalizeFilterAction(currentListActionId) || getSessionFilterAction();
+      currentUserKey = nextUserKey;
+      visibleSet.clear();
+      currentVisibilitySource = null;
+      currentListActionId = null;
+
+      const def = buildUserOptions(metrics);
+      if (!(metrics.users[currentUserKey] || isTopTodayKey(currentUserKey))) currentUserKey = def;
+      syncUserSelectionUI();
+      try { await chrome.storage.local.set({ lastUserKey: currentUserKey }); } catch {}
+      updateBestTimeToPostSection();
+      reconcileCompareUsers();
+      renderCustomFilters(currentUserKey);
+
+      const u = resolveUserForKey(metrics, currentUserKey);
+      if (u) {
+        setListActionActive(normalizeFilterAction(nextAction) || getSessionFilterAction() || 'showAll');
+        const didClick = triggerFilterClick(nextAction);
+        if (!didClick) {
+          applyUserFilterState(currentUserKey, u, nextAction);
+          await refreshUserUI({ preserveEmpty: true });
+          persistVisibility();
+        }
+        return;
+      }
+      await refreshUserUI({ preserveEmpty: true });
+      persistVisibility();
     }
 
     $('#userSelect').addEventListener('change', async (e)=>{
-      currentUserKey = e.target.value; visibleSet.clear(); currentVisibilitySource = null; currentListActionId = null; setListActionActive(null);
-      try { await chrome.storage.local.set({ lastUserKey: currentUserKey }); } catch {}
-      const u = resolveUserForKey(metrics, currentUserKey);
-      if (u) {
-        chart.resetZoom();
-        viewsPerPersonChart.resetZoom();
-        viewsChart.resetZoom();
-        followersChart.resetZoom();
-        allViewsChart.resetZoom();
-        allLikesChart.resetZoom();
-        cameosChart.resetZoom();
-      }
-      // If exactly one user in compare, replace it with the new selection
-      if (compareUsers.size === 1 && currentUserKey && resolveUserForKey(metrics, currentUserKey)){
-        compareUsers.clear();
-        addCompareUser(currentUserKey);
-      }
-      // If compare section is empty, add current user to show who we're looking at
-      else if (compareUsers.size === 0 && currentUserKey && resolveUserForKey(metrics, currentUserKey)){
-        addCompareUser(currentUserKey);
-      }
-      await refreshUserUI();
-      persistVisibility();
+      await switchUserSelection(e.target.value);
     });
 
     // Views type toggle pills
@@ -4716,111 +6010,109 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
 
 
     // Typeahead suggestions
-    $('#search').addEventListener('input', (e)=>{
-      const suggestions = $('#suggestions');
-      const list = filterUsersByQuery(metrics, e.target.value).slice(0, 20);
-      suggestions.innerHTML = list.map(([key,u])=>{
-        const count = Object.keys(u.posts||{}).length;
-        return `<div class="item" data-key="${esc(key)}"><span>${esc(u.handle||key)}</span><span style="color:#7d8a96">${count} posts</span></div>`;
-      }).join('');
-      suggestions.style.display = list.length ? 'block' : 'none';
-      $$('#suggestions .item').forEach(it=>{
-        it.addEventListener('click', async ()=>{
-          currentUserKey = it.dataset.key; visibleSet.clear(); currentVisibilitySource = null; currentListActionId = null; setListActionActive(null); $('#search').value = ''; suggestions.style.display='none';
-          const sel = $('#userSelect'); sel.value = currentUserKey;
-          const u = resolveUserForKey(metrics, currentUserKey);
-          if (u) {
-            chart.resetZoom();
-            viewsChart.resetZoom();
-            followersChart.resetZoom();
-            allViewsChart.resetZoom();
-            allLikesChart.resetZoom();
-            cameosChart.resetZoom();
-          }
-          // If exactly one user in compare, replace it with the new selection
-          if (compareUsers.size === 1 && currentUserKey && resolveUserForKey(metrics, currentUserKey)){
-            compareUsers.clear();
-            addCompareUser(currentUserKey);
-          }
-          // If compare section is empty, add current user to show who we're looking at
-          else if (compareUsers.size === 0 && currentUserKey && resolveUserForKey(metrics, currentUserKey)){
-            addCompareUser(currentUserKey);
-          }
-          await refreshUserUI();
-          try { await chrome.storage.local.set({ lastUserKey: currentUserKey }); } catch {}
-          persistVisibility();
-        });
-      });
-    });
-    document.addEventListener('click', (e)=>{ if (!e.target.closest('.user-picker')) $('#suggestions').style.display='none'; });
-
-    function buildCompareDropdown(){
-      const sel = $('#compareUserSelect');
-      if (!sel) return;
-      sel.innerHTML = '<option value="">Select user to add…</option>';
-
-      // Add "Top Today" as a virtual compare option
-      if (!compareUsers.has(TOP_TODAY_KEY)){
-        const topToday = buildTopTodayUser(metrics);
-        const opt = document.createElement('option');
-        opt.value = TOP_TODAY_KEY;
-        opt.textContent = `${topToday.handle} (${Object.keys(topToday.posts||{}).length})`;
-        sel.appendChild(opt);
+    function renderUserSuggestions(query){
+      if (!suggestions) return;
+      const list = buildUserSuggestionItems(metrics, query);
+      if (!list.length) {
+        suggestions.innerHTML = '';
+        suggestions.style.display = 'none';
+        return;
       }
-
-      const entries = Object.entries(metrics.users);
-      const users = entries
-        .filter(([key])=>!compareUsers.has(key))
-        .sort((a,b)=>{
-          const aCount = Object.keys(a[1].posts||{}).length;
-          const bCount = Object.keys(b[1].posts||{}).length;
-          if (aCount !== bCount) return bCount - aCount; // Descending order
-          // If same post count, sort alphabetically
-          const A = (a[1].handle||a[0]||'').toLowerCase();
-          const B = (b[1].handle||b[0]||'').toLowerCase();
-          return A.localeCompare(B);
+      suggestions.innerHTML = list.map((item)=>{
+        const meta = formatPostCount(item.count);
+        return `<div class="item" data-key="${esc(item.key)}"><span>${esc(item.label)}</span><span style="color:#7d8a96">${esc(meta)}</span></div>`;
+      }).join('');
+      suggestions.style.display = 'block';
+      $$('.item', suggestions).forEach(it=>{
+        it.addEventListener('click', async ()=>{
+          suggestions.style.display='none';
+          await switchUserSelection(it.dataset.key);
         });
-      users.forEach(([key, u])=>{
-        const opt = document.createElement('option');
-        opt.value = key;
-        const postCount = Object.keys(u.posts||{}).length;
-        opt.textContent = `${u.handle || key} (${postCount})`;
-        sel.appendChild(opt);
       });
-      sel.disabled = compareUsers.size >= MAX_COMPARE_USERS || (users.length === 0 && compareUsers.has(TOP_TODAY_KEY));
     }
 
-    // Compare dropdown change handler
-    $('#compareUserSelect').addEventListener('change', (e)=>{
-      const userKey = e.target.value;
-      if (userKey && !compareUsers.has(userKey)){
-        addCompareUser(userKey);
-        e.target.value = '';
+    function getUserSearchQuery(){
+      if (!searchInput) return '';
+      if (searchInput.dataset.selectedLabel && searchInput.value === searchInput.dataset.selectedLabel) return '';
+      return searchInput.value || '';
+    }
+
+    function showUserSuggestions(){
+      renderUserSuggestions(getUserSearchQuery());
+    }
+
+    function maybeSelectSearchText(){
+      if (!searchInput) return;
+      if (searchInput.dataset.selectedLabel && searchInput.value === searchInput.dataset.selectedLabel) {
+        searchInput.select();
+      }
+    }
+
+    function restoreSearchSelection(){
+      if (!searchInput) return;
+      if (!searchInput.dataset.selectedLabel) return;
+      if (searchInput.value === searchInput.dataset.selectedLabel) return;
+      syncUserSelectionUI();
+    }
+
+    if (searchInput) {
+      searchInput.addEventListener('input', (e)=>{
+        renderUserSuggestions(e.target.value);
+      });
+      searchInput.addEventListener('focus', ()=>{
+        showUserSuggestions();
+        maybeSelectSearchText();
+      });
+      searchInput.addEventListener('click', ()=>{
+        showUserSuggestions();
+        maybeSelectSearchText();
+      });
+    }
+    document.addEventListener('click', (e)=>{
+      if (!e.target.closest('.user-picker')) {
+        if (suggestions) suggestions.style.display='none';
+        restoreSearchSelection();
       }
     });
 
-    // Compare search typeahead
-    $('#compareSearch').addEventListener('input', (e)=>{
+    // Compare search typeahead (dropdown-style, like main user search)
+    const compareSearchInput = $('#compareSearch');
+    function renderCompareSuggestions(query){
       const suggestions = $('#compareSuggestions');
-      const list = filterUsersByQuery(metrics, e.target.value)
-        .filter(([key])=>!compareUsers.has(key))
-        .slice(0, 20);
-        suggestions.innerHTML = list.map(([key,u])=>{
-          const count = Object.keys(u.posts||{}).length;
-          return `<div class="item" data-key="${esc(key)}"><span>${esc(u.handle||key)}</span><span style="color:#7d8a96">${count} posts</span></div>`;
-        }).join('');
-      suggestions.style.display = list.length ? 'block' : 'none';
+      if (!suggestions) return;
+      const list = buildUserSuggestionItems(metrics, query)
+        .filter((item)=>!compareUsers.has(item.key));
+      if (!list.length) {
+        suggestions.innerHTML = '';
+        suggestions.style.display = 'none';
+        return;
+      }
+      suggestions.innerHTML = list.map((item)=>{
+        const meta = formatPostCount(item.count);
+        return `<div class="item" data-key="${esc(item.key)}"><span>${esc(item.label)}</span><span style="color:#7d8a96">${esc(meta)}</span></div>`;
+      }).join('');
+      suggestions.style.display = 'block';
       $$('#compareSuggestions .item').forEach(it=>{
         it.addEventListener('click', ()=>{
           addCompareUser(it.dataset.key);
         });
       });
-    });
+    }
+    if (compareSearchInput) {
+      compareSearchInput.addEventListener('input', (e)=>{
+        renderCompareSuggestions(e.target.value);
+      });
+      compareSearchInput.addEventListener('focus', ()=>{
+        renderCompareSuggestions(compareSearchInput.value);
+      });
+      compareSearchInput.addEventListener('click', ()=>{
+        renderCompareSuggestions(compareSearchInput.value);
+      });
+    }
     document.addEventListener('click', (e)=>{ if (!e.target.closest('.user-picker-compare')) $('#compareSuggestions').style.display='none'; });
 
     // Initialize compare pills and dropdown
     renderComparePills();
-    buildCompareDropdown();
 
     // Purge Menu functionality
     const purgeModal = $('#purgeModal');
@@ -4897,20 +6189,29 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
 
     async function updateStorageSizeDisplay(){
       try {
-        // Get all storage data to calculate total size
-        const allData = await chrome.storage.local.get(null);
-        // Convert to JSON string to calculate byte size
-        const jsonString = JSON.stringify(allData);
-        const bytes = new Blob([jsonString]).size;
+        let bytes = null;
+        try {
+          if (chrome?.storage?.local?.getBytesInUse) {
+            bytes = await new Promise((resolve)=> {
+              try { chrome.storage.local.getBytesInUse(null, (b)=> resolve(b)); } catch { resolve(null); }
+            });
+          }
+        } catch {}
+        if (bytes == null) {
+          // Fallback: estimate from JSON size
+          const allData = await chrome.storage.local.get(null);
+          const jsonString = JSON.stringify(allData);
+          bytes = new Blob([jsonString]).size;
+        }
         // Convert to MB with 2 decimal places
         const mb = (bytes / (1024 * 1024)).toFixed(2);
         if (purgeStorageSize) {
-          purgeStorageSize.textContent = `Sora Creator Tools currently uses ${mb}MB of memory.`;
+          purgeStorageSize.textContent = `Sora Creator Tools uses ${mb}MB of storage.\nExported data file will be larger because it's less compressed.`;
         }
       } catch (e) {
         console.error('[Dashboard] Failed to calculate storage size', e);
         if (purgeStorageSize) {
-          purgeStorageSize.textContent = 'Sora Creator Tools currently uses 0.00MB of memory.';
+          purgeStorageSize.textContent = 'Sora Creator Tools uses 0.00MB of storage.';
         }
       }
     }
@@ -5158,7 +6459,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         const opt = document.createElement('option');
         opt.value = key;
         const postCount = Object.keys(u.posts||{}).length;
-        opt.textContent = `${u.handle || key} (${postCount})`;
+        opt.textContent = formatUserOptionLabel(u.handle || key, postCount);
         sel.appendChild(opt);
       });
       sel.disabled = exceptedUsers.size >= MAX_EXCEPTED_USERS || users.length === 0;
@@ -5235,7 +6536,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         .slice(0, 20);
         suggestions.innerHTML = list.map(([key,u])=>{
           const count = Object.keys(u.posts||{}).length;
-          return `<div class="item" data-key="${esc(key)}"><span>${esc(u.handle||key)}</span><span style="color:#7d8a96">${count} posts</span></div>`;
+          return `<div class="item" data-key="${esc(key)}"><span>${esc(u.handle||key)}</span><span style="color:#7d8a96">${esc(formatPostCount(count))}</span></div>`;
         }).join('');
       suggestions.style.display = list.length ? 'block' : 'none';
       $$('#exceptionsSuggestions .item').forEach(it=>{
@@ -5270,6 +6571,12 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       purgeConfirmText.textContent = `Are you sure you want to purge ${description}?`;
       purgeConfirmDialog.style.display = 'flex';
     });
+    const purgeExportBtn = $('#purgeExport');
+    if (purgeExportBtn) {
+      purgeExportBtn.addEventListener('click', async ()=>{
+        await exportAllDataCSV();
+      });
+    }
 
     $('#purgeConfirmNo').addEventListener('click', ()=>{
       purgeConfirmDialog.style.display = 'none';
@@ -5391,14 +6698,13 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         const prev = currentUserKey;
         const def = buildUserOptions(metrics);
         if (!(metrics.users[prev] || isTopTodayKey(prev))) currentUserKey = def;
-        $('#userSelect').value = currentUserKey || '';
+        syncUserSelectionUI();
         
         // Clean up compare users that no longer exist
         for (const key of Array.from(compareUsers)){
           if (!(metrics.users[key] || isTopTodayKey(key))) compareUsers.delete(key);
         }
         renderComparePills();
-        buildCompareDropdown();
         refreshUserUI();
         updateBestTimeToPostSection();
         
@@ -5433,44 +6739,60 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           if (postPurgeConfirmDialog) postPurgeConfirmDialog.style.display = 'none';
           return;
         }
-        const { pid, userKey } = pendingPostPurge;
+        const { pid } = pendingPostPurge;
         pendingPostPurge = null;
+        await chrome.storage.local.set({ purgeLock: Date.now() });
         try {
           metrics = await loadMetrics();
-          const user = metrics?.users?.[userKey];
-          if (user?.posts && user.posts[pid]){
+          const users = metrics?.users || {};
+          let removedAny = false;
+          for (const [uKey, user] of Object.entries(users)){
+            if (!user?.posts || !user.posts[pid]) continue;
             delete user.posts[pid];
+            removedAny = true;
             if (Object.keys(user.posts).length === 0){
-              delete metrics.users[userKey];
+              delete users[uKey];
             }
+          }
+          if (removedAny) {
             await chrome.storage.local.set({ metrics });
-            // Update UI state for current user
-            if (userKey === currentUserKey){
-              visibleSet.delete(pid);
-              const prev = currentUserKey;
-              const def = buildUserOptions(metrics);
-              if (!(metrics.users[prev] || isTopTodayKey(prev))) currentUserKey = def;
-              $('#userSelect').value = currentUserKey || '';
-              for (const key of Array.from(compareUsers)){
-                if (!(metrics.users[key] || isTopTodayKey(key))) compareUsers.delete(key);
-              }
-              renderComparePills();
-              buildCompareDropdown();
-              refreshUserUI({ preserveEmpty: true });
-              persistVisibility();
-              updateBestTimeToPostSection();
+            visibleSet.delete(pid);
+            const prev = currentUserKey;
+            const def = buildUserOptions(metrics);
+            if (!(metrics.users[prev] || isTopTodayKey(prev))) currentUserKey = def;
+            syncUserSelectionUI();
+            for (const key of Array.from(compareUsers)){
+              if (!(metrics.users[key] || isTopTodayKey(key))) compareUsers.delete(key);
             }
+            renderComparePills();
+            refreshUserUI({ preserveEmpty: true });
+            persistVisibility();
+            updateBestTimeToPostSection();
           }
         } catch (e) {
           console.error('[Dashboard] Post purge failed', e);
           alert('Failed to purge this post. Please try again.');
         } finally {
+          await chrome.storage.local.remove('purgeLock');
           if (postPurgeConfirmDialog) postPurgeConfirmDialog.style.display = 'none';
         }
       });
     }
 
-    $('#refresh').addEventListener('click', async ()=>{
+    const refreshData = async (opts = {}) => {
+      const isAutoRefresh = !!opts.autoRefresh;
+      const skipRestoreZoom = !!opts.skipRestoreZoom || isAutoRefresh;
+      const userSelect = $('#userSelect');
+      const userSelectScrollTop = isAutoRefresh && userSelect ? userSelect.scrollTop : null;
+      const prevDomains = isAutoRefresh ? {
+        views: safeGetDomain(viewsChart),
+        first24Hours: safeGetDomain(first24HoursChart),
+        viewsPerPerson: safeGetDomain(viewsPerPersonChart),
+        followers: safeGetDomain(followersChart),
+        allViews: safeGetDomain(allViewsChart),
+        allLikes: safeGetDomain(allLikesChart),
+        cameos: safeGetDomain(cameosChart),
+      } : null;
       // capture zoom states
       const zScatter = chart.getZoom();
       const zViews = viewsChart.getZoom();
@@ -5480,9 +6802,13 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       const zFollowers = followersChart.getZoom();
       const zViewsAll = allViewsChart.getZoom();
       metrics = await loadMetrics();
-      const prev = currentUserKey; const def = buildUserOptions(metrics);
-      if (!(metrics.users[prev] || isTopTodayKey(prev))) currentUserKey = def;
-      $('#userSelect').value = currentUserKey || '';
+      if (!isAutoRefresh) {
+        const prev = currentUserKey; const def = buildUserOptions(metrics);
+        if (!(metrics.users[prev] || isTopTodayKey(prev))) currentUserKey = def;
+        syncUserSelectionUI();
+      } else if (userSelect && userSelectScrollTop != null) {
+        userSelect.scrollTop = userSelectScrollTop;
+      }
       try { await chrome.storage.local.set({ lastUserKey: currentUserKey }); } catch {}
       updateBestTimeToPostSection();
       
@@ -5491,8 +6817,8 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         if (!(metrics.users[key] || isTopTodayKey(key))) compareUsers.delete(key);
       }
       renderComparePills();
-      buildCompareDropdown();
-      refreshUserUI();
+      renderCustomFilters(currentUserKey);
+      await refreshUserUI({ skipPostListRebuild: !!opts.skipPostListRebuild, skipRestoreZoom, autoRefresh: isAutoRefresh });
       updateBestTimeToPostSection();
       // restore zoom states
       try { if (zScatter) chart.setZoom(zScatter); } catch {}
@@ -5502,21 +6828,40 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       try { if (zCameos) cameosChart.setZoom(zCameos); } catch {}
       try { if (zFollowers) followersChart.setZoom(zFollowers); } catch {}
       try { if (zViewsAll) allViewsChart.setZoom(zViewsAll); } catch {}
-    });
-    $('#export').addEventListener('click', async ()=>{
-      await exportAllDataCSV();
-    });
-    $('#import').addEventListener('click', ()=>{
-      $('#importFile').click();
-    });
-    $('#importFile').addEventListener('change', async (e)=>{
-      const file = e.target.files[0];
-      if (file) {
-        await importDataCSV(file);
-        // Reset file input so same file can be imported again if needed
-        e.target.value = '';
+      if (isAutoRefresh && prevDomains) {
+        expandZoomRightIfAtEdge(viewsChart, prevDomains.views, safeGetDomain(viewsChart));
+        expandZoomRightIfAtEdge(first24HoursChart, prevDomains.first24Hours, safeGetDomain(first24HoursChart));
+        expandZoomRightIfAtEdge(viewsPerPersonChart, prevDomains.viewsPerPerson, safeGetDomain(viewsPerPersonChart));
+        expandZoomRightIfAtEdge(followersChart, prevDomains.followers, safeGetDomain(followersChart));
+        expandZoomRightIfAtEdge(allViewsChart, prevDomains.allViews, safeGetDomain(allViewsChart));
+        expandZoomRightIfAtEdge(allLikesChart, prevDomains.allLikes, safeGetDomain(allLikesChart));
+        expandZoomRightIfAtEdge(cameosChart, prevDomains.cameos, safeGetDomain(cameosChart));
       }
-    });
+    };
+
+    const refreshBtn = $('#refresh');
+    if (refreshBtn) {
+      refreshBtn.addEventListener('click', async () => {
+        await refreshData();
+      });
+    }
+    const importFileInput = $('#importFile');
+    const purgeImportBtn = $('#purgeImport');
+    if (purgeImportBtn && importFileInput) {
+      purgeImportBtn.addEventListener('click', ()=>{
+        importFileInput.click();
+      });
+    }
+    if (importFileInput) {
+      importFileInput.addEventListener('change', async (e)=>{
+        const file = e.target.files[0];
+        if (file) {
+          await importDataCSV(file);
+          // Reset file input so same file can be imported again if needed
+          e.target.value = '';
+        }
+      });
+    }
     
     // Initialize Comb Mode
     (async () => {
@@ -5549,12 +6894,98 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           else btn.classList.remove('active');
         });
       } catch {}
-      persistListActionForUser(currentUserKey, currentListActionId);
+      if (activeId !== 'custom') setCustomFilterActive(null);
     }
 
       $('#resetZoom').addEventListener('click', ()=>{ chart.resetZoom(); viewsPerPersonChart.resetZoom(); viewsChart.resetZoom(); first24HoursChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom(); refreshUserUI({ skipRestoreZoom: true }); });
-      $('#showAll').addEventListener('click', ()=>{ currentVisibilitySource = 'showAll'; setListActionActive('showAll'); const u = resolveUserForKey(metrics, currentUserKey); if (!u) return; visibleSet.clear(); Object.keys(u.posts||{}).forEach(pid=>visibleSet.add(pid)); chart.resetZoom(); viewsChart.resetZoom(); first24HoursChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom(); refreshUserUI({ skipRestoreZoom: true }); persistVisibility(); });
-      $('#hideAll').addEventListener('click', ()=>{ currentVisibilitySource = 'hideAll'; setListActionActive('hideAll'); visibleSet.clear(); chart.resetZoom(); viewsChart.resetZoom(); first24HoursChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom(); refreshUserUI({ preserveEmpty: true, skipRestoreZoom: true }); persistVisibility(); });
+      $('#showAll').addEventListener('click', ()=>{
+        const activeCustomId = getCustomFilterId(currentVisibilitySource);
+        currentVisibilitySource = 'showAll';
+        setListActionActive('showAll');
+        const u = resolveUserForKey(metrics, currentUserKey);
+        if (!u) return;
+        visibleSet.clear();
+        Object.keys(u.posts||{}).forEach(pid=>visibleSet.add(pid));
+        if (activeCustomId) updateCustomFilterIdsForUser(currentUserKey, activeCustomId, visibleSet);
+        chart.resetZoom(); viewsChart.resetZoom(); first24HoursChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom();
+        refreshUserUI({ skipRestoreZoom: true });
+        persistVisibility();
+      });
+      $('#hideAll').addEventListener('click', ()=>{
+        const activeCustomId = getCustomFilterId(currentVisibilitySource);
+        currentVisibilitySource = 'hideAll';
+        setListActionActive('hideAll');
+        visibleSet.clear();
+        if (activeCustomId) updateCustomFilterIdsForUser(currentUserKey, activeCustomId, visibleSet);
+        chart.resetZoom(); viewsChart.resetZoom(); first24HoursChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom();
+        refreshUserUI({ preserveEmpty: true, skipRestoreZoom: true });
+        persistVisibility();
+      });
+      const saveCustomBtn = $('#saveCustomFilter');
+      if (saveCustomBtn) {
+        saveCustomBtn.addEventListener('click', ()=>{
+          const wrap = $('#customFiltersWrap');
+          if (!wrap || !currentUserKey) return;
+          const existing = wrap.querySelector('.custom-filter-input');
+          if (existing) { existing.focus(); return; }
+          const input = document.createElement('input');
+          input.type = 'text';
+          input.maxLength = 16;
+          input.placeholder = 'Name your filter...';
+          input.className = 'custom-filter-input';
+          wrap.appendChild(input);
+          input.focus();
+          wireCustomFilterInput(input);
+        });
+      }
+      $('#pastDay').addEventListener('click', ()=>{
+        currentVisibilitySource = 'pastDay';
+        setListActionActive('pastDay');
+        const u = resolveUserForKey(metrics, currentUserKey);
+        if (!u) return;
+        const now = Date.now();
+        const cutoff = now - (24 * 60 * 60 * 1000);
+        const isTopToday = isTopTodayKey(currentUserKey);
+        const mapped = Object.entries(u.posts||{}).map(([pid,p])=>({
+          pid,
+          postTime: (isTopToday ? (getPostTimeStrict(p) || getPostTimeForRecency(p)) : getPostTimeStrict(p)) || 0,
+          pidBI: pidBigInt(pid)
+        }));
+        const sorted = mapped.filter(x=>x.postTime>0 && x.postTime >= cutoff).sort((a,b)=>{
+          const dt = b.postTime - a.postTime;
+          if (dt !== 0) return dt;
+          if (a.pidBI === b.pidBI) return a.pid.localeCompare(b.pid);
+          return a.pidBI < b.pidBI ? 1 : -1;
+        });
+        visibleSet.clear();
+        sorted.forEach(it=>visibleSet.add(it.pid));
+        chart.resetZoom(); viewsPerPersonChart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom();
+        refreshUserUI({ preserveEmpty: true, skipRestoreZoom: true }); persistVisibility();
+      });
+      $('#pastWeek').addEventListener('click', ()=>{
+        currentVisibilitySource = 'pastWeek';
+        setListActionActive('pastWeek');
+        const u = resolveUserForKey(metrics, currentUserKey);
+        if (!u) return;
+        const now = Date.now();
+        const cutoff = now - (7 * 24 * 60 * 60 * 1000);
+        const isTopToday = isTopTodayKey(currentUserKey);
+        const mapped = Object.entries(u.posts||{}).map(([pid,p])=>({
+          pid,
+          postTime: (isTopToday ? (getPostTimeStrict(p) || getPostTimeForRecency(p)) : getPostTimeStrict(p)) || 0,
+          pidBI: pidBigInt(pid)
+        }));
+        const sorted = mapped.filter(x=>x.postTime>0 && x.postTime >= cutoff).sort((a,b)=>{
+          const dt = b.postTime - a.postTime;
+          if (dt !== 0) return dt;
+          if (a.pidBI === b.pidBI) return a.pid.localeCompare(b.pid);
+          return a.pidBI < b.pidBI ? 1 : -1;
+        });
+        visibleSet.clear();
+        sorted.forEach(it=>visibleSet.add(it.pid));
+        chart.resetZoom(); viewsPerPersonChart.resetZoom(); viewsChart.resetZoom(); followersChart.resetZoom(); allViewsChart.resetZoom(); allLikesChart.resetZoom(); cameosChart.resetZoom();
+        refreshUserUI({ preserveEmpty: true, skipRestoreZoom: true }); persistVisibility();
+      });
       // First 24 hours slider
       function fmtSliderTime(minutes){
         if (minutes < 60) return `${minutes}m`;
@@ -5864,9 +7295,40 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     if (compareUsers.size === 0 && currentUserKey && resolveUserForKey(metrics, currentUserKey)){
       addCompareUser(currentUserKey);
     }
-    refreshUserUI();
+    const initialUser = resolveUserForKey(metrics, currentUserKey);
+    if (initialUser) {
+      const initAction = normalizeFilterAction(lastFilterAction) || normalizeFilterAction(currentVisibilitySource) || normalizeFilterAction(currentListActionId) || getSessionFilterAction();
+      setListActionActive(initAction || 'showAll');
+      const didClick = triggerFilterClick(initAction);
+      if (!didClick) {
+        applyUserFilterState(currentUserKey, initialUser, initAction);
+        refreshUserUI({ preserveEmpty: true });
+      }
+    } else {
+      refreshUserUI();
+    }
+    renderCustomFilters(currentUserKey);
     updateBestTimeToPostSection();
+    initBestTimeTabs();
+    initBestTimeGatherLink();
+    initMetricsGatherLink();
+    const AUTO_REFRESH_MS = 10000;
+    let autoRefreshInFlight = false;
+    setInterval(() => {
+      if (document.hidden) return;
+      if (autoRefreshInFlight) return;
+      autoRefreshInFlight = true;
+      refreshData({ skipPostListRebuild: true, autoRefresh: true })
+        .catch((err) => console.error('[Dashboard] auto refresh failed', err))
+        .finally(() => {
+          autoRefreshInFlight = false;
+        });
+    }, AUTO_REFRESH_MS);
   }
 
-  document.addEventListener('DOMContentLoaded', main, { once:true });
+  document.addEventListener('DOMContentLoaded', () => {
+    Promise.resolve(main()).finally(() => {
+      document.documentElement.classList.remove('is-booting');
+    });
+  }, { once:true });
 })();

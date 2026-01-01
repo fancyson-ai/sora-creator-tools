@@ -19,10 +19,12 @@
   };
 
   const NF_CREATE_RE = /\/backend\/nf\/create/i;
+  const SUBSCRIPTIONS_RE = /\/backend\/billing\/subscriptions/i;
   const DURATION_OVERRIDE_KEY = 'SCT_DURATION_OVERRIDE_V1'; // stored in sora.chatgpt.com localStorage
   const GENS_COUNT_KEY = 'SCT_GENS_COUNT_V1'; // stored in sora.chatgpt.com localStorage
   const UV_TASK_TO_DRAFT_KEY = 'SORA_UV_TASK_TO_DRAFT_V1'; // task_id -> source draft ID (draft remix redo)
   const UV_REDO_PROMPT_KEY = 'SORA_UV_REDO_PROMPT';
+  const PLAN_FREE_KEY = 'SCT_PLAN_FREE_V1';
   const COMPOSER_TEXTAREA_SELECTOR =
     'textarea[placeholder="Describe your video..."], textarea[placeholder^="Describe changes"], textarea[placeholder*="Describe changes"]';
 
@@ -327,6 +329,7 @@
   };
 
   const shouldOffer25s = (settings) => {
+    if (planIsFree === true) return false;
     // 25s is not available for Sora 2 Pro when Resolution is High.
     // Allow when Sora 2 Pro + Standard (or unknown) and for Sora 2.
     return !(settings?.model === 'sora2pro' && settings?.resolution === 'high');
@@ -538,6 +541,48 @@
   function safeJsonParse(str) {
     try {
       return JSON.parse(str);
+    } catch {
+      return null;
+    }
+  }
+
+  function loadPlanIsFree() {
+    try {
+      const raw = localStorage.getItem(PLAN_FREE_KEY);
+      if (raw == null) return null;
+      if (raw === '1' || raw === 'true') return true;
+      if (raw === '0' || raw === 'false') return false;
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  let planIsFree = loadPlanIsFree();
+  function setPlanIsFree(next) {
+    if (typeof next !== 'boolean') return;
+    if (planIsFree === next) return;
+    planIsFree = next;
+    try {
+      localStorage.setItem(PLAN_FREE_KEY, next ? '1' : '0');
+    } catch {}
+    try {
+      window.dispatchEvent(new Event('sct_plan_status'));
+    } catch {}
+  }
+
+  function extractPlanIsFree(json) {
+    try {
+      const data = json?.data;
+      if (!Array.isArray(data)) return null;
+      const isFree = data.some((sub) => {
+        const planId = String(sub?.plan?.id || sub?.id || '');
+        const title = String(sub?.plan?.title || '');
+        return planId === 'chatgpt_free' || /chatgpt\s*free/i.test(title);
+      });
+      if (isFree) return true;
+      if (data.length > 0) return false;
+      return null;
     } catch {
       return null;
     }
@@ -1095,6 +1140,27 @@
         } catch {}
       };
 
+      const attachPlanCapture = (promise) => {
+        if (!promise || !SUBSCRIPTIONS_RE.test(url)) return;
+        try {
+          promise
+            .then((res) => {
+              try {
+                res
+                  .clone()
+                  .json()
+                  .then((json) => {
+                    const isFree = extractPlanIsFree(json);
+                    if (isFree != null) setPlanIsFree(isFree);
+                  })
+                  .catch(() => {});
+              } catch {}
+              return res;
+            })
+            .catch(() => {});
+        } catch {}
+      };
+
       const buildInit = () => {
         let nextInit = init;
         try {
@@ -1118,6 +1184,7 @@
       if (!Number.isFinite(desiredGens) || desiredGens <= 1) {
         const p = makeRequest(input);
         attachTaskCapture(p);
+        attachPlanCapture(p);
         return p;
       }
 
@@ -1136,6 +1203,7 @@
       if (effectiveGens <= 1) {
         const p = makeRequest(input);
         attachTaskCapture(p);
+        attachPlanCapture(p);
         return p;
       }
 
@@ -1155,6 +1223,7 @@
             return;
           }
           attachTaskCapture(p);
+          attachPlanCapture(p);
           p.then(resolve, reject);
         });
       });
@@ -1164,6 +1233,7 @@
           try {
             const p = makeRequest(getInputForIndex(i));
             attachTaskCapture(p);
+            attachPlanCapture(p);
           } catch {}
         });
       }
@@ -1202,6 +1272,20 @@
                 const j = safeJsonParse(this.responseText);
                 const taskId = j?.id;
                 if (taskId) saveTaskToSourceDraft(taskId, sourceDraftId);
+              } catch {}
+            },
+            { once: true }
+          );
+        }
+
+        if (SUBSCRIPTIONS_RE.test(String(url || ''))) {
+          this.addEventListener(
+            'load',
+            () => {
+              try {
+                const j = safeJsonParse(this.responseText);
+                const isFree = extractPlanIsFree(j);
+                if (isFree != null) setPlanIsFree(isFree);
               } catch {}
             },
             { once: true }
@@ -1580,6 +1664,7 @@
     // SPA route changes can update `location.search` without DOM mutations; reschedule when URL changes.
     try {
       window.addEventListener('popstate', scheduleProcess, true);
+      window.addEventListener('sct_plan_status', scheduleProcess, false);
       const origPushState = history.pushState;
       const origReplaceState = history.replaceState;
       history.pushState = function () {

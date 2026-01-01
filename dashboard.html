@@ -4,50 +4,220 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Sora Metrics Dashboard</title>
+  <script>
+    (function(){
+      document.documentElement.classList.add('is-booting');
+      try {
+        const key = 'SCT_DASHBOARD_SIDEBAR_WIDTH';
+        const v = Number(localStorage.getItem(key));
+        if (Number.isFinite(v)) {
+          document.documentElement.style.setProperty('--sidebar-width', `${v}px`);
+        }
+      } catch {}
+      try {
+        const themeKey = 'SCT_DASHBOARD_THEME_V1';
+        const themes = {
+          red: { accent: '#ff6b6b', accentStrong: '#ff9b93', accentRgb: '255,107,107' },
+          orange: { accent: '#ff9f43', accentStrong: '#ffbf7a', accentRgb: '255,159,67' },
+          gold: { accent: '#ffcf8f', accentStrong: '#ffe1b5', accentRgb: '255,207,143' },
+          green: { accent: '#9eea6a', accentStrong: '#c1f28f', accentRgb: '158,234,106' },
+          teal: { accent: '#5fe0d7', accentStrong: '#8cf0e9', accentRgb: '95,224,215' },
+          blue: { accent: '#7dc4ff', accentStrong: '#9ad5ff', accentRgb: '125,196,255' },
+          indigo: { accent: '#9a7cff', accentStrong: '#b6a1ff', accentRgb: '154,124,255' },
+          pink: { accent: '#ff8fd3', accentStrong: '#ffb6e7', accentRgb: '255,143,211' },
+          gray: { accent: '#c9d1d9', accentStrong: '#e4e9ef', accentRgb: '201,209,217' },
+          darkRed: { accent: '#c44545', accentStrong: '#e07a7a', accentRgb: '196,69,69' },
+          darkOrange: { accent: '#c26a2a', accentStrong: '#e49857', accentRgb: '194,106,42' },
+          darkGold: { accent: '#c8a042', accentStrong: '#e0bc5e', accentRgb: '200,160,66' },
+          darkGreen: { accent: '#39ff14', accentStrong: '#7bff5f', accentRgb: '57,255,20' },
+          darkTeal: { accent: '#1f9c8a', accentStrong: '#45b9aa', accentRgb: '31,156,138' },
+          darkBlue: { accent: '#2f6fb3', accentStrong: '#5c8fca', accentRgb: '47,111,179' },
+          darkIndigo: { accent: '#4d2f7a', accentStrong: '#6e4aa6', accentRgb: '77,47,122' },
+          darkPink: { accent: '#b64b8f', accentStrong: '#d476b4', accentRgb: '182,75,143' },
+          darkGray: { accent: '#8d949c', accentStrong: '#aeb5bd', accentRgb: '141,148,156' }
+        };
+        const themeId = localStorage.getItem(themeKey);
+        const aliases = { amber: 'gold', rose: 'red', violet: 'indigo', grey: 'gray', deepPurple: 'indigo', darkPurple: 'darkPink' };
+        const fallback = 'darkGray';
+        const resolved = themes[themeId] ? themeId : (aliases[themeId] || fallback);
+        const theme = themes[resolved] || themes[fallback];
+        if (theme) {
+          const root = document.documentElement;
+          root.style.setProperty('--accent', theme.accent);
+          root.style.setProperty('--accent-strong', theme.accentStrong);
+          root.style.setProperty('--accent-rgb', theme.accentRgb);
+          root.style.setProperty('--glow-right', `rgba(${theme.accentRgb},0.2)`);
+          root.style.setProperty('--glow-right-soft', `rgba(${theme.accentRgb},0.16)`);
+          const accent = theme.accentRgb.split(',').map((v)=> Number(v.trim()) || 0);
+          const base = {
+            'bg': [10,15,20],
+            'bg-deep': [7,11,16],
+            'bg-alt': [10,14,19],
+            'bg-dark': [8,12,16],
+            'bg-ultra': [6,10,14],
+            'panel': [18,25,38],
+            'panel-strong': [24,33,49],
+            'panel-deep': [12,16,22],
+            'panel-mid': [12,18,26],
+            'panel-soft': [20,28,40],
+            'panel-soft-alt': [20,28,38],
+            'panel-hover': [22,30,42],
+            'panel-edge': [24,34,46],
+            'surface': [16,22,31],
+            'surface-strong': [18,26,36],
+            'bg-subtle': [18,24,32],
+            'chip': [18,26,36]
+          };
+          const tint = {
+            'bg': 0.06,
+            'bg-deep': 0.05,
+            'bg-alt': 0.06,
+            'bg-dark': 0.05,
+            'bg-ultra': 0.04,
+            'panel': 0.08,
+            'panel-strong': 0.08,
+            'panel-deep': 0.07,
+            'panel-mid': 0.07,
+            'panel-soft': 0.08,
+            'panel-soft-alt': 0.08,
+            'panel-hover': 0.08,
+            'panel-edge': 0.08,
+            'surface': 0.09,
+            'surface-strong': 0.09,
+            'bg-subtle': 0.07,
+            'chip': 0.09
+          };
+          const mix = (baseRgb, amt)=> baseRgb.map((v, i)=> Math.round(v + (accent[i] - v) * amt)).join(',');
+          Object.keys(base).forEach((key)=>{
+            const amt = tint[key] ?? 0.08;
+            root.style.setProperty(`--${key}-rgb`, mix(base[key], amt));
+          });
+        }
+      } catch {}
+    })();
+  </script>
   <link rel="stylesheet" href="dashboard.css" />
 </head>
 <body>
   <header class="topbar">
     <div class="brand">Sora Creator Tools – Dashboard <span id="dashboardModeTap">Mode</span></div>
     <div class="actions">
+      <div class="theme-picker" role="group" aria-label="Theme color">
+        <div class="theme-row" role="presentation">
+          <button class="theme-swatch" type="button" data-theme="red" style="--swatch: #ff6b6b;" aria-label="Red theme" title="Red"></button>
+          <button class="theme-swatch" type="button" data-theme="orange" style="--swatch: #ff9f43;" aria-label="Orange theme" title="Orange"></button>
+          <button class="theme-swatch" type="button" data-theme="gold" style="--swatch: #ffcf8f;" aria-label="Gold theme" title="Gold"></button>
+          <button class="theme-swatch" type="button" data-theme="green" style="--swatch: #9eea6a;" aria-label="Green theme" title="Green"></button>
+          <button class="theme-swatch" type="button" data-theme="teal" style="--swatch: #5fe0d7;" aria-label="Teal theme" title="Teal"></button>
+          <button class="theme-swatch" type="button" data-theme="blue" style="--swatch: #7dc4ff;" aria-label="Blue theme" title="Blue"></button>
+          <button class="theme-swatch" type="button" data-theme="indigo" style="--swatch: #9a7cff;" aria-label="Indigo theme" title="Indigo"></button>
+          <button class="theme-swatch" type="button" data-theme="pink" style="--swatch: #ff8fd3;" aria-label="Pink theme" title="Pink"></button>
+          <button class="theme-swatch" type="button" data-theme="gray" style="--swatch: #c9d1d9;" aria-label="Gray theme" title="Gray"></button>
+        </div>
+        <div class="theme-row" role="presentation">
+          <button class="theme-swatch" type="button" data-theme="darkRed" style="--swatch: #c44545;" aria-label="Dark red theme" title="Dark Red"></button>
+          <button class="theme-swatch" type="button" data-theme="darkOrange" style="--swatch: #c26a2a;" aria-label="Dark orange theme" title="Dark Orange"></button>
+          <button class="theme-swatch" type="button" data-theme="darkGold" style="--swatch: #c8a042;" aria-label="Dark gold theme" title="Dark Gold"></button>
+          <button class="theme-swatch" type="button" data-theme="darkGreen" style="--swatch: #39ff14;" aria-label="Dark green theme" title="Dark Green (Matrix)"></button>
+          <button class="theme-swatch" type="button" data-theme="darkTeal" style="--swatch: #1f9c8a;" aria-label="Dark teal theme" title="Dark Teal"></button>
+          <button class="theme-swatch" type="button" data-theme="darkBlue" style="--swatch: #2f6fb3;" aria-label="Dark blue theme" title="Dark Blue"></button>
+          <button class="theme-swatch" type="button" data-theme="darkIndigo" style="--swatch: #4d2f7a;" aria-label="Dark indigo theme" title="Dark Indigo"></button>
+          <button class="theme-swatch" type="button" data-theme="darkPink" style="--swatch: #b64b8f;" aria-label="Dark pink theme" title="Dark Pink"></button>
+          <button class="theme-swatch" type="button" data-theme="darkGray" style="--swatch: #8d949c;" aria-label="Dark gray theme" title="Dark Gray"></button>
+        </div>
+      </div>
       <button id="resetZoom" title="Reset zoom to fit">Reset Zoom</button>
-      <button id="refresh">Refresh Data</button>
-      <button id="export" title="Export all collected data to CSV">Export Data</button>
-      <button id="import" title="Import data from previously exported CSV">Import Data</button>
+      <button id="purgeMenu" title="Open data menu">Data Menu</button>
       <input type="file" id="importFile" accept=".csv" style="display: none;" />
-      <button id="purgeMenu" title="Purge data">Purge Data Menu</button>
     </div>
   </header>
 
   <main class="layout">
     <aside class="sidebar">
-      <h3>Posts</h3>
-      <div class="list-actions">
-        <button id="showAll" title="Show all posts">Show All</button>
-        <button id="hideAll" title="Hide all posts">Hide All</button>
-        <button id="last5" title="Show last 5 posts by time">Last 5</button>
-        <button id="last10" title="Show last 10 posts by time">Last 10</button>
-        <button id="top5" title="Show top 5 posts by likes">Top 5</button>
-        <button id="top10" title="Show top 10 posts by likes">Top 10</button>
-        <button id="bottom5" title="Show 5 least liked posts (excluding last 24 hours)">Bottom 5</button>
-        <button id="bottom10" title="Show 10 least liked posts (excluding last 24 hours)">Bottom 10</button>
-        <button id="stale" title="Show posts whose metrics haven't refreshed in 24h">Stale</button>
-      </div>
-      <div id="posts" class="posts"></div>
-    </aside>
-    <section class="content">
-      <h3 class="section-title section-title-first">Individual Metrics</h3>
-      <p style="color: var(--muted); font-size: 14px; margin-top: -8px; margin-bottom: 16px;">Keep Gather mode running in a new window on any profile for always up-to-date data</p>
-      <div class="user-select-section">
-        <div class="user-select-header">
+      <div class="sidebar-scroll">
+        <h3>Select User</h3>
+        <div class="user-select-bar">
           <div class="user-picker">
-            <input id="search" type="search" placeholder="Type to find user…" autocomplete="off" />
+            <input id="search" type="search" placeholder="Search users..." autocomplete="off" />
             <div id="suggestions" class="suggestions"></div>
           </div>
-          <select id="userSelect" title="All users" class="user-select-dropdown"></select>
+          <select id="userSelect" title="All users" class="user-select-dropdown" aria-hidden="true"></select>
+        </div>
+        <h3>Filter Posts</h3>
+        <div class="list-actions">
+          <button id="showAll" title="Show all posts">Show All</button>
+          <button id="hideAll" title="Hide all posts">Hide All</button>
+          <button id="pastDay" title="Show posts from the past 24 hours">Past Day</button>
+          <button id="pastWeek" title="Show posts from the past 7 days">Past Week</button>
+          <button id="last5" title="Show last 5 posts by time">Past 5</button>
+          <button id="last10" title="Show last 10 posts by time">Past 10</button>
+          <button id="top5" title="Show top 5 posts by likes">Top 5</button>
+          <button id="top10" title="Show top 10 posts by likes">Top 10</button>
+          <button id="bottom5" title="Show 5 least liked posts (excluding last 24 hours)">Bottom 5</button>
+          <button id="bottom10" title="Show 10 least liked posts (excluding last 24 hours)">Bottom 10</button>
+          <button id="stale" title="Show posts whose metrics haven't refreshed in 24h">Stale</button>
+          <button id="saveCustomFilter" class="custom-save-btn">Save</button>
+        </div>
+        <div class="custom-filters">
+          <div class="custom-filters-row list-actions">
+            <div id="customFiltersWrap" class="custom-filters-list" aria-label="Custom filters"></div>
+          </div>
+        </div>
+        <div id="posts" class="posts"></div>
+      </div>
+      <div class="sidebar-resizer" role="separator" aria-orientation="vertical" aria-label="Resize sidebar">
+        <span class="sidebar-resizer-grip"></span>
+      </div>
+    </aside>
+    <section class="content">
+      <div id="bestTimeToPostSection">
+        <div class="best-time-header">
+          <div>
+            <h3 class="section-title section-title-first">Best Time to Post</h3>
+            <p class="best-time-subtitle">Based on like counts from every post you've ever browsed on Sora. <a id="bestTimeGatherLink" class="best-time-link" href="#">Gather more data.</a></p>
+          </div>
+          <div class="best-time-toggle" role="tablist" aria-label="Best time range">
+            <button id="bestTimeTabWeek" class="best-time-tab" type="button">This week</button>
+            <button id="bestTimeTabMonth" class="best-time-tab" type="button">This month</button>
+            <button id="bestTimeTabYear" class="best-time-tab" type="button">This year</button>
+          </div>
+        </div>
+        <div class="best-time-body">
+          <div class="best-time-hero">
+            <div class="best-time-hero-header">
+              <div id="bestTimeRecLabel" class="best-time-badge">Top Recommendation</div>
+              <div class="best-time-rec-toggle" role="tablist" aria-label="Recommendation switch">
+                <button id="bestTimeRecPrimary" class="best-time-rec-btn" type="button">Top</button>
+                <button id="bestTimeRecSecondary" class="best-time-rec-btn" type="button">Next Best</button>
+                <button id="bestTimeRecToday" class="best-time-rec-btn" type="button">Today</button>
+              </div>
+            </div>
+            <div id="bestTimeDay" class="best-time-day">—</div>
+            <div id="bestTimeTime" class="best-time-time">—</div>
+            <div class="best-time-meta">
+              <div class="best-time-meta-row">
+                <span>Optimal Window</span>
+                <span id="bestTimeWindow" class="best-time-mono">—</span>
+              </div>
+              <div class="best-time-meta-row">
+                <span>Data Points</span>
+                <span id="bestTimeCount" class="best-time-mono">—</span>
+              </div>
+            </div>
+          </div>
+          <div class="best-time-context">
+            <div class="best-time-context-header">
+              <span>Activity Heatmap</span>
+              <span>12 AM – 12 AM</span>
+            </div>
+            <div id="bestTimeHeatmap" class="best-time-heatmap" aria-label="Activity heatmap"></div>
+            <p id="bestTimeInsight" class="best-time-insight">—</p>
+          </div>
         </div>
       </div>
-      <div style="display: flex; flex-wrap: wrap; gap: 8px 8px; margin-bottom: 12px;">
+      <h3 id="metricsHeader" class="section-title section-title-first section-title-metrics">Metrics for —</h3>
+      <p id="metricsGatherNote" class="section-note"><span id="metricsGatherNoteText">Based on all post you've seen from —.</span> <a id="metricsGatherLink" class="best-time-link" href="#">Gather more data.</a></p>
+      <div class="metric-grid">
         <div id="totalViewsSummary" class="metric-card" title="Sum of latest total views for visible posts">
           <span id="totalViewsTotal" class="value">0</span>
           <span class="label">Total Views</span>
@@ -64,13 +234,14 @@
           <span id="repliesTotal" class="value">0.00</span>
           <span class="label">Replies</span>
         </div>
+        <div class="metric-break" aria-hidden="true"></div>
         <div id="remixesSummary" class="metric-card" title="Sum of latest recursive remixes for visible posts">
           <span id="remixesTotal" class="value">0.00</span>
-          <span class="label">Recursive Remixes</span>
+          <span class="label">Rec. Remixes</span>
         </div>
-        <div id="interactionsSummary" class="metric-card" title="Sum of latest interactions (likes + comments) for visible posts">
+        <div id="interactionsSummary" class="metric-card" title="Sum of latest engagements (likes + comments) for visible posts">
           <span id="interactionsTotal" class="value">0.00</span>
-          <span class="label">Interactions</span>
+          <span class="label">Engagements</span>
         </div>
         <div id="userCameosSummary" class="metric-card" title="Profile cast in count">
           <span id="userCameosTotal" class="value">0</span>
@@ -81,7 +252,7 @@
           <span class="label">Followers</span>
         </div>
       </div>
-      <div style="display: flex; gap: 8px; margin-bottom: 12px; align-items: center;">
+      <div class="views-toggle">
         <button id="uniqueViewsPill" class="views-pill active" data-type="unique">Unique Views</button>
         <button id="totalViewsPill" class="views-pill" data-type="total">Total Views</button>
       </div>
@@ -91,54 +262,36 @@
         <div id="tooltip" class="tooltip"></div>
       </div>
       <h4 class="chart-title">Views over Time</h4>
-      <div class="chart-wrap" style="margin-top:10px">
+      <div class="chart-wrap chart-wrap-spaced">
         <canvas id="viewsChart" width="900" height="540"></canvas>
         <div id="viewsTooltip" class="tooltip"></div>
       </div>
       <h4 class="chart-title">Views in First 24 Hours</h4>
-      <div class="chart-wrap" style="margin-top:10px">
+      <div class="chart-wrap chart-wrap-spaced">
         <canvas id="first24HoursChart" width="900" height="540"></canvas>
         <div id="first24HoursTooltip" class="tooltip"></div>
-        <div style="margin-top: 10px; padding: 4px; background: var(--bg-subtle); border: 1px solid var(--border-subtle); border-radius: 4px;">
-          <div style="display: flex; align-items: center; gap: 8px;">
-            <label style="color: var(--muted); font-size: 12px; min-width: 100px; flex-shrink: 0;">Time Window</label>
-            <input type="range" id="first24HoursSlider" min="15" max="1440" value="1440" step="15" style="flex: 1; height: 6px; background: var(--grid); border-radius: 3px; outline: none;" />
-            <span id="first24HoursSliderValue" style="color: var(--fg); font-size: 12px; min-width: 70px; text-align: right; flex-shrink: 0;">24 hrs</span>
+        <div class="chart-slider">
+          <div class="chart-slider-row">
+            <label class="chart-slider-label">Time Window</label>
+            <input type="range" id="first24HoursSlider" min="15" max="1440" value="1440" step="15" class="chart-slider-input" />
+            <span id="first24HoursSliderValue" class="chart-slider-value">24 hrs</span>
           </div>
         </div>
       </div>
       <h4 class="chart-title">Views Per Person in First 24 Hours</h4>
-      <div class="chart-wrap" style="margin-top:10px">
+      <div class="chart-wrap chart-wrap-spaced">
         <canvas id="viewsPerPersonChart" width="900" height="540"></canvas>
         <div id="viewsPerPersonTooltip" class="tooltip"></div>
-        <div style="margin-top: 10px; padding: 4px; background: var(--bg-subtle); border: 1px solid var(--border-subtle); border-radius: 4px;">
-          <div style="display: flex; align-items: center; gap: 8px;">
-            <label style="color: var(--muted); font-size: 12px; min-width: 100px; flex-shrink: 0;">Time Window</label>
-            <input type="range" id="viewsPerPersonSlider" min="15" max="1440" value="1440" step="15" style="flex: 1; height: 6px; background: var(--grid); border-radius: 3px; outline: none;" />
-            <span id="viewsPerPersonSliderValue" style="color: var(--fg); font-size: 12px; min-width: 70px; text-align: right; flex-shrink: 0;">24 hrs</span>
+        <div class="chart-slider">
+          <div class="chart-slider-row">
+            <label class="chart-slider-label">Time Window</label>
+            <input type="range" id="viewsPerPersonSlider" min="15" max="1440" value="1440" step="15" class="chart-slider-input" />
+            <span id="viewsPerPersonSliderValue" class="chart-slider-value">24 hrs</span>
           </div>
         </div>
       </div>
-      <h3 class="section-title">BEST TIME TO POST</h3>
-      <p style="color: var(--muted); font-size: 14px; margin-top: -8px; margin-bottom: 16px;">Based on data from all the posts you've ever browsed on Sora.</p>
-      <div id="bestTimeToPostSection" style="margin-bottom: 32px;">
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px;">
-          <div class="best-time-metric-card">
-            <div class="best-time-metric-header">For Views...</div>
-            <div id="bestTimeViewsGrid" class="best-time-grid"></div>
-          </div>
-          <div class="best-time-metric-card">
-            <div class="best-time-metric-header">For Likes...</div>
-            <div id="bestTimeLikesGrid" class="best-time-grid"></div>
-          </div>
-          <div class="best-time-metric-card">
-            <div class="best-time-metric-header">For Remixes...</div>
-            <div id="bestTimeRemixesGrid" class="best-time-grid"></div>
-          </div>
-        </div>
-      </div>
-      <h3 class="section-title">Compare Total Metrics</h3>
-      <p style="color: var(--muted); font-size: 14px; margin-top: -8px; margin-bottom: 16px;">You must run Gather mode on any profile for up-to-date and complete data</p>
+      <h3 class="section-title section-title-compare">Compare Total Metrics</h3>
+      <p class="section-note">You must run Gather mode on any profile for up-to-date and complete data</p>
       <div class="compare-section">
         <div class="compare-header">
           <div class="compare-controls">
@@ -147,13 +300,12 @@
                 <input id="compareSearch" type="search" placeholder="Type to find user to compare…" autocomplete="off" />
                 <div id="compareSuggestions" class="suggestions"></div>
               </div>
-              <select id="compareUserSelect" title="Select user to add" class="compare-select-dropdown"></select>
             </div>
             <div id="comparePills" class="compare-pills"></div>
           </div>
         </div>
       </div>
-      <div style="display: flex; flex-wrap: wrap; gap: 8px 8px; margin-bottom: 12px;">
+      <div class="metric-grid">
         <div id="allTotalViewsSummary" class="metric-card" title="Sum of latest total views across all posts (ignores visibility)">
           <span id="allTotalViewsTotal" class="value">0</span>
           <span class="label">Total Views</span>
@@ -170,13 +322,14 @@
           <span id="allRepliesTotal" class="value">0.00</span>
           <span class="label">Replies</span>
         </div>
+        <div class="metric-break" aria-hidden="true"></div>
         <div id="allRemixesSummary" class="metric-card" title="Sum of latest recursive remixes across all posts (ignores visibility)">
           <span id="allRemixesTotal" class="value">0.00</span>
-          <span class="label">Recursive Remixes</span>
+          <span class="label">Rec. Remixes</span>
         </div>
-        <div id="allInteractionsSummary" class="metric-card" title="Sum of latest interactions across all posts (ignores visibility)">
+        <div id="allInteractionsSummary" class="metric-card" title="Sum of latest engagements across all posts (ignores visibility)">
           <span id="allInteractionsTotal" class="value">0.00</span>
-          <span class="label">Interactions</span>
+          <span class="label">Engagements</span>
         </div>
         <div id="allCameosSummary" class="metric-card" title="Profile cast in count (ignores visibility)">
           <span id="allCameosTotal" class="value">0</span>
@@ -188,27 +341,57 @@
         </div>
       </div>
       <h4 class="chart-title">Followers over Time</h4>
-      <div class="chart-wrap" style="margin-top:10px">
+      <div class="chart-wrap chart-wrap-spaced">
         <canvas id="followersChart" width="900" height="540"></canvas>
         <div id="followersTooltip" class="tooltip"></div>
       </div>
       <h4 class="chart-title">Total Views over Time</h4>
-      <div class="chart-wrap" style="margin-top:10px">
+      <div class="chart-wrap chart-wrap-spaced">
         <canvas id="allViewsChart" width="900" height="540"></canvas>
         <div id="allViewsTooltip" class="tooltip"></div>
       </div>
       <h4 class="chart-title">Likes over Time</h4>
-      <div class="chart-wrap" style="margin-top:10px">
+      <div class="chart-wrap chart-wrap-spaced">
         <canvas id="allLikesChart" width="900" height="540"></canvas>
         <div id="allLikesTooltip" class="tooltip"></div>
       </div>
       <h4 class="chart-title">Cast In over Time</h4>
-      <div class="chart-wrap" style="margin-top:10px">
+      <div class="chart-wrap chart-wrap-spaced">
         <canvas id="cameosChart" width="900" height="540"></canvas>
         <div id="cameosTooltip" class="tooltip"></div>
       </div>
-      
-      <div class="help">Drag to zoom • Hover to focus series • Click point to open post • Double-click to reset zoom • Toggle visibility in sidebar • Run Gather mode on Profile or Top feeds to collect data!</div>
+
+      <div class="brought-by">
+        <div class="brought-by-title">Brought to you by</div>
+        <div class="brought-by-grid">
+          <a class="brought-by-card" href="https://sora.chatgpt.com/profile/cameoed" target="_blank" rel="noopener">
+            <img class="brought-by-avatar" src="https://videos.openai.com/az/vg-assets/project-y%2Fprofile%2Fuser-8vXlDzKcb5B6QMgtU83PAPzD%2F69d41a2c8569975%23file_0000000001ac71f79e637de3b7325ff1%23thumbnail.jpeg?se=2026-01-07T00%3A00%3A00Z&sp=r&sv=2024-08-04&sr=b&skoid=8ebb0df1-a278-4e2e-9c20-f2d373479b3a&sktid=a48cca56-e6da-484e-a814-9c849652bcb3&skt=2026-01-01T01%3A51%3A36Z&ske=2026-01-08T01%3A56%3A36Z&sks=b&skv=2024-08-04&sig=F6ia7KjjK6bwSYmEWNJrKMow91orr3asTGuvtuXci9I%3D&ac=oaivgprodscus" alt="Topher profile" />
+            <div class="brought-by-info">
+              <div class="brought-by-name">Topher 👋🏻</div>
+              <span class="brought-by-handle">@cameoed</span>
+            </div>
+            <span class="brought-by-follow">Follow</span>
+          </a>
+          <a class="brought-by-card" href="https://sora.chatgpt.com/profile/cosmic-skye" target="_blank" rel="noopener">
+            <img class="brought-by-avatar" src="https://videos.openai.com/az/vg-assets/project-y%2Fprofile%2Fuser-zkM2bJtaANCjAP48bJBumul8%2F3e250d29757147b%23file_000000000e4c722f99d7fe88ffd803d0%23thumbnail.jpeg?se=2026-01-07T00%3A00%3A00Z&sp=r&sv=2024-08-04&sr=b&skoid=8ebb0df1-a278-4e2e-9c20-f2d373479b3a&sktid=a48cca56-e6da-484e-a814-9c849652bcb3&skt=2026-01-01T01%3A51%3A36Z&ske=2026-01-08T01%3A56%3A36Z&sks=b&skv=2024-08-04&sig=d4xVkG%2BEIX8XJhwmq4fujX2lm5ApuZKT0OOCwDMldYk%3D&ac=oaivgprodscus" alt="Skye profile" />
+            <div class="brought-by-info">
+              <div class="brought-by-name">Skye</div>
+              <span class="brought-by-handle">@cosmic-skye</span>
+            </div>
+            <span class="brought-by-follow">Follow</span>
+          </a>
+          <a class="brought-by-card" href="https://sora.chatgpt.com/profile/fancyson" target="_blank" rel="noopener">
+            <img class="brought-by-avatar" src="https://videos.openai.com/az/vg-assets/project-y%2Fprofile%2Fuser-lfDYiWDUmXzHBBkQjANb605x%2F7b405d04caf3b28%23file_0000000048dc61f7ab7ce2551d2e06f9%23thumbnail.jpeg?se=2026-01-07T00%3A00%3A00Z&sp=r&sv=2024-08-04&sr=b&skoid=8ebb0df1-a278-4e2e-9c20-f2d373479b3a&sktid=a48cca56-e6da-484e-a814-9c849652bcb3&skt=2026-01-01T01%3A51%3A36Z&ske=2026-01-08T01%3A56%3A36Z&sks=b&skv=2024-08-04&sig=YtL/adwkhjml5Jvd5Qz9F8/9SuCwJjrUjFjgWcGA7xQ%3D&ac=oaivgprodscus" alt="Fancyson profile" />
+            <div class="brought-by-info">
+              <div class="brought-by-name">Fancyson</div>
+              <span class="brought-by-handle">@fancyson</span>
+            </div>
+            <span class="brought-by-follow">Follow</span>
+          </a>
+        </div>
+      </div>
+
+      <div class="help"><strong>Tips:</strong> Drag to zoom • Hover to focus series • Click point to open post • Double-click to reset zoom • Toggle visibility in sidebar • Run Gather mode on Profile or Top feeds to collect data!</div>
     </section>
   </main>
 
@@ -216,100 +399,109 @@
   <div id="purgeModal" class="purge-modal-overlay" style="display: none;">
     <div class="purge-modal-panel">
       <div class="purge-modal-header">
-        <h2>Purge Data</h2>
+        <h2>Data Menu</h2>
         <button id="purgeModalClose" class="purge-modal-close">×</button>
       </div>
       
       <div class="purge-modal-content">
-        <!-- Date Range Slider -->
-        <div class="purge-control-group">
-          <div class="purge-control-label">
-            <span>Keep posts within last</span>
-            <span id="dateRangeValue" class="purge-value-display">1 year</span>
+        <div class="purge-section">
+          <div class="purge-section-title">Manage Data</div>
+          <div class="purge-actions purge-actions-manage">
+            <button id="purgeExport" class="purge-export-btn">Export Data</button>
+            <button id="purgeImport" class="purge-export-btn">Import Data</button>
           </div>
-          <div class="purge-slider-container">
-            <div class="purge-slider-track">
-              <div class="purge-slider-fill" id="dateRangeFill"></div>
-              <input type="range" id="dateRangeSlider" min="1" max="365" value="365" step="1" />
-            </div>
-            <div class="purge-slider-labels">
-              <span>1 day</span>
-              <span>365 days</span>
-            </div>
+          <div class="purge-storage-size">
+            <span id="purgeStorageSize">Sora Creator Tools uses 0.00MB of storage.</span>
+            <label class="purge-comb-mode-label">
+              <input type="checkbox" id="combModeCheckbox" checked />
+              <span class="purge-comb-mode-helper">Auto-purge old data captured more frequently than every hour.</span>
+            </label>
           </div>
         </div>
 
-        <!-- Post Count Slider -->
-        <div class="purge-control-group">
-          <div class="purge-control-label">
-            <span>Keep everyone with</span>
-            <span id="postCountValue" class="purge-value-display">0 posts</span>
-          </div>
-          <div class="purge-slider-container">
-            <div class="purge-slider-track">
-              <div class="purge-slider-fill" id="postCountFill"></div>
-              <input type="range" id="postCountSlider" min="0" max="100" value="0" step="1" />
+        <div class="purge-section">
+          <div class="purge-section-title">Purge Data</div>
+          <!-- Date Range Slider -->
+          <div class="purge-control-group">
+            <div class="purge-control-label">
+              <span>Keep posts within last</span>
+              <span id="dateRangeValue" class="purge-value-display">1 year</span>
             </div>
-            <div class="purge-slider-labels">
-              <span>0 posts</span>
-              <span>100+ posts</span>
-            </div>
-          </div>
-        </div>
-
-        <!-- Follower Count Slider -->
-        <div class="purge-control-group">
-          <div class="purge-control-label">
-            <span>Keep everyone with</span>
-            <span id="followerCountValue" class="purge-value-display">0 followers</span>
-          </div>
-          <div class="purge-slider-container">
-            <div class="purge-slider-track">
-              <div class="purge-slider-fill" id="followerCountFill"></div>
-              <input type="range" id="followerCountSlider" min="0" max="10000" value="0" step="100" />
-            </div>
-            <div class="purge-slider-labels">
-              <span>0 followers</span>
-              <span>10K+ followers</span>
-            </div>
-          </div>
-        </div>
-
-        <!-- Exceptions Section -->
-        <div class="purge-exceptions-section">
-          <div class="purge-exceptions-label">Exceptions</div>
-          <div class="purge-exceptions-controls">
-            <div class="purge-exceptions-search-row">
-              <div class="user-picker-exceptions">
-                <input id="exceptionsSearch" type="search" placeholder="Add user to except…" autocomplete="off" />
-                <div id="exceptionsSuggestions" class="suggestions"></div>
+            <div class="purge-slider-container">
+              <div class="purge-slider-track">
+                <div class="purge-slider-fill" id="dateRangeFill"></div>
+                <input type="range" id="dateRangeSlider" min="1" max="365" value="365" step="1" />
               </div>
-              <select id="exceptionsUserSelect" title="Select user to except" class="exceptions-select-dropdown"></select>
+              <div class="purge-slider-labels">
+                <span>1 day</span>
+                <span>365 days</span>
+              </div>
             </div>
-            <div id="exceptionsPills" class="exceptions-pills"></div>
           </div>
-        </div>
 
-        <!-- Review Section -->
-        <div class="purge-review-section">
-          <div class="purge-review-label">Preview:</div>
-          <div id="purgeReviewText" class="purge-review-text">
-            You are about to purge all data outside the last 1 year.
+          <!-- Post Count Slider -->
+          <div class="purge-control-group">
+            <div class="purge-control-label">
+              <span>Keep everyone with</span>
+              <span id="postCountValue" class="purge-value-display">0 posts</span>
+            </div>
+            <div class="purge-slider-container">
+              <div class="purge-slider-track">
+                <div class="purge-slider-fill" id="postCountFill"></div>
+                <input type="range" id="postCountSlider" min="0" max="100" value="0" step="1" />
+              </div>
+              <div class="purge-slider-labels">
+                <span>0 posts</span>
+                <span>100+ posts</span>
+              </div>
+            </div>
           </div>
-        </div>
 
-        <!-- Actions -->
-        <div class="purge-actions">
-          <button id="purgeExecute" class="purge-execute-btn">Purge</button>
-        </div>
+          <!-- Follower Count Slider -->
+          <div class="purge-control-group">
+            <div class="purge-control-label">
+              <span>Keep everyone with</span>
+              <span id="followerCountValue" class="purge-value-display">0 followers</span>
+            </div>
+            <div class="purge-slider-container">
+              <div class="purge-slider-track">
+                <div class="purge-slider-fill" id="followerCountFill"></div>
+                <input type="range" id="followerCountSlider" min="0" max="10000" value="0" step="100" />
+              </div>
+              <div class="purge-slider-labels">
+                <span>0 followers</span>
+                <span>10K+ followers</span>
+              </div>
+            </div>
+          </div>
 
-        <!-- Storage Size Display -->
-        <div class="purge-storage-size">
-          <span id="purgeStorageSize">Sora Creator Tools currently uses 0.00MB of memory.</span>
-          <label class="purge-comb-mode-label">
-            <input type="checkbox" id="combModeCheckbox" checked />
-            <span class="purge-comb-mode-helper">Auto-purge old data captured more frequently than every hour.</span>
-          </label>
+          <!-- Exceptions Section -->
+          <div class="purge-exceptions-section">
+            <div class="purge-exceptions-label">Exceptions</div>
+            <div class="purge-exceptions-controls">
+              <div class="purge-exceptions-search-row">
+                <div class="user-picker-exceptions">
+                  <input id="exceptionsSearch" type="search" placeholder="Add user to except…" autocomplete="off" />
+                  <div id="exceptionsSuggestions" class="suggestions"></div>
+                </div>
+                <select id="exceptionsUserSelect" title="Select user to except" class="exceptions-select-dropdown"></select>
+              </div>
+              <div id="exceptionsPills" class="exceptions-pills"></div>
+            </div>
+          </div>
+
+          <!-- Review Section -->
+          <div class="purge-review-section">
+            <div class="purge-review-label">Preview:</div>
+            <div id="purgeReviewText" class="purge-review-text">
+              You are about to purge all data outside the last 1 year.
+            </div>
+          </div>
+
+          <!-- Actions -->
+          <div class="purge-actions purge-actions-danger">
+            <button id="purgeExecute" class="purge-execute-btn">Purge</button>
+          </div>
         </div>
       </div>
     </div>
@@ -317,7 +509,7 @@
     <!-- Confirmation Dialog -->
     <div id="purgeConfirmDialog" class="purge-confirm-dialog" style="display: none;">
       <div class="purge-confirm-content">
-        <h3>⚠️ This cannot be undone!</h3>
+        <h3>⚠️ This cannot be undone ⚠️</h3>
         <p id="purgeConfirmText">Are you sure you want to proceed with purging data based on your selected criteria?</p>
         <div class="purge-confirm-actions">
           <button id="purgeConfirmYes" class="purge-confirm-yes">Yes, Purge</button>
@@ -331,7 +523,7 @@
   <!-- Post Purge Confirmation Dialog -->
   <div id="postPurgeConfirm" class="purge-confirm-dialog" style="display: none;">
     <div class="purge-confirm-content">
-      <h3>⚠️ This cannot be undone!</h3>
+      <h3>⚠️ This cannot be undone ⚠️</h3>
       <p id="postPurgeConfirmText">Are you sure you want to purge data tied to ""?</p>
       <div class="purge-confirm-actions">
         <button id="postPurgeConfirmYes" class="purge-confirm-yes">Yes, Purge</button>
