@@ -9201,33 +9201,17 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       let description = '';
       const daysText = days === 365 ? '1 year' : `${days} ${days === 1 ? 'day' : 'days'}`;
       
-      if (days === 365 && minPosts === 0 && minFollowers === 0) {
-        description = 'all data outside the last 1 year';
-      } else if (days < 365 && minPosts > 0 && minFollowers > 0) {
-        const postsText = minPosts === 1 ? `${minPosts} post` : `${minPosts} posts`;
-        const followersText = fmt(minFollowers);
-        description = `all data outside the last ${daysText} for users with less than ${postsText} and less than ${followersText} followers`;
-      } else if (days === 365 && minPosts > 0 && minFollowers > 0) {
-        const postsText = minPosts === 1 ? `${minPosts} post` : `${minPosts} posts`;
-        const followersText = fmt(minFollowers);
-        description = `all data outside the last 1 year for users with less than ${postsText} and less than ${followersText} followers`;
-      } else if (days < 365 && minPosts > 0) {
-        const postsText = minPosts === 1 ? `${minPosts} post` : `${minPosts} posts`;
-        description = `all data outside the last ${daysText} for users with less than ${postsText}`;
-      } else if (days === 365 && minPosts > 0) {
-        const postsText = minPosts === 1 ? `${minPosts} post` : `${minPosts} posts`;
-        description = `all data outside the last 1 year for users with less than ${postsText}`;
-      } else if (days < 365 && minFollowers > 0) {
-        const followersText = fmt(minFollowers);
-        description = `all data outside the last ${daysText} for users with less than ${followersText} followers`;
-      } else if (days === 365 && minFollowers > 0) {
-        const followersText = fmt(minFollowers);
-        description = `all data outside the last 1 year for users with less than ${followersText} followers`;
-      } else if (days < 365) {
-        description = `all data outside the last ${daysText}`;
-      } else {
-        description = 'all data outside the last 1 year';
-      }
+      const postsText = minPosts === 1 ? `${minPosts} post` : `${minPosts} posts`;
+      const followersText = fmt(minFollowers);
+      const scope = (function(){
+        if (minPosts > 0 && minFollowers > 0) {
+          return `for users with fewer than ${postsText} and fewer than ${followersText} followers`;
+        }
+        if (minPosts > 0) return `for users with fewer than ${postsText}`;
+        if (minFollowers > 0) return `for users with fewer than ${followersText} followers`;
+        return 'for everyone';
+      })();
+      description = `all data older than ${daysText} ${scope}`;
       
       // Add exceptions clause
       if (exceptedUsers.size > 0) {
@@ -9554,12 +9538,21 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         // Get follower count for later use
         const followersArr = Array.isArray(user.followers) ? user.followers : [];
         const latestFollowers = followersArr.length > 0 ? Number(followersArr[followersArr.length - 1]?.count) : 0;
+        const prePurgePostCount = Object.keys(user.posts || {}).length;
+        const hasLowFollowers = minFollowers > 0 && (!isFinite(latestFollowers) || latestFollowers < minFollowers);
+        const hasLowPosts = minPosts > 0 && prePurgePostCount < minPosts;
+        let shouldApplyDatePurge = days <= 365;
+        if (shouldApplyDatePurge && (minPosts > 0 || minFollowers > 0)) {
+          if (minPosts > 0 && minFollowers > 0) {
+            shouldApplyDatePurge = hasLowPosts && hasLowFollowers;
+          } else {
+            shouldApplyDatePurge = hasLowPosts || hasLowFollowers;
+          }
+        }
 
-        // ALWAYS purge posts by date first (if days is set and <= 365)
-        // This ensures all old posts are removed regardless of minPosts/minFollowers settings
         let postsToKeep = {};
-        const originalPostCount = Object.keys(user.posts || {}).length;
-        if (days <= 365) {
+        const originalPostCount = prePurgePostCount;
+        if (shouldApplyDatePurge) {
           // Purge posts older than cutoff time
           for (const [pid, post] of Object.entries(user.posts || {})){
             const postTime = getPostTimeForPurge(post);
@@ -9575,13 +9568,13 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           if (purgedCount > 0) {
           }
         } else {
-          // If days > 365, keep all posts (no date-based purging)
+          // Keep all posts (no date-based purging for this user)
           postsToKeep = { ...user.posts };
         }
 
         // Update user's posts with purged list
         user.posts = postsToKeep;
-        if (days <= 365) {
+        if (shouldApplyDatePurge) {
           for (const post of Object.values(user.posts || {})){
             if (!Array.isArray(post?.snapshots)) continue;
             post.snapshots = post.snapshots.filter((s)=>{
@@ -9591,8 +9584,10 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           }
         }
 
-        user.followers = trimHistoryByCutoff(user.followers, latestFollowers >= 50);
-        user.cameos = trimHistoryByCutoff(user.cameos);
+        if (shouldApplyDatePurge) {
+          user.followers = trimHistoryByCutoff(user.followers, latestFollowers >= 50);
+          user.cameos = trimHistoryByCutoff(user.cameos);
+        }
 
         // Now check if user should be kept based on minPosts/minFollowers criteria
         const postCountAfterPurge = Object.keys(postsToKeep).length;
@@ -9602,29 +9597,6 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           delete targetMetrics.users[userKey];
           purgedUsers++;
           continue;
-        }
-
-        const hasLowFollowers = minFollowers > 0 && (!isFinite(latestFollowers) || latestFollowers < minFollowers);
-        const hasLowPosts = minPosts > 0 && (minPosts === 1 ? postCountAfterPurge <= minPosts : postCountAfterPurge < minPosts);
-
-        // Determine if user should be removed based on minPosts/minFollowers criteria:
-        // - If both minPosts and minFollowers are set: user must meet BOTH to be removed
-        // - If only one is set: user must meet that one to be removed
-        // - If neither is set: keep the user (they have posts, so they're kept)
-        let shouldRemoveUser = false;
-        if (minPosts > 0 && minFollowers > 0) {
-          shouldRemoveUser = hasLowPosts && hasLowFollowers;
-        } else if (minPosts > 0) {
-          shouldRemoveUser = hasLowPosts;
-        } else if (minFollowers > 0) {
-          shouldRemoveUser = hasLowFollowers;
-        }
-        // else: no criteria set, keep user since they have posts
-
-        // Remove user if they should be purged
-        if (shouldRemoveUser){
-          delete targetMetrics.users[userKey];
-          purgedUsers++;
         }
       }
 
