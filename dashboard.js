@@ -1135,6 +1135,10 @@
     if (!name) return '';
     return String(name).trim().toLowerCase();
   }
+  function normalizeMenuName(name){
+    if (!name) return '';
+    return normalizeCameoName(name).replace(/^@/, '');
+  }
   function isCharacterId(id){
     return typeof id === 'string' && id.startsWith('ch_');
   }
@@ -1149,7 +1153,11 @@
     return normalized ? `${CAMEO_KEY_PREFIX}${normalized}` : null;
   }
   function formatCameoLabel(name){
-    return name;
+    const clean = String(name || '').trim();
+    if (!clean) return '';
+    const suffix = ' character';
+    if (clean.toLowerCase().endsWith(suffix)) return clean;
+    return `${clean}${suffix}`;
   }
   function isVirtualUserKey(k){
     return isTopTodayKey(k) || isCameoKey(k);
@@ -1235,37 +1243,40 @@
       cameoUserCache.users.clear();
     }
     if (key && cameoUserCache.users.has(key)) return cameoUserCache.users.get(key);
+    const profileUser = findUserByHandle(metrics, name);
     const posts = {};
+    const postSource = new Map();
     for (const [userKey, user] of Object.entries(metrics?.users || {})){
       const userHandle = user?.handle || user?.userHandle || (userKey.startsWith('h:') ? userKey.slice(2) : null);
       for (const [pid, p] of Object.entries(user?.posts || {})){
         const ownerHandle = p?.ownerHandle || p?.userHandle || userHandle || null;
-        const ownerMatch = normalizeCameoName(ownerHandle) === name;
         let cameoMatch = false;
-        if (!ownerMatch) {
-          const cameos = Array.isArray(p?.cameo_usernames) ? p.cameo_usernames : [];
-          for (const cameo of cameos){
-            if (normalizeCameoName(cameo) === name) { cameoMatch = true; break; }
-          }
+        const cameos = Array.isArray(p?.cameo_usernames) ? p.cameo_usernames : [];
+        for (const cameo of cameos){
+          if (normalizeCameoName(cameo) === name) { cameoMatch = true; break; }
         }
-        if (!ownerMatch && !cameoMatch) continue;
+        if (!cameoMatch) continue;
         const existing = posts[pid];
         if (existing){
           const a = Array.isArray(existing.snapshots) ? existing.snapshots.length : 0;
           const b = Array.isArray(p.snapshots) ? p.snapshots.length : 0;
-          if (b <= a) continue;
+          const isProfileSource = profileUser && user === profileUser;
+          const existingIsProfile = postSource.get(pid) === true;
+          if (b < a) continue;
+          if (b === a && !(isProfileSource && !existingIsProfile)) continue;
         }
         const next = ownerHandle && !p?.ownerHandle ? { ...p, ownerHandle } : p;
         posts[pid] = next;
+        postSource.set(pid, profileUser && user === profileUser);
       }
     }
-    const profileUser = findUserByHandle(metrics, name);
     const cameoHistory = Array.isArray(profileUser?.cameos) ? profileUser.cameos.slice() : [];
+    const followerHistory = Array.isArray(profileUser?.followers) ? profileUser.followers.slice() : [];
     const cameoUser = {
       handle: profileUser?.handle || name,
       id: profileUser?.id || null,
       posts,
-      followers: [],
+      followers: followerHistory,
       cameos: cameoHistory,
       __specialKey: key
     };
@@ -1514,6 +1525,7 @@
   function buildUserOptions(metrics){
     const sel = $('#userSelect');
     sel.innerHTML = '';
+    let firstKey = null;
 
     const useIndex = Array.isArray(usersIndex) && usersIndex.length > 0;
     if (!isMetricsPartial) {
@@ -1522,8 +1534,11 @@
       const opt = document.createElement('option');
       opt.value = TOP_TODAY_KEY;
       const postCount = Object.keys(topToday.posts||{}).length;
-      opt.textContent = formatUserOptionLabel(topToday.handle, postCount);
-      sel.appendChild(opt);
+      if (postCount > 0) {
+        opt.textContent = formatUserOptionLabel(topToday.handle, postCount);
+        sel.appendChild(opt);
+        if (!firstKey) firstKey = TOP_TODAY_KEY;
+      }
     }
 
     let entries = useIndex ? usersIndex.map((entry)=>[entry.key, entry]) : Object.entries(metrics.users);
@@ -1544,10 +1559,13 @@
       const opt = document.createElement('option');
       opt.value = key;
       const postCount = useIndex ? (Number(u.postCount) || 0) : Object.keys(u.posts||{}).length;
-      opt.textContent = formatUserOptionLabel(u.handle || key, postCount);
-      sel.appendChild(opt);
+      if (postCount > 0) {
+        opt.textContent = formatUserOptionLabel(u.handle || key, postCount);
+        sel.appendChild(opt);
+        if (!firstKey) firstKey = key;
+      }
     }
-    return users.length ? users[0][0] : null;
+    return firstKey;
   }
 
   function updateAutoRefreshCountdown(userKey = currentUserKey){
@@ -1608,7 +1626,10 @@
   function getGatherDisplayName(userKey, user){
     if (!userKey) return '—';
     if (isTopTodayKey(userKey)) return EVERYONE_LABEL;
-    if (isCameoKey(userKey)) return cameoNameFromKey(userKey) || user?.handle || 'Unknown';
+    if (isCameoKey(userKey)) {
+      const cameoName = cameoNameFromKey(userKey) || user?.handle || 'Unknown';
+      return formatCameoLabel(cameoName);
+    }
     const raw = user?.handle || (userKey || '').replace(/^h:/i, '');
     return raw || 'Unknown';
   }
@@ -1654,12 +1675,8 @@
   function collectCameoUsernamesFromMetrics(metrics){
     const userPostIds = new Map();
     for (const [userKey, user] of Object.entries(metrics?.users || {})){
-      const userHandle = user?.handle || user?.userHandle || (userKey.startsWith('h:') ? userKey.slice(2) : null);
       for (const [pid, p] of Object.entries(user?.posts || {})){
         const tiedUsernames = new Set();
-        const ownerHandle = p?.ownerHandle || p?.userHandle || userHandle || null;
-        const ownerName = normalizeCameoName(ownerHandle);
-        if (ownerName) tiedUsernames.add(ownerName);
         const cameos = Array.isArray(p?.cameo_usernames) ? p.cameo_usernames : [];
         for (const cameo of cameos){
           const cameoName = normalizeCameoName(cameo);
@@ -1695,7 +1712,7 @@
     for (const item of filtered){
       const key = makeCameoKey(item.username);
       if (!key) continue;
-      out.push({ key, label: formatCameoLabel(item.username), count: item.count });
+      out.push({ key, label: formatCameoLabel(item.username), count: item.count, baseName: item.username });
     }
     return out;
   }
@@ -1886,6 +1903,15 @@
     return user?.handle || userKey;
   }
 
+  function getFollowersSeriesForUser(userKey, user){
+    let arr = Array.isArray(user?.followers) ? user.followers : [];
+    if ((!arr || !arr.length) && isCameoKey(userKey)) {
+      const fallbackUser = findUserByHandle(metrics, user?.handle || cameoNameFromKey(userKey));
+      arr = Array.isArray(fallbackUser?.followers) ? fallbackUser.followers : arr;
+    }
+    return arr;
+  }
+
   function formatUserSelectionLabel(userKey, user){
     if (!userKey) return '';
     const meta = user || findUserIndexEntry(userKey);
@@ -1900,15 +1926,40 @@
     const everyoneSearch = 'top today everyone all users';
     if ((!needle || everyoneSearch.includes(needle)) && !isMetricsPartial){
       const topToday = buildTopTodayUser(metrics);
-      items.push({ key: TOP_TODAY_KEY, label: EVERYONE_LABEL, count: countUserPosts(topToday), hint: '' });
-    }
-    const list = filterUsersByQuery(metrics, query);
-    for (const [key, u] of list){
-      items.push({ key, label: u.handle || key, count: countUserPosts(u) });
+      const postCount = countUserPosts(topToday);
+      if (postCount > 0) {
+        items.push({ key: TOP_TODAY_KEY, label: EVERYONE_LABEL, count: postCount, hint: '' });
+      }
     }
     const cameoList = getCameoSuggestionItems(metrics, query);
+    const cameoMap = new Map();
     for (const cameo of cameoList){
+      const norm = normalizeMenuName(cameo.baseName || cameo.label);
+      if (!norm || cameoMap.has(norm)) continue;
+      cameoMap.set(norm, cameo);
+    }
+    const seenProfiles = new Set();
+    const seenCameoKeys = new Set();
+    const list = filterUsersByQuery(metrics, query);
+    for (const [key, u] of list){
+      const label = u.handle || key;
+      const postCount = countUserPosts(u);
+      if (postCount <= 0) continue;
+      const norm = normalizeMenuName(label || key);
+      if (norm && seenProfiles.has(norm)) continue;
+      items.push({ key, label, count: postCount });
+      if (norm) seenProfiles.add(norm);
+      const cameo = norm ? cameoMap.get(norm) : null;
+      if (cameo && !seenCameoKeys.has(cameo.key) && Number(cameo.count) > 0) {
+        items.push({ key: cameo.key, label: cameo.label, count: Number(cameo.count) || 0 });
+        seenCameoKeys.add(cameo.key);
+      }
+    }
+    for (const cameo of cameoList){
+      if (Number(cameo.count) <= 0) continue;
+      if (seenCameoKeys.has(cameo.key)) continue;
       items.push(cameo);
+      seenCameoKeys.add(cameo.key);
     }
     return items;
   }
@@ -5007,25 +5058,60 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     return toTs(tsStr);
   }
 
-  async function importDataCSV(file) {
-    try {
-      const text = await file.text();
-      const lines = text.split('\n').map(l => l.trim()).filter(l => l);
-      
-      if (lines.length === 0) {
-        alert('CSV file is empty.');
-        return;
-      }
+  async function importDataCSVText(text, metrics, stats){
+    const lines = text.split('\n').map(l => l.trim()).filter(l => l);
+    if (lines.length === 0) return false;
 
-      // Load existing metrics
+    let currentSection = null;
+    let headerRow = null;
+    let dataStartIdx = -1;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (line.startsWith('===') && line.endsWith('===')) {
+        if (currentSection && headerRow && dataStartIdx >= 0 && i > dataStartIdx) {
+          const sectionRows = lines.slice(dataStartIdx, i).filter(r => r && r.trim());
+          await processSection(currentSection, headerRow, sectionRows, metrics, stats);
+        }
+        if (line.includes('POSTS SUMMARY')) {
+          currentSection = 'posts_summary';
+        } else if (line.includes('POST SNAPSHOTS')) {
+          currentSection = 'snapshots';
+        } else if (line.includes('USER FOLLOWERS HISTORY')) {
+          currentSection = 'followers';
+        } else if (line.includes('USER CAST IN HISTORY')) {
+          currentSection = 'cameos';
+        } else if (line.includes('USERS SUMMARY')) {
+          currentSection = 'users_summary';
+        } else {
+          currentSection = null;
+        }
+        headerRow = null;
+        dataStartIdx = -1;
+        continue;
+      }
+      if (currentSection && !headerRow && !line.startsWith('===')) {
+        headerRow = parseCSVLine(line);
+        dataStartIdx = i + 1;
+        continue;
+      }
+    }
+    if (currentSection && headerRow && dataStartIdx >= 0) {
+      const sectionRows = lines.slice(dataStartIdx).filter(r => r && r.trim());
+      await processSection(currentSection, headerRow, sectionRows, metrics, stats);
+    }
+    return true;
+  }
+
+  async function importDataCSVFiles(files) {
+    try {
+      const list = Array.from(files || []).filter(Boolean);
+      if (!list.length) return;
+
       const existingMetrics = await loadMetrics();
       const metrics = {
         users: JSON.parse(JSON.stringify(existingMetrics.users || {}))
       };
 
-      let currentSection = null;
-      let headerRow = null;
-      let sectionStartIdx = 0;
       const stats = {
         postsAdded: 0,
         postsUpdated: 0,
@@ -5039,69 +5125,28 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         usersUpdated: 0
       };
 
-      // Process each line
-      let dataStartIdx = -1;
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
-        
-        // Check for section headers
-        if (line.startsWith('===') && line.endsWith('===')) {
-          // Process previous section if any
-          if (currentSection && headerRow && dataStartIdx >= 0 && i > dataStartIdx) {
-            const sectionRows = lines.slice(dataStartIdx, i).filter(r => r && r.trim());
-            await processSection(currentSection, headerRow, sectionRows, metrics, stats);
-          }
-          
-          // Determine new section
-          if (line.includes('POSTS SUMMARY')) {
-            currentSection = 'posts_summary';
-          } else if (line.includes('POST SNAPSHOTS')) {
-            currentSection = 'snapshots';
-          } else if (line.includes('USER FOLLOWERS HISTORY')) {
-            currentSection = 'followers';
-          } else if (line.includes('USER CAST IN HISTORY')) {
-            currentSection = 'cameos';
-          } else if (line.includes('USERS SUMMARY')) {
-            currentSection = 'users_summary';
-          } else {
-            currentSection = null;
-          }
-          
-          headerRow = null;
-          dataStartIdx = -1;
-          continue;
-        }
-        
-        // First non-header line after section marker is the header
-        if (currentSection && !headerRow && !line.startsWith('===')) {
-          headerRow = parseCSVLine(line);
-          dataStartIdx = i + 1; // Data starts after header
-          continue;
-        }
-      }
-      
-      // Process last section
-      if (currentSection && headerRow && dataStartIdx >= 0) {
-        const sectionRows = lines.slice(dataStartIdx).filter(r => r && r.trim());
-        await processSection(currentSection, headerRow, sectionRows, metrics, stats);
+      let anyImported = false;
+      for (const file of list){
+        const text = await file.text();
+        const didImport = await importDataCSVText(text, metrics, stats);
+        if (didImport) anyImported = true;
       }
 
-      // Save merged metrics
+      if (!anyImported) {
+        alert('CSV file is empty.');
+        return;
+      }
+
       await saveMetrics(metrics, { userKeys: Object.keys(metrics.users || {}) });
-      
-      // Show success message with stats
+
       const message = `Import completed!\n\n` +
         `Posts: ${stats.postsAdded} added, ${stats.postsUpdated} updated\n` +
         `Snapshots: ${stats.snapshotsAdded} added, ${stats.snapshotsSkipped} skipped (duplicates)\n` +
         `Followers: ${stats.followersAdded} added, ${stats.followersSkipped} skipped (duplicates)\n` +
         `Cast in: ${stats.cameosAdded} added, ${stats.cameosSkipped} skipped (duplicates)\n` +
         `Users: ${stats.usersAdded} added, ${stats.usersUpdated} updated`;
-      
       alert(message);
-      
-      // Reload the dashboard
       window.location.reload();
-      
     } catch (e) {
       alert('Import failed: ' + (e.message || 'Unknown error. Please try again.'));
     }
@@ -6312,7 +6357,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         userKeys.forEach((userKey, idx)=>{
           const user = resolveUserForKey(metrics, userKey);
           if (!user) return;
-          const arr = Array.isArray(user.followers) ? user.followers : [];
+          const arr = getFollowersSeriesForUser(userKey, user);
           const pts = arr.map(it=>({ x:Number(it.t), y:Number(it.count), t:Number(it.t) })).filter(p=>isFinite(p.x)&&isFinite(p.y));
           if (pts.length){
             const color = getCompareSeriesColor(idx);
@@ -6344,7 +6389,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
               const lastCameo = cameosArr[cameosArr.length - 1];
               res.cameos += num(lastCameo?.count);
             }
-            const followersArr = Array.isArray(user.followers) ? user.followers : [];
+            const followersArr = getFollowersSeriesForUser(userKey, user);
             if (followersArr.length > 0){
               const lastFollower = followersArr[followersArr.length - 1];
               res.followers += num(lastFollower?.count);
@@ -7976,7 +8021,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
                 }
                 const followersEl = $('#followersTotal');
                 if (followersEl){
-                  const arr = Array.isArray(user.followers) ? user.followers : [];
+                  const arr = getFollowersSeriesForUser(currentUserKey, user);
                   const last = arr[arr.length - 1];
                   followersEl.textContent = last ? fmtK2OrInt(last.count) : '0';
                 }
@@ -8052,7 +8097,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
               cameosChart.setData(cSeries);
               // Followers chart: use user-level follower history when available
               const fSeries = (function(){
-                const arr = Array.isArray(user.followers) ? user.followers : [];
+                const arr = getFollowersSeriesForUser(currentUserKey, user);
                 const pts = arr.map(it=>({ x:Number(it.t), y:Number(it.count), t:Number(it.t) })).filter(p=>isFinite(p.x)&&isFinite(p.y));
                 const color = '#ffd166';
                 return pts.length ? [{ id: 'followers', label: 'Followers', color, points: pts }] : [];
@@ -8897,6 +8942,8 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     const postPurgeConfirmText = $('#postPurgeConfirmText');
     const postPurgeConfirmYes = $('#postPurgeConfirmYes');
     const postPurgeConfirmNo = $('#postPurgeConfirmNo');
+    const purgeResetPrefs = $('#purgeResetPrefs');
+    const purgeClearCache = $('#purgeClearCache');
     
     function setPurgeConfirmOpen(isOpen){
       document.body.classList.toggle('is-purge-confirm-open', isOpen);
@@ -9104,6 +9151,48 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       scheduleNextRun();
     }
 
+    function clearTemporaryCaches(){
+      try { sessionStorage.removeItem(SESSION_CACHE_KEY); } catch {}
+      try { localStorage.removeItem(BOOT_CACHE_KEY); } catch {}
+      try { localStorage.removeItem(BEST_TIME_CACHE_KEY); } catch {}
+      try { chrome.storage.local.remove([USERS_INDEX_STORAGE_KEY]); } catch {}
+    }
+
+    function resetStoredPreferences(){
+      const localPrefKeys = [
+        THEME_STORAGE_KEY,
+        THEME_TOGGLE_SEEN_KEY,
+        SIDEBAR_WIDTH_KEY,
+        VIEWS_TYPE_STORAGE_KEY,
+        CHART_MODE_STORAGE_KEY,
+        BEST_TIME_PREFS_KEY,
+        'sctLastFilterAction',
+        'sctLastFilterActionByUser'
+      ];
+      localPrefKeys
+        .concat(Object.values(STACKED_WINDOW_STORAGE_KEYS))
+        .concat(Object.values(STACKED_WINDOW_STORAGE_MIN_KEYS))
+        .concat(Object.values(LEGACY_CHART_MODE_KEYS))
+        .forEach((key)=>{
+          try { localStorage.removeItem(key); } catch {}
+        });
+      const chromePrefKeys = [
+        BEST_TIME_PREFS_KEY,
+        VIEWS_TYPE_STORAGE_KEY,
+        CHART_MODE_STORAGE_KEY,
+        'lastFilterAction',
+        'lastFilterActionByUser',
+        'lastUserKey',
+        'zoomStates',
+        ULTRA_MODE_STORAGE_KEY,
+        COMB_MODE_STORAGE_KEY
+      ]
+        .concat(Object.values(STACKED_WINDOW_STORAGE_KEYS))
+        .concat(Object.values(STACKED_WINDOW_STORAGE_MIN_KEYS))
+        .concat(Object.values(LEGACY_CHART_MODE_KEYS));
+      try { chrome.storage.local.remove(chromePrefKeys); } catch {}
+    }
+
     function getPurgeDescription(){
       const days = Number(dateRangeSlider.value);
       const minPosts = Number(postCountSlider.value);
@@ -9229,12 +9318,13 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       const sel = $('#exceptionsUserSelect');
       if (!sel) return;
       sel.innerHTML = '<option value="">Select user to except…</option>';
-      const entries = Object.entries(metrics.users);
+      const useIndex = Array.isArray(usersIndex) && usersIndex.length > 0;
+      const entries = useIndex ? usersIndex.map((entry)=>[entry.key, entry]) : Object.entries(metrics.users);
       const users = entries
-        .filter(([key])=>!exceptedUsers.has(key))
+        .filter(([key])=>!exceptedUsers.has(key) && !isVirtualUserKey(key))
         .sort((a,b)=>{
-          const aCount = Object.keys(a[1].posts||{}).length;
-          const bCount = Object.keys(b[1].posts||{}).length;
+          const aCount = countUserPosts(a[1]);
+          const bCount = countUserPosts(b[1]);
           if (aCount !== bCount) return bCount - aCount; // Descending order
           // If same post count, sort alphabetically
           const A = (a[1].handle||a[0]||'').toLowerCase();
@@ -9244,8 +9334,9 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       users.forEach(([key, u])=>{
         const opt = document.createElement('option');
         opt.value = key;
-        const postCount = Object.keys(u.posts||{}).length;
-        opt.textContent = formatUserOptionLabel(u.handle || key, postCount);
+        const postCount = countUserPosts(u);
+        const name = u.handle || key;
+        opt.textContent = formatUserOptionLabel(name, postCount);
         sel.appendChild(opt);
       });
       sel.disabled = exceptedUsers.size >= MAX_EXCEPTED_USERS || users.length === 0;
@@ -9315,27 +9406,50 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       }
     });
 
-    $('#exceptionsSearch').addEventListener('input', (e)=>{
+    const exceptionsSearchInput = $('#exceptionsSearch');
+    function renderExceptionsSuggestions(query){
       const suggestions = $('#exceptionsSuggestions');
-      const list = filterUsersByQuery(metrics, e.target.value)
-        .filter(([key])=>!exceptedUsers.has(key))
-        .slice(0, 20);
-        suggestions.innerHTML = list.map(([key,u])=>{
-          const count = Object.keys(u.posts||{}).length;
-          return `<div class="item" data-key="${esc(key)}"><span>${esc(u.handle||key)}</span><span style="color:#7d8a96">${esc(formatPostCount(count))}</span></div>`;
-        }).join('');
+      if (!suggestions) return;
+      const raw = filterUsersByQuery(metrics, query || '');
+      const seen = new Set();
+      const list = [];
+      for (const [key, u] of raw){
+        if (exceptedUsers.has(key) || isVirtualUserKey(key)) continue;
+        const label = u?.handle || key;
+        const norm = normalizeMenuName(label || key);
+        if (norm && seen.has(norm)) continue;
+        list.push({ key, label, count: countUserPosts(u) });
+        if (norm) seen.add(norm);
+        if (list.length >= 20) break;
+      }
+      suggestions.innerHTML = list.map((item)=>{
+        return `<div class="item" data-key="${esc(item.key)}"><span>${esc(item.label)}</span><span style="color:#7d8a96">${esc(formatPostCount(item.count))}</span></div>`;
+      }).join('');
       suggestions.style.display = list.length ? 'block' : 'none';
       $$('#exceptionsSuggestions .item').forEach(it=>{
         it.addEventListener('click', async ()=>{
           await addExceptedUser(it.dataset.key);
         });
       });
-    });
+    }
+    if (exceptionsSearchInput) {
+      exceptionsSearchInput.addEventListener('input', (e)=>{
+        renderExceptionsSuggestions(e.target.value);
+      });
+      exceptionsSearchInput.addEventListener('focus', ()=>{
+        renderExceptionsSuggestions(exceptionsSearchInput.value);
+      });
+      exceptionsSearchInput.addEventListener('click', ()=>{
+        renderExceptionsSuggestions(exceptionsSearchInput.value);
+      });
+    }
     document.addEventListener('click', (e)=>{ if (!e.target.closest('.user-picker-exceptions')) $('#exceptionsSuggestions').style.display='none'; });
 
     $('#purgeMenu').addEventListener('click', async ()=>{
       combModeCheckedThisSession = false;
       purgeModal.style.display = 'block';
+      if (purgeResetPrefs) purgeResetPrefs.checked = false;
+      if (purgeClearCache) purgeClearCache.checked = false;
       // Load saved exceptions
       const saved = await loadExceptedUsers();
       exceptedUsers.clear();
@@ -9415,8 +9529,22 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         return 0;
       }
 
+      function trimHistoryByCutoff(arr, keepAll){
+        if (!Array.isArray(arr) || days > 365 || keepAll) return Array.isArray(arr) ? arr : [];
+        return arr.filter((entry)=>{
+          const t = Number(entry?.t);
+          return Number.isFinite(t) && t >= cutoffTime;
+        });
+      }
+
       // Process each user
       for (const [userKey, user] of Object.entries(targetMetrics.users || {})){
+        const hasPosts = user?.posts && Object.keys(user.posts).length > 0;
+        if (!hasPosts) {
+          delete targetMetrics.users[userKey];
+          purgedUsers++;
+          continue;
+        }
         // Skip excepted users
         if (exceptedUsers.has(userKey)) continue;
 
@@ -9453,6 +9581,18 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
 
         // Update user's posts with purged list
         user.posts = postsToKeep;
+        if (days <= 365) {
+          for (const post of Object.values(user.posts || {})){
+            if (!Array.isArray(post?.snapshots)) continue;
+            post.snapshots = post.snapshots.filter((s)=>{
+              const t = Number(s?.t);
+              return Number.isFinite(t) && t >= cutoffTime;
+            });
+          }
+        }
+
+        user.followers = trimHistoryByCutoff(user.followers, latestFollowers >= 50);
+        user.cameos = trimHistoryByCutoff(user.cameos);
 
         // Now check if user should be kept based on minPosts/minFollowers criteria
         const postCountAfterPurge = Object.keys(postsToKeep).length;
@@ -9500,6 +9640,8 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       const days = Number(dateRangeSlider.value);
       const minPosts = Number(postCountSlider.value);
       const minFollowers = Number(followerCountSlider.value);
+      const shouldResetPrefs = purgeResetPrefs?.checked;
+      const shouldClearCache = purgeClearCache?.checked;
       
       const cutoffTime = Date.now() - (days * 24 * 60 * 60 * 1000);
       const purgeOpts = { days, minPosts, minFollowers, cutoffTime };
@@ -9533,6 +9675,11 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           const { purgedUsers, purgedPosts } = applyPurgeToMetrics(loadedMetrics, purgeOpts);
           await saveMetrics(loadedMetrics, { userKeys: Object.keys(loadedMetrics.users || {}) });
           await updateStorageSizeDisplay();
+          if (shouldClearCache) clearTemporaryCaches();
+          if (shouldResetPrefs) resetStoredPreferences();
+          if (shouldClearCache || shouldResetPrefs) {
+            await updateStorageSizeDisplay();
+          }
           alert(`Purge complete!\n\nRemoved ${purgedUsers} user(s) and ${purgedPosts} post(s).`);
         } catch (e) {
           alert('Purge failed. Please try again.');
@@ -9726,10 +9873,10 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     }
     if (importFileInput) {
       importFileInput.addEventListener('change', async (e)=>{
-        const file = e.target.files[0];
-        if (file) {
-          await importDataCSV(file);
-          // Reset file input so same file can be imported again if needed
+        const files = e.target.files;
+        if (files && files.length) {
+          await importDataCSVFiles(files);
+          // Reset file input so same file(s) can be imported again if needed
           e.target.value = '';
         }
       });
@@ -9811,7 +9958,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         };
         const showTooltip = (target, text, clientX, clientY)=>{
           if (!target || !text) return;
-          if (!tooltipEl) {
+          if (!tooltipEl || !tooltipEl.isConnected) {
             tooltipEl = document.createElement('div');
             tooltipEl.className = 'tooltip custom-filter-tooltip';
             document.body.appendChild(tooltipEl);

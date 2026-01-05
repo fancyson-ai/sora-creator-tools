@@ -57,7 +57,7 @@
       <a class="action-link" href="https://chromewebstore.google.com/detail/sora-creator-tools-%E2%80%93-sora/nijonhldjpdanckbnkjgifghnkekmljk/reviews" target="_blank" rel="noopener noreferrer" title="Open Chrome Web Store reviews">Review</a>
       <a class="action-link" href="https://github.com/fancyson-ai/sora-creator-tools" target="_blank" rel="noopener noreferrer" title="Open GitHub repo">GitHub</a>
       <button id="purgeMenu" title="Open data menu">Data Menu</button>
-      <input type="file" id="importFile" accept=".csv" style="display: none;" />
+      <input type="file" id="importFile" accept=".csv" multiple style="display: none;" />
     </div>
   </header>
 
@@ -492,7 +492,7 @@
           <!-- Post Count Slider -->
           <div class="purge-control-group">
             <div class="purge-control-label">
-              <span>Keep everyone with</span>
+              <span>Keep everyone with at least</span>
               <span id="postCountValue" class="purge-value-display">0 posts</span>
             </div>
             <div class="purge-slider-container">
@@ -510,7 +510,7 @@
           <!-- Follower Count Slider -->
           <div class="purge-control-group">
             <div class="purge-control-label">
-              <span>Keep everyone with</span>
+              <span>Keep everyone with at least</span>
               <span id="followerCountValue" class="purge-value-display">0 followers</span>
             </div>
             <div class="purge-slider-container">
@@ -538,6 +538,18 @@
               </div>
               <div id="exceptionsPills" class="exceptions-pills"></div>
             </div>
+          </div>
+
+          <div class="purge-exceptions-section">
+            <div class="purge-exceptions-label">Options</div>
+            <label class="purge-comb-mode-label">
+              <input type="checkbox" id="purgeResetPrefs" />
+              <span>Reset stored preferences?</span>
+            </label>
+            <label class="purge-comb-mode-label">
+              <input type="checkbox" id="purgeClearCache" />
+              <span>Purge temporary cache?</span>
+            </label>
           </div>
 
           <!-- Review Section -->
