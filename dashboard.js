@@ -1006,6 +1006,13 @@
     }
   }
 
+  function hoistToBody(el){
+    if (!el) return;
+    const body = document.body;
+    if (!body) return;
+    if (el.parentElement !== body) body.appendChild(el);
+  }
+
   async function loadUltraModePreference(){
     try {
       const stored = await chrome.storage.local.get(ULTRA_MODE_STORAGE_KEY);
@@ -5399,6 +5406,8 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     initSidebarResizer();
     initThemePicker();
     hoistChartTooltips();
+    hoistToBody($('#purgeConfirmDialog'));
+    hoistToBody($('#postPurgeConfirm'));
     const cached = prefetchedCache !== undefined ? prefetchedCache : loadInstantCache();
     const hasBootCache = !!cached;
     if (cached) {
