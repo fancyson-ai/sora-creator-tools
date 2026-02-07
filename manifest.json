@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Sora Creator Tools – Sora Video Stats, Post Analytics, Views Tracker",
-  "version": "1.1.5",
+  "version": "1.1.7",
   "description": "Powerful overlays for video view stats, Dashboard mode for deeper insights, Analysis mode for Top feed analysis, and more!",
   "icons": {
     "16": "icons/16.png",
@@ -30,6 +30,11 @@
   ],
   "host_permissions": ["https://sora.chatgpt.com/*"],
   "permissions": ["storage", "unlimitedStorage"],
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "sora-creator-tools@fancyson.ai"
+    }
+  },
   "background": {
     "service_worker": "background.js"
   }

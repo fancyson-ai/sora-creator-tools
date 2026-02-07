@@ -41,11 +41,36 @@ Plus **DASHBOARD MODE:** Click on the extension icon to open a full-page dashboa
 
 Download directly from the [Chrome Web Store ](https://chromewebstore.google.com/detail/sora-explore-unique-views/nijonhldjpdanckbnkjgifghnkekmljk?)
 
-Alternatively:
-- Clone repo
-- Open `chrome://extensions`, flip on **Developer mode**.
-- Hit **Load unpacked** and point it at the `sora-unique-views` folder.
-- Pin the icon if you want it handy in the toolbar.
+## Install (Desktop)
+
+### Desktop Chrome (unpacked)
+1. Clone/download this repo.
+2. Open `chrome://extensions`.
+3. Enable **Developer mode** (top right).
+4. Click **Load unpacked**.
+5. Select the folder that contains `manifest.json`.
+6. (Optional) Pin the extension in the toolbar.
+
+### Desktop Firefox (temporary add-on)
+1. Clone/download this repo.
+2. Open `about:debugging#/runtime/this-firefox`.
+3. Click **Load Temporary Add-on...**
+4. Select `manifest.json` from the repo folder.
+
+Note: Temporary add-ons are removed when Firefox restarts. For permanent install you must package/sign an `.xpi` (outside the scope of this README).
+
+## Install (Mobile)
+
+### Mobile Chrome
+Chrome on mobile does not support installing extensions.
+
+Workaround (Android): use a Chromium-based browser that supports extensions (example: Kiwi Browser) and load/install the extension there.
+
+### Mobile Firefox
+Firefox on mobile only supports a limited add-on install flow.
+
+- Android: You typically need Firefox Nightly (or a build that supports custom add-on collections) and a signed add-on to install a custom extension.
+- iOS: Custom extensions are not supported in Firefox for iOS.
 
 ## Use it
 - Browse Explore, your profile, or any `/p/s_*` post.

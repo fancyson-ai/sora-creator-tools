@@ -1,6 +1,7 @@
 /* Dashboard for Sora Metrics */
 (function(){
   'use strict';
+  const chrome = globalThis.browser || globalThis.chrome;
 
   const $ = (sel, el=document) => el.querySelector(sel);
   const $$ = (sel, el=document) => Array.from(el.querySelectorAll(sel));
@@ -9022,9 +9023,14 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         let bytes = null;
         try {
           if (chrome?.storage?.local?.getBytesInUse) {
-            bytes = await new Promise((resolve)=> {
-              try { chrome.storage.local.getBytesInUse(null, (b)=> resolve(b)); } catch { resolve(null); }
-            });
+            const maybePromise = chrome.storage.local.getBytesInUse(null);
+            if (maybePromise && typeof maybePromise.then === 'function') {
+              bytes = await maybePromise;
+            } else {
+              bytes = await new Promise((resolve)=> {
+                try { chrome.storage.local.getBytesInUse(null, (b)=> resolve(b)); } catch { resolve(null); }
+              });
+            }
           }
         } catch {}
         if (bytes == null) {
