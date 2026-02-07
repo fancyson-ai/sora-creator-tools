@@ -37,13 +37,13 @@ Plus **DASHBOARD MODE:** Click on the extension icon to open a full-page dashboa
 
 ---
 
-## Load it in Chrome
+## Installation
 
-Download directly from the [Chrome Web Store ](https://chromewebstore.google.com/detail/sora-explore-unique-views/nijonhldjpdanckbnkjgifghnkekmljk?)
+### Desktop Chrome (Chrome Web Store)
+1. Install from the Chrome Web Store: [Sora Creator Tools](https://chromewebstore.google.com/detail/sora-explore-unique-views/nijonhldjpdanckbnkjgifghnkekmljk?).
+2. (Optional) Pin the extension in the toolbar.
 
-## Install (Desktop)
-
-### Desktop Chrome (unpacked)
+### Desktop Chrome (unpacked, for development)
 1. Clone/download this repo.
 2. Open `chrome://extensions`.
 3. Enable **Developer mode** (top right).
@@ -51,24 +51,26 @@ Download directly from the [Chrome Web Store ](https://chromewebstore.google.com
 5. Select the folder that contains `manifest.json`.
 6. (Optional) Pin the extension in the toolbar.
 
-### Desktop Firefox (temporary add-on)
+### Desktop Firefox (temporary add-on, for development)
 1. Clone/download this repo.
 2. Open `about:debugging#/runtime/this-firefox`.
 3. Click **Load Temporary Add-on...**
 4. Select `manifest.json` from the repo folder.
 
-Note: Temporary add-ons are removed when Firefox restarts. For permanent install you must package/sign an `.xpi` (outside the scope of this README).
+Note: Temporary add-ons are removed when Firefox restarts.
 
-## Install (Mobile)
+### Desktop Firefox (permanent install)
+Firefox typically requires signed add-ons. To install permanently, create a signed `.xpi` and install it:
+1. Zip the extension files so `manifest.json` is at the **root** of the zip (exclude `.git/`).
+2. Upload the zip to addons.mozilla.org as an **unlisted** add-on to get it signed and download the signed `.xpi`.
+3. In Firefox Desktop: open `about:addons` and use **Install Add-on From File...** to select the signed `.xpi`.
+
+## Mobile
 
 ### Mobile Chrome
-Chrome on mobile (Android/iOS) does not support installing extensions.
+Mobile Chrome (Android/iOS) does not support installing extensions.
 
-Workaround (Android): use a Chromium-based browser that supports extensions (example: Kiwi Browser).
-1. On Desktop Chrome: open `chrome://extensions` and enable **Developer mode**.
-2. Click **Pack extension** and select the folder that contains `manifest.json` to produce a `.crx`.
-3. Copy the `.crx` to your Android phone.
-4. Open/install the `.crx` in your extension-capable Android browser (vendor-specific UI).
+Android workaround: use an extension-capable Chromium browser (example: Kiwi Browser) and install the extension there (browser-specific flow; Kiwi can often install directly from the Chrome Web Store link above).
 
 ### Mobile Firefox
 Firefox on mobile only supports a limited add-on install flow.
