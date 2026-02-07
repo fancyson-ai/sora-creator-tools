@@ -4,7 +4,6 @@
  */
 
 (() => {
-  const chrome = globalThis.browser || globalThis.chrome;
   const p = String(location.pathname || '');
   const isDraftDetail = p === '/d' || p.startsWith('/d/');
   const ULTRA_MODE_KEY = 'SCT_ULTRA_MODE_V1';
@@ -62,15 +61,11 @@
     }
   }
 
-  // Inject api.js everywhere for request/body adjustments.
-  // Skip inject.js on draft-detail routes to avoid extra memory/observer overhead.
-  if (isDraftDetail) {
-    injectPageScript('api.js');
-  } else {
-    injectPageScript('api.js', () => {
-      injectPageScript('inject.js');
-    });
-  }
+  // Always inject api.js (request/body rewriter + duration dropdown enhancer).
+  // Inject inject.js on all pages; it self-limits on draft detail routes.
+  injectPageScript('api.js', () => {
+    injectPageScript('inject.js');
+  });
 
   // Listen for dashboard open requests from inject.js and relay to background.
   let dashboardOpenLock = false;
@@ -86,35 +81,25 @@
       if (opts?.userHandle) payload.lastUserHandle = opts.userHandle;
       if (Object.keys(payload).length) chrome.storage.local.set(payload);
       const url = chrome.runtime.getURL('dashboard.html');
+      let fallbackTimer = null;
       const openDirect = ()=>{
+        if (fallbackTimer) clearTimeout(fallbackTimer);
+        fallbackTimer = null;
         try { window.open(url, '_blank'); } catch {}
       };
-      const sendMessageCompat = () => {
-        // Firefox uses `browser.*` (promise-based); Chrome uses `chrome.*` (callback-based).
-        const isBrowserApi = !!globalThis.browser && chrome === globalThis.browser;
-        if (isBrowserApi) {
-          return Promise.resolve(chrome.runtime.sendMessage({ action: 'open_dashboard' }));
-        }
-        return new Promise((resolve, reject) => {
-          try {
-            chrome.runtime.sendMessage({ action: 'open_dashboard' }, (resp) => {
-              const err = chrome.runtime.lastError;
-              if (err) reject(err);
-              else resolve(resp);
-            });
-          } catch (err) {
-            reject(err);
+      try {
+        fallbackTimer = setTimeout(openDirect, 800);
+        chrome.runtime.sendMessage({ action: 'open_dashboard' }, (resp)=>{
+          if (fallbackTimer) clearTimeout(fallbackTimer);
+          fallbackTimer = null;
+          // If background didn't acknowledge, use direct open as a safety net
+          if (chrome.runtime.lastError || !resp || resp.success !== true) {
+            openDirect();
           }
         });
-      };
-
-      sendMessageCompat()
-        .then((resp) => {
-          if (!resp || resp.success !== true) openDirect();
-        })
-        .catch(() => {
-          openDirect();
-        });
+      } catch {
+        openDirect();
+      }
     } catch {
       dashboardOpenLock = false;
     }
@@ -136,6 +121,8 @@
     openDashboardTab({});
   };
   document.addEventListener('click', dashboardClickHandler, true);
+  document.addEventListener('pointerup', dashboardClickHandler, true);
+  document.addEventListener('touchend', dashboardClickHandler, true);
 
   if (isDraftDetail) return;
 
@@ -143,7 +130,6 @@
   (function () {
   const PENDING = [];
   let flushTimer = null;
-  const PENDING_MAX_ITEMS = 1800;
   const metricsFallback = { users: {} };
   const METRICS_STORAGE_KEY = 'metrics';
   const METRICS_UPDATED_AT_KEY = 'metricsUpdatedAt';
@@ -157,13 +143,6 @@
   let metricsCache = null;
   let metricsCacheUpdatedAt = 0;
   let metricsCacheLoading = null;
-  const METRICS_MAX_SNAPSHOTS_PER_POST = 60;
-  const METRICS_MAX_PROFILE_HISTORY_POINTS = 240;
-  const METRICS_MAX_POSTS_PER_USER = 500;
-  const METRICS_MAX_TOTAL_POSTS = 2500;
-  const METRICS_STALE_POST_AGE_MS = 21 * 24 * 60 * 60 * 1000; // 21 days
-  const METRICS_PRUNE_INTERVAL_MS = 30 * 1000;
-  let lastMetricsPruneAt = 0;
 
   function normalizeMetrics(raw) {
     if (!raw || typeof raw !== 'object') return { ...DEFAULT_METRICS };
@@ -186,123 +165,9 @@
 
   function cacheMetrics(rawMetrics, updatedAt) {
     const normalized = normalizeMetrics(rawMetrics);
-    const pruned = pruneMetricsInPlace(normalized, true);
     metricsCache = normalized;
     metricsCacheUpdatedAt = Number(updatedAt) || 0;
     rebuildPostIndex(normalized);
-    return { metrics: normalized, pruned };
-  }
-
-  function trimArrayTail(arr, max) {
-    if (!Array.isArray(arr) || arr.length <= max) return false;
-    arr.splice(0, arr.length - max);
-    return true;
-  }
-
-  function postRecencyMs(post) {
-    if (!post || typeof post !== 'object') return 0;
-    const lastSeen = Number(post.lastSeen) || 0;
-    const postTime = getPostTimeMs(post);
-    const latest = latestSnapshot(post.snapshots);
-    const latestT = Number(latest?.t) || 0;
-    return Math.max(lastSeen, postTime, latestT);
-  }
-
-  function pruneMetricsInPlace(metrics, force = false) {
-    const now = Date.now();
-    if (!force && now - lastMetricsPruneAt < METRICS_PRUNE_INTERVAL_MS) return false;
-    lastMetricsPruneAt = now;
-
-    const users = metrics?.users;
-    if (!users || typeof users !== 'object' || Array.isArray(users)) return false;
-
-    let changed = false;
-    const staleCutoff = now - METRICS_STALE_POST_AGE_MS;
-
-    for (const [userKey, user] of Object.entries(users)) {
-      if (!user || typeof user !== 'object') {
-        delete users[userKey];
-        changed = true;
-        continue;
-      }
-
-      if (!user.posts || typeof user.posts !== 'object' || Array.isArray(user.posts)) {
-        user.posts = {};
-        changed = true;
-      }
-      if (!Array.isArray(user.followers)) user.followers = [];
-      if (!Array.isArray(user.cameos)) user.cameos = [];
-      if (trimArrayTail(user.followers, METRICS_MAX_PROFILE_HISTORY_POINTS)) changed = true;
-      if (trimArrayTail(user.cameos, METRICS_MAX_PROFILE_HISTORY_POINTS)) changed = true;
-
-      for (const [postId, post] of Object.entries(user.posts)) {
-        if (!post || typeof post !== 'object') {
-          delete user.posts[postId];
-          postIdToUserKey.delete(postId);
-          changed = true;
-          continue;
-        }
-
-        if (!Array.isArray(post.snapshots)) {
-          post.snapshots = [];
-          changed = true;
-        } else if (trimArrayTail(post.snapshots, METRICS_MAX_SNAPSHOTS_PER_POST)) {
-          changed = true;
-        }
-
-        const recency = postRecencyMs(post);
-        if (recency > 0 && recency < staleCutoff) {
-          delete user.posts[postId];
-          postIdToUserKey.delete(postId);
-          changed = true;
-        }
-      }
-
-      const userPostEntries = Object.entries(user.posts);
-      if (userPostEntries.length > METRICS_MAX_POSTS_PER_USER) {
-        userPostEntries.sort((a, b) => postRecencyMs(b[1]) - postRecencyMs(a[1]));
-        for (let i = METRICS_MAX_POSTS_PER_USER; i < userPostEntries.length; i += 1) {
-          const postId = userPostEntries[i][0];
-          delete user.posts[postId];
-          postIdToUserKey.delete(postId);
-          changed = true;
-        }
-      }
-
-      const remainingPosts = Object.keys(user.posts).length;
-      const hasProfileSeries = (Array.isArray(user.followers) && user.followers.length > 0) ||
-        (Array.isArray(user.cameos) && user.cameos.length > 0);
-      if (remainingPosts === 0 && !hasProfileSeries) {
-        delete users[userKey];
-        changed = true;
-      }
-    }
-
-    const allPosts = [];
-    for (const [userKey, user] of Object.entries(users)) {
-      const posts = user?.posts;
-      if (!posts || typeof posts !== 'object') continue;
-      for (const [postId, post] of Object.entries(posts)) {
-        allPosts.push({ userKey, postId, recency: postRecencyMs(post) });
-      }
-    }
-    if (allPosts.length > METRICS_MAX_TOTAL_POSTS) {
-      allPosts.sort((a, b) => b.recency - a.recency);
-      const keep = new Set(allPosts.slice(0, METRICS_MAX_TOTAL_POSTS).map((entry) => `${entry.userKey}::${entry.postId}`));
-      for (const [userKey, user] of Object.entries(users)) {
-        const posts = user?.posts;
-        if (!posts || typeof posts !== 'object') continue;
-        for (const postId of Object.keys(posts)) {
-          if (keep.has(`${userKey}::${postId}`)) continue;
-          delete posts[postId];
-          postIdToUserKey.delete(postId);
-          changed = true;
-        }
-      }
-    }
-
-    if (changed) rebuildPostIndex(metrics);
-    return changed;
   }
 
   async function loadMetricsFromStorage() {
@@ -310,22 +175,7 @@
     metricsCacheLoading = (async () => {
       try {
         const stored = await chrome.storage.local.get([METRICS_STORAGE_KEY, METRICS_UPDATED_AT_KEY]);
-        const { metrics, pruned } = cacheMetrics(stored[METRICS_STORAGE_KEY], stored[METRICS_UPDATED_AT_KEY]);
-        if (pruned) {
-          const nextUpdatedAt = Date.now();
-          const usersIndex = Object.entries(metrics.users || {}).map(([key, user]) => ({
-            key,
-            handle: user?.handle || null,
-            id: user?.id || null,
-            postCount: Object.keys(user?.posts || {}).length,
-          }));
-          await chrome.storage.local.set({
-            [METRICS_STORAGE_KEY]: metrics,
-            [METRICS_UPDATED_AT_KEY]: nextUpdatedAt,
-            [METRICS_USERS_INDEX_KEY]: usersIndex,
-          });
-          metricsCacheUpdatedAt = nextUpdatedAt;
-        }
+        cacheMetrics(stored[METRICS_STORAGE_KEY], stored[METRICS_UPDATED_AT_KEY]);
       } catch {
         metricsCache = normalizeMetrics(null);
         metricsCacheUpdatedAt = metricsCacheUpdatedAt || 0;
@@ -511,65 +361,6 @@
     return result;
   }
 
-  function buildMetricsStats(metrics) {
-    const users = metrics?.users || {};
-    let userCount = 0;
-    let postCount = 0;
-    let snapshotCount = 0;
-    let followerPointCount = 0;
-    let cameoPointCount = 0;
-    let maxSnapshotsPerPost = 0;
-    let oldestPostMs = 0;
-    let newestPostMs = 0;
-    let oldestSnapshotMs = 0;
-    let newestSnapshotMs = 0;
-
-    for (const [, user] of Object.entries(users)) {
-      userCount += 1;
-      const followers = Array.isArray(user?.followers) ? user.followers : [];
-      const cameos = Array.isArray(user?.cameos) ? user.cameos : [];
-      followerPointCount += followers.length;
-      cameoPointCount += cameos.length;
-
-      const posts = user?.posts || {};
-      for (const [, post] of Object.entries(posts)) {
-        postCount += 1;
-
-        const postMs = getPostTimeMs(post) || Number(post?.lastSeen) || 0;
-        if (postMs > 0) {
-          if (!oldestPostMs || postMs < oldestPostMs) oldestPostMs = postMs;
-          if (postMs > newestPostMs) newestPostMs = postMs;
-        }
-
-        const snaps = Array.isArray(post?.snapshots) ? post.snapshots : [];
-        snapshotCount += snaps.length;
-        if (snaps.length > maxSnapshotsPerPost) maxSnapshotsPerPost = snaps.length;
-        for (const snap of snaps) {
-          const t = Number(snap?.t) || 0;
-          if (!t) continue;
-          if (!oldestSnapshotMs || t < oldestSnapshotMs) oldestSnapshotMs = t;
-          if (t > newestSnapshotMs) newestSnapshotMs = t;
-        }
-      }
-    }
-
-    return {
-      userCount,
-      postCount,
-      snapshotCount,
-      avgSnapshotsPerPost: postCount > 0 ? Number((snapshotCount / postCount).toFixed(2)) : 0,
-      maxSnapshotsPerPost,
-      followerPointCount,
-      cameoPointCount,
-      oldestPostMs: oldestPostMs || null,
-      newestPostMs: newestPostMs || null,
-      oldestSnapshotMs: oldestSnapshotMs || null,
-      newestSnapshotMs: newestSnapshotMs || null,
-      metricsUpdatedAt: metricsCacheUpdatedAt || null,
-      sampledAt: Date.now(),
-    };
-  }
-
   function buildMetricsForRequest(metrics, req) {
     const scope = typeof req?.scope === 'string' ? req.scope.toLowerCase() : 'full';
     if (scope === 'analyze') {
@@ -579,9 +370,6 @@
       const snapshotMode = req?.snapshotMode === 'all' ? 'all' : 'latest';
       return buildPostMetrics(metrics, req?.postId, snapshotMode);
     }
-    if (scope === 'stats') {
-      return { stats: buildMetricsStats(metrics) };
-    }
     return metrics;
   }
 
@@ -590,54 +378,11 @@
     flushTimer = setTimeout(flush, 750);
   }
 
-  function mergePendingItems(items) {
-    if (!Array.isArray(items) || items.length <= 1) return Array.isArray(items) ? items : [];
-    const postLatest = new Map();
-    const userLatest = new Map();
-    let seq = 0;
-    for (const raw of items) {
-      if (!raw || typeof raw !== 'object') continue;
-      const snap = { ...raw, __seq: seq += 1 };
-      if (snap.postId) {
-        const key = String(snap.postId);
-        const prev = postLatest.get(key);
-        if (!prev) {
-          postLatest.set(key, snap);
-        } else {
-          postLatest.set(key, { ...prev, ...snap, __seq: snap.__seq });
-        }
-        continue;
-      }
-      const userKey = snap.userKey || snap.pageUserKey || snap.userHandle || 'unknown';
-      const prevUser = userLatest.get(userKey);
-      if (!prevUser) {
-        userLatest.set(userKey, snap);
-      } else {
-        userLatest.set(userKey, { ...prevUser, ...snap, __seq: snap.__seq });
-      }
-    }
-    const merged = [...postLatest.values(), ...userLatest.values()];
-    merged.sort((a, b) => (a.__seq || 0) - (b.__seq || 0));
-    return merged.map((entry) => {
-      const next = { ...entry };
-      delete next.__seq;
-      return next;
-    });
-  }
-
-  function compactPendingIfNeeded() {
-    if (PENDING.length <= PENDING_MAX_ITEMS) return;
-    const compacted = mergePendingItems(PENDING);
-    PENDING.length = 0;
-    PENDING.push(...compacted.slice(-PENDING_MAX_ITEMS));
-  }
-
   function onMessage(ev) {
     if (ev?.source !== window) return;
     const d = ev?.data;
     if (!d || d.__sora_uv__ !== true || d.type !== 'metrics_batch' || !Array.isArray(d.items)) return;
     for (const it of d.items) PENDING.push(it);
-    compactPendingIfNeeded();
     scheduleFlush();
   }
 
@@ -677,12 +422,6 @@
     });
   } catch {}
 
-  // Proactively load+prune oversized historical metrics shortly after boot.
-  // This avoids carrying large legacy storage across sessions.
-  setTimeout(() => {
-    getMetricsState().catch(() => {});
-  }, 1200);
-
   let isFlushing = false;
   let needsFlush = false;
 
@@ -712,7 +451,7 @@
       } catch {}
   
       // Take current items
-      const items = mergePendingItems(PENDING.splice(0, PENDING.length));
+      const items = PENDING.splice(0, PENDING.length);
       try {
         const { metrics } = await getMetricsState();
         dlog('storage', 'flush begin', { count: items.length });
@@ -731,17 +470,13 @@
             if (!post.url && snap.url) post.url = snap.url;
             // Capture/refresh caption
             if (typeof snap.caption === 'string' && snap.caption) {
-              const cappedCaption = snap.caption.length > 320 ? `${snap.caption.slice(0, 320)}…` : snap.caption;
-              if (!post.caption) post.caption = cappedCaption;
-              else if (post.caption !== cappedCaption) post.caption = cappedCaption;
+              if (!post.caption) post.caption = snap.caption;
+              else if (post.caption !== snap.caption) post.caption = snap.caption;
             }
             // Capture/refresh cameo_usernames
             if (snap.cameo_usernames != null) {
               if (Array.isArray(snap.cameo_usernames) && snap.cameo_usernames.length > 0) {
-                const names = snap.cameo_usernames
-                  .filter((name) => typeof name === 'string' && name)
-                  .slice(0, 20);
-                post.cameo_usernames = names;
+                post.cameo_usernames = snap.cameo_usernames;
               } else if (!post.cameo_usernames) {
                 // Only set to null/empty if it wasn't already set (preserve existing data)
                 post.cameo_usernames = null;
@@ -797,6 +532,10 @@
               // Store direct remixes; map both names for backward/forward compat
               remixes: snap.remix_count ?? snap.remixes ?? null,
               remix_count: snap.remix_count ?? snap.remixes ?? null,
+              // Store duration and dimensions (frame count data)
+              duration: snap.duration ?? null,
+              width: snap.width ?? null,
+              height: snap.height ?? null,
               // shares/downloads removed
             };
             
@@ -807,8 +546,13 @@
             
             if (!same) {
               post.snapshots.push(s);
+            } else if (last && (last.duration !== s.duration || last.width !== s.width || last.height !== s.height)) {
+              // If metrics are the same but duration/dimensions changed, update the last snapshot
+              // This handles backfilling duration for existing posts without creating duplicate snapshots
+              last.duration = s.duration;
+              last.width = s.width;
+              last.height = s.height;
             }
-            trimArrayTail(post.snapshots, METRICS_MAX_SNAPSHOTS_PER_POST);
             
             post.lastSeen = Date.now();
           }
@@ -822,7 +566,6 @@
               const lastF = arr[arr.length - 1];
               if (!lastF || lastF.count !== fCount) {
                 arr.push({ t, count: fCount });
-                trimArrayTail(arr, METRICS_MAX_PROFILE_HISTORY_POINTS);
                 try { console.debug('[SoraMetrics] followers persisted', { userKey, count: fCount, t }); } catch {}
               }
             }
@@ -837,13 +580,11 @@
               const lastC = arr[arr.length - 1];
               if (!lastC || lastC.count !== cCount) {
                 arr.push({ t, count: cCount });
-                trimArrayTail(arr, METRICS_MAX_PROFILE_HISTORY_POINTS);
                 try { console.debug('[SoraMetrics] cameos persisted', { userKey, count: cCount, t }); } catch {}
               }
             }
           }
         }
-        pruneMetricsInPlace(metrics);
         try {
           const metricsUpdatedAt = Date.now();
           const usersIndex = Object.entries(metrics.users || {}).map(([key, user])=>({

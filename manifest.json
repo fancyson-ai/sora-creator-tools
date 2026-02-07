@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
-  "name": "Sora Creator Tools - Video Stats & Analytics",
-  "version": "1.1.14",
+  "name": "Sora Creator Tools – Sora Video Stats, Post Analytics, Views Tracker",
+  "version": "1.1.5",
   "description": "Powerful overlays for video view stats, Dashboard mode for deeper insights, Analysis mode for Top feed analysis, and more!",
   "icons": {
     "16": "icons/16.png",
@@ -18,26 +18,18 @@
   "web_accessible_resources": [
     {
       "resources": ["api.js", "inject.js", "dashboard.html"],
-      "matches": ["https://sora.chatgpt.com/*", "https://sora.com/*"]
+      "matches": ["https://sora.chatgpt.com/*"]
     }
   ],
   "content_scripts": [
     {
-      "matches": ["https://sora.chatgpt.com/*", "https://sora.com/*"],
+      "matches": ["https://sora.chatgpt.com/*"],
       "js": ["content.js"],
       "run_at": "document_start"
     }
   ],
-  "host_permissions": ["https://sora.chatgpt.com/*", "https://sora.com/*"],
+  "host_permissions": ["https://sora.chatgpt.com/*"],
   "permissions": ["storage", "unlimitedStorage"],
-  "browser_specific_settings": {
-    "gecko": {
-      "id": "sora-creator-tools@fancyson.ai",
-      "data_collection_permissions": {
-        "required": ["none"]
-      }
-    }
-  },
   "background": {
     "service_worker": "background.js"
   }

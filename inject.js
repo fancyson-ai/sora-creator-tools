@@ -148,274 +148,16 @@
   let dashboardInjectLastAttemptMs = 0;
   const DASHBOARD_INJECT_THROTTLE_MS = 1500;
 
-	  // Performance: Cache draft cards to avoid constant DOM queries
-	  let cachedDraftCards = null;
-	  let cachedDraftCardsCount = 0;
-	  let processedDraftCards = new WeakSet(); // Track which cards have buttons already
-	  let processedDraftCardsCount = 0; // Track how many cards are fully processed
-	  let lastAppliedFilterState = -1; // Track when filter needs re-applying
-	  let lastFilterPassSignature = '';
-	
-	  // == Video memory management ==
-	  // During Gather mode, Sora can accumulate a large number of <video> elements and decoded frames.
-	  // We aggressively unload offscreen videos (remove sources + `load()`) to keep tab memory bounded.
-		  const VIDEO_PURGE_ENABLED = true;
-		  const VIDEO_PURGE_SCAN_THROTTLE_MS_NORMAL = 1600;
-		  const VIDEO_PURGE_SCAN_THROTTLE_MS_GATHER = 450;
-		  const VIDEO_MAX_LOADED_NORMAL = 24;
-		  // Gather is purely for data collection; keep this low to prevent runaway memory growth.
-		  const VIDEO_MAX_LOADED_GATHER = 8;
-		  const VIDEO_OFFSCREEN_MARGIN_PX_NORMAL = 450;
-		  const VIDEO_OFFSCREEN_MARGIN_PX_GATHER = 60;
-		  const VIDEO_OFFSCREEN_TTL_MS_NORMAL = 60 * 1000;
-		  const VIDEO_OFFSCREEN_TTL_MS_GATHER = 5 * 1000;
-		  const VIDEO_RESTORE_COOLDOWN_MS_GATHER = 2500;
-		  // IntersectionObserver can retain targets after React unmounts them, causing runaway memory.
-		  // We disable it during Gather and keep the restore margin modest.
-		  const VIDEO_IO_DISABLE_IN_GATHER = true;
-		  const VIDEO_IO_ROOT_MARGIN = '450px 0px 450px 0px';
-		  const VIDEO_IO_RESET_INTERVAL_MS = 45 * 1000;
-		  // In normal browsing (non-Gather), keep memory bounded while scrolling down by
-		  // eagerly purging videos that are far above the viewport.
-		  const VIDEO_NORMAL_PURGE_ABOVE_WHILE_SCROLLING_DOWN = true;
-		  // In Gather, if the viewport itself contains too many videos, we may need to unload
-		  // some edge-of-viewport videos to enforce the cap.
-		  const VIDEO_GATHER_EVICT_VISIBLE_WHEN_OVER_CAP = true;
-		  const VIDEO_GATHER_VISIBLE_EDGE_BAND_RATIO = 0.22; // unload visible videos near top/bottom edges first
-		  const VIDEO_GATHER_VISIBLE_EDGE_BAND_PX_MIN = 140;
-		  // In Gather (scrolling down), aggressively purge videos that are above the viewport even
-		  // if we're under the cap, since users rarely scroll back up mid-gather.
-		  const VIDEO_GATHER_PURGE_ABOVE_ALWAYS = true;
-		  const VIDEO_GATHER_PURGE_ABOVE_MIN_PX = 20;
-	
-		  let videoPurgeLastRunMs = 0;
-		  let videoPurgeScheduled = false;
-		  let videoPurgeTimerId = null;
-			  let videoPurgeLastResult = null;
-			  let videoUnloadedTotal = 0;
-			  let videoRestoredTotal = 0;
-			  let videoBlobRevokeTotal = 0;
-			  let videoPurgeLastScrollY = 0;
-			  const videoMeta = new WeakMap(); // HTMLVideoElement -> { unloaded, videoSrcAttr, videoCurrentSrc, preloadAttr, sources, lastActiveMs }
-			  let videoIo = null;
-			  let videoIoLastResetMs = 0;
+  // Performance: Cache draft cards to avoid constant DOM queries
+  let cachedDraftCards = null;
+  let cachedDraftCardsCount = 0;
+  let processedDraftCards = new WeakSet(); // Track which cards have buttons already
+  let processedDraftCardsCount = 0; // Track how many cards are fully processed
+  let lastAppliedFilterState = -1; // Track when filter needs re-applying
 
-	  // Track route to detect same-tab navigation
-	  const routeKey = () => `${location.pathname}${location.search}`;
-	  let lastRouteKey = routeKey();
-
-  // == Memory guardrails ==
-  // Keep enough history for active browsing while capping long-lived tab memory growth.
-  const POST_ENTITY_CACHE_MAX = 2500;
-  const DRAFT_ENTITY_CACHE_MAX = 1200;
-  const TASK_CACHE_MAX = 1500;
-  const CHARACTER_CACHE_MAX = 800;
-  const USERNAME_CACHE_MAX = 1200;
-  const POST_DETAIL_TRACK_MAX = 1200;
-
-  const postEntityLru = new Map();
-  const draftEntityLru = new Map();
-  const taskLru = new Map();
-  const characterLru = new Map();
-  const usernameLru = new Map();
-  let lruTick = 0;
-
-  function touchLru(lru, key) {
-    if (!key) return;
-    lruTick += 1;
-    if (lru.has(key)) lru.delete(key);
-    lru.set(key, lruTick);
-  }
-
-  function pruneLru(lru, max, evict, canEvict) {
-    if (!lru || typeof evict !== 'function') return;
-    let attempts = 0;
-    const maxAttempts = Math.max(10, lru.size * 2);
-    while (lru.size > max && attempts < maxAttempts) {
-      attempts += 1;
-      const oldestKey = lru.keys().next().value;
-      if (!oldestKey) break;
-      if (typeof canEvict === 'function' && !canEvict(oldestKey)) {
-        const stamp = lru.get(oldestKey);
-        lru.delete(oldestKey);
-        lru.set(oldestKey, stamp);
-        continue;
-      }
-      lru.delete(oldestKey);
-      evict(oldestKey);
-    }
-  }
-
-  function trimSetOldest(set, max, shouldSkip) {
-    if (!set || set.size <= max) return;
-    let attempts = 0;
-    const maxAttempts = Math.max(10, set.size * 2);
-    while (set.size > max && attempts < maxAttempts) {
-      attempts += 1;
-      const oldest = set.values().next().value;
-      if (!oldest) break;
-      if (typeof shouldSkip === 'function' && shouldSkip(oldest)) {
-        set.delete(oldest);
-        set.add(oldest);
-        continue;
-      }
-      set.delete(oldest);
-    }
-  }
-
-  function isPostIdEvictable(id) {
-    if (!id) return false;
-    if (lockedPostIds.has(id) || pendingPostDetailIds.has(id)) return false;
-    const sid = currentSIdFromURL();
-    if (sid && sid === id) return false;
-    return true;
-  }
-
-  function evictPostEntity(id) {
-    if (!id) return;
-    idToUnique.delete(id);
-    idToLikes.delete(id);
-    idToViews.delete(id);
-    idToComments.delete(id);
-    idToRemixes.delete(id);
-    idToCameos.delete(id);
-    idToMeta.delete(id);
-    idToDuration.delete(id);
-    idToDimensions.delete(id);
-    lockedPostIds.delete(id);
-    processedPostDetailIds.delete(id);
-    pendingPostDetailIds.delete(id);
-  }
-
-  function evictDraftEntity(id) {
-    if (!id) return;
-    idToPrompt.delete(id);
-    idToDownloadUrl.delete(id);
-    idToViolation.delete(id);
-    idToRemixTarget.delete(id);
-    idToRemixTargetDraft.delete(id);
-    idToDuration.delete(id);
-    idToDimensions.delete(id);
-  }
-
-  function evictTaskEntity(taskId) {
-    if (!taskId) return;
-    taskToSourceDraft.delete(taskId);
-    taskToPrompt.delete(taskId);
-  }
-
-  function evictCharacterEntity(userId) {
-    if (!userId) return;
-    charToCameoCount.delete(userId);
-    charToLikesCount.delete(userId);
-    charToCanCameo.delete(userId);
-    charToCreatedAt.delete(userId);
-    charToOriginalIndex.delete(userId);
-    for (const [uname, mappedUserId] of usernameToUserId.entries()) {
-      if (mappedUserId === userId) usernameToUserId.delete(uname);
-    }
-  }
-
-  function evictUsernameEntity(username) {
-    if (!username) return;
-    usernameToUserId.delete(username);
-  }
-
-  function touchPostId(id) {
-    if (!id) return;
-    touchLru(postEntityLru, id);
-    pruneLru(postEntityLru, POST_ENTITY_CACHE_MAX, evictPostEntity, isPostIdEvictable);
-  }
-
-  function touchDraftId(id) {
-    if (!id) return;
-    touchLru(draftEntityLru, id);
-    pruneLru(draftEntityLru, DRAFT_ENTITY_CACHE_MAX, evictDraftEntity);
-  }
-
-  function touchTaskId(taskId) {
-    if (!taskId) return;
-    touchLru(taskLru, taskId);
-    pruneLru(taskLru, TASK_CACHE_MAX, evictTaskEntity);
-  }
-
-  function touchCharacterId(userId) {
-    if (!userId) return;
-    touchLru(characterLru, userId);
-    pruneLru(characterLru, CHARACTER_CACHE_MAX, evictCharacterEntity);
-  }
-
-  function touchUsernameKey(username) {
-    if (!username) return;
-    touchLru(usernameLru, username);
-    pruneLru(usernameLru, USERNAME_CACHE_MAX, evictUsernameEntity);
-  }
-
-  function notePendingPostDetailId(id) {
-    if (!id) return;
-    pendingPostDetailIds.add(id);
-    trimSetOldest(pendingPostDetailIds, POST_DETAIL_TRACK_MAX, (pid) => !isPostIdEvictable(pid));
-  }
-
-  function clearPendingPostDetailId(id) {
-    if (!id) return;
-    pendingPostDetailIds.delete(id);
-  }
-
-  function noteProcessedPostDetailId(id) {
-    if (!id) return;
-    processedPostDetailIds.add(id);
-    trimSetOldest(processedPostDetailIds, POST_DETAIL_TRACK_MAX, (pid) => !isPostIdEvictable(pid));
-  }
-
-  function clearAllInPageCaches() {
-    const maps = [
-      idToUnique,
-      idToLikes,
-      idToViews,
-      idToComments,
-      idToRemixes,
-      idToCameos,
-      idToMeta,
-      idToDuration,
-      idToDimensions,
-      idToPrompt,
-      idToDownloadUrl,
-      idToViolation,
-      idToRemixTarget,
-      idToRemixTargetDraft,
-      taskToSourceDraft,
-      taskToPrompt,
-      charToCameoCount,
-      charToLikesCount,
-      charToCanCameo,
-      charToCreatedAt,
-      usernameToUserId,
-      charToOriginalIndex,
-      postEntityLru,
-      draftEntityLru,
-      taskLru,
-      characterLru,
-      usernameLru,
-    ];
-    for (const map of maps) {
-      try {
-        map.clear();
-      } catch {}
-    }
-    try {
-      lockedPostIds.clear();
-      processedPostDetailIds.clear();
-      pendingPostDetailIds.clear();
-    } catch {}
-    _metricsCache = null;
-    _metricsCacheTs = 0;
-    _metricsCacheUpdatedAt = 0;
-    _metricsCacheWindowHours = null;
-    lastFilterPassSignature = '';
-    lruTick = 0;
-    charGlobalIndexCounter = 0;
-  }
+  // Track route to detect same-tab navigation
+  const routeKey = () => `${location.pathname}${location.search}`;
+  let lastRouteKey = routeKey();
 
   // == Utils ==
   const fmt = (n) =>
@@ -520,7 +262,7 @@
   const isTopFeed = () => {
     try {
       const u = new URL(location.href);
-      return u.pathname === '/explore' && u.searchParams.get('feed') === 'top';
+      return u.origin === 'https://sora.chatgpt.com' && u.pathname === '/explore' && u.searchParams.get('feed') === 'top';
     } catch {
       return false;
     }
@@ -797,15 +539,10 @@
     return null;
   }
   const extractIdFromCard = (el) => {
-    if (!el) return null;
-    const cached = el.dataset?.soraUvPostId;
-    if (cached) return cached;
     const link = el.querySelector('a[href^="/p/s_"]');
     if (!link) return null;
     const m = link.getAttribute('href').match(/\/p\/(s_[A-Za-z0-9]+)/i);
-    const id = m ? normalizeId(m[1]) : null;
-    if (id && el.dataset) el.dataset.soraUvPostId = id;
-    return id;
+    return m ? normalizeId(m[1]) : null;
   };
   function isBadCardContainer(el) {
     try {
@@ -841,22 +578,15 @@
     return null;
   }
 
-  const selectAllCards = () => {
-    const seen = new Set();
-    return Array.from(document.querySelectorAll('a[href^="/p/s_"]'))
+  const selectAllCards = () =>
+    Array.from(document.querySelectorAll('a[href^="/p/s_"]'))
       .filter((a) => {
         // Exclude posts inside Leaderboard dialog/popover
         const inDialog = a.closest('[role="dialog"]');
         return !inDialog;
       })
       .map((a) => closestPostCardFromAnchor(a) || a.closest('article,section,div') || a)
-      .filter((el) => !isBadCardContainer(el))
-      .filter((el) => {
-        if (!el || seen.has(el)) return false;
-        seen.add(el);
-        return true;
-      });
-  };
+      .filter((el) => !isBadCardContainer(el));
 
   // == Drafts helpers ==
   const extractDraftIdFromCard = (el) => {
@@ -917,633 +647,6 @@
     cachedDraftCardsCount = filtered.length;
     return filtered;
   };
-
-  // == Video memory management ==
-	  function getOrInitVideoMeta(videoEl) {
-	    let m = null;
-	    try {
-	      m = videoMeta.get(videoEl);
-	    } catch {}
-	    if (m) return m;
-		    m = {
-		      unloaded: false,
-		      videoSrcAttr: null,
-		      videoCurrentSrc: null,
-		      preloadAttr: null,
-		      posterAttr: null,
-		      sources: null, // [{src,type,media}]
-		      lastActiveMs: 0,
-		      unloadAtMs: 0,
-		      blobRevoked: false,
-		    };
-	    try {
-	      videoMeta.set(videoEl, m);
-	    } catch {}
-	    return m;
-	  }
-
-  function videoHasSources(videoEl) {
-    try {
-      if (!videoEl) return false;
-      if (typeof videoEl.currentSrc === 'string' && videoEl.currentSrc) return true;
-      const attr = videoEl.getAttribute && videoEl.getAttribute('src');
-      if (attr) return true;
-      const srcEl = videoEl.querySelector && videoEl.querySelector('source[src]');
-      return !!srcEl;
-    } catch {
-      return false;
-    }
-  }
-
-	  function captureVideoSources(videoEl, meta) {
-	    try {
-	      if (!videoEl || !meta) return;
-	      meta.videoSrcAttr = (videoEl.getAttribute && videoEl.getAttribute('src')) || null;
-	      meta.videoCurrentSrc = (typeof videoEl.currentSrc === 'string' && videoEl.currentSrc) ? videoEl.currentSrc : null;
-	      meta.preloadAttr = (videoEl.getAttribute && videoEl.getAttribute('preload')) || null;
-	      const srcs = [];
-	      const sources = videoEl.querySelectorAll ? Array.from(videoEl.querySelectorAll('source')) : [];
-	      for (const s of sources) {
-	        const src = (s && s.getAttribute && s.getAttribute('src')) || null;
-	        if (!src) continue;
-	        const type = (s.getAttribute && s.getAttribute('type')) || null;
-	        const media = (s.getAttribute && s.getAttribute('media')) || null;
-	        srcs.push({ src, type, media });
-	      }
-	      meta.sources = srcs.length ? srcs : null;
-	    } catch {}
-	  }
-
-	  function isBlobUrl(u) {
-	    return typeof u === 'string' && u.startsWith('blob:');
-	  }
-
-	  function revokeBlobUrl(u) {
-	    try {
-	      if (!isBlobUrl(u)) return false;
-	      if (typeof URL === 'undefined' || typeof URL.revokeObjectURL !== 'function') return false;
-	      URL.revokeObjectURL(u);
-	      return true;
-	    } catch {
-	      return false;
-	    }
-	  }
-
-	  function revokeVideoBlobUrls(meta) {
-	    if (!meta) return 0;
-	    let revoked = 0;
-	    if (revokeBlobUrl(meta.videoSrcAttr)) revoked += 1;
-	    if (revokeBlobUrl(meta.videoCurrentSrc)) revoked += 1;
-	    if (Array.isArray(meta.sources)) {
-	      for (const s of meta.sources) {
-	        if (revokeBlobUrl(s?.src)) revoked += 1;
-	      }
-	    }
-	    return revoked;
-	  }
-
-	  function unloadVideoSources(videoEl, meta, reason = '') {
-	    try {
-	      if (!videoEl || !meta) return false;
-	      if (meta.unloaded) return false;
-	      if (!videoHasSources(videoEl)) {
-	        meta.unloaded = false;
-	        return false;
-	      }
-
-	      captureVideoSources(videoEl, meta);
-	      meta.unloaded = true;
-	      meta.unloadAtMs = Date.now();
-	      meta.blobRevoked = false;
-
-	      const gather = !!isGatheringActiveThisTab;
-	      const blobRevokeEligible =
-	        gather &&
-	        typeof reason === 'string' &&
-	        (reason.startsWith('gather_above:') ||
-	          reason.startsWith('ttl_above:') ||
-	          reason.startsWith('cap_above:') ||
-	          reason.startsWith('ttl_hidden:') ||
-	          reason.startsWith('cap_hidden:'));
-	      if (blobRevokeEligible) {
-	        // In Gather, old offscreen-above videos are unlikely to be revisited. If Sora uses
-	        // blob URLs, revoking them is one of the few reliable ways to free their backing memory.
-	        try {
-	          const revoked = revokeVideoBlobUrls(meta);
-	          if (revoked > 0) meta.blobRevoked = true;
-	          if (revoked > 0) videoBlobRevokeTotal += revoked;
-	        } catch {}
-	      }
-
-	      // Posters can also be large decoded images; drop them for unloaded videos.
-	      const preservePoster =
-	        typeof reason === 'string' && reason.startsWith('gather_visible_cap:');
-	      if (!preservePoster) {
-	        try {
-	          if (meta.posterAttr == null) {
-	            const attr = (videoEl.getAttribute && videoEl.getAttribute('poster')) || null;
-	            const prop = (typeof videoEl.poster === 'string' && videoEl.poster) ? videoEl.poster : null;
-	            meta.posterAttr = attr || prop || null;
-	          }
-	        } catch {}
-	        try {
-	          videoEl.removeAttribute('poster');
-	        } catch {}
-	        try {
-	          videoEl.poster = '';
-	        } catch {}
-	      }
-
-	      try {
-	        videoEl.pause();
-	      } catch {}
-
-      // Prefer "none" so the browser can drop network + decoded frame buffers.
-      try {
-        videoEl.setAttribute('preload', 'none');
-      } catch {}
-      try {
-        videoEl.preload = 'none';
-      } catch {}
-      try {
-        // Extra safety: drop any MediaStream/MediaSource attachment.
-        videoEl.srcObject = null;
-      } catch {}
-
-      // Clear <source> children first, then the video src.
-	      try {
-	        const sources = videoEl.querySelectorAll ? Array.from(videoEl.querySelectorAll('source')) : [];
-	        for (const s of sources) {
-	          try {
-	            s.removeAttribute('src');
-	          } catch {}
-	        }
-	      } catch {}
-	      try {
-	        videoEl.removeAttribute('src');
-	      } catch {}
-
-	      // Force the media element to drop its current resource.
-	      try {
-	        videoEl.load();
-      } catch {}
-
-	      // Only observe unloaded videos (so we can restore on scroll-back) to avoid
-	      // holding references to every video element in long Gather sessions.
-	      try {
-	        const allowIo = !(VIDEO_IO_DISABLE_IN_GATHER && isGatheringActiveThisTab) && !document.hidden;
-	        if (allowIo) {
-	          const io = ensureVideoIntersectionObserver();
-	          if (io) io.observe(videoEl);
-	        }
-	      } catch {}
-
-	      videoUnloadedTotal += 1;
-	      dlog('feed', 'video unloaded', { reason });
-	      return true;
-    } catch {
-      return false;
-    }
-  }
-
-	  function restoreVideoSourcesIfNeeded(videoEl, meta) {
-	    try {
-	      if (!videoEl || !meta) return false;
-	      if (!meta.unloaded) return false;
-	      // If React already restored sources, just clear our unloaded flag.
-	      if (videoHasSources(videoEl)) {
-	        meta.unloaded = false;
-	        meta.unloadAtMs = 0;
-	        meta.blobRevoked = false;
-	        try {
-	          if (meta.posterAttr != null) {
-	            videoEl.setAttribute('poster', meta.posterAttr);
-	            videoEl.poster = meta.posterAttr;
-	            meta.posterAttr = null;
-	          }
-	        } catch {}
-	        try {
-	          if (videoIo) videoIo.unobserve(videoEl);
-	        } catch {}
-	        return false;
-	      }
-
-	      if (meta.blobRevoked) {
-	        // We revoked object URLs for this video (Gather above-viewport eviction). Do not attempt to
-	        // restore from captured URLs; let React recreate sources if it ever needs to.
-	        return false;
-	      }
-
-	      // Restore poster (helps avoid flicker when sources are restored).
-	      try {
-	        if (meta.posterAttr != null) {
-	          videoEl.setAttribute('poster', meta.posterAttr);
-	          videoEl.poster = meta.posterAttr;
-	          meta.posterAttr = null;
-	        }
-	      } catch {}
-
-	      // Restore preload first (or clear override).
-	      try {
-	        if (meta.preloadAttr != null) videoEl.setAttribute('preload', meta.preloadAttr);
-	        else videoEl.removeAttribute('preload');
-	      } catch {}
-      try {
-        if (meta.preloadAttr != null) videoEl.preload = meta.preloadAttr;
-        else videoEl.preload = 'metadata';
-      } catch {}
-
-      // Restore <source> list if we captured it.
-      if (Array.isArray(meta.sources) && meta.sources.length) {
-        let sources = [];
-        try {
-          sources = videoEl.querySelectorAll ? Array.from(videoEl.querySelectorAll('source')) : [];
-        } catch {
-          sources = [];
-        }
-
-        // If the source count doesn't match, rebuild to avoid partial restore.
-        if (sources.length !== meta.sources.length) {
-          try {
-            for (const s of sources) {
-              try { s.remove(); } catch {}
-            }
-          } catch {}
-          sources = [];
-          for (const sd of meta.sources) {
-            try {
-              const s = document.createElement('source');
-              if (sd?.src) s.setAttribute('src', sd.src);
-              if (sd?.type) s.setAttribute('type', sd.type);
-              if (sd?.media) s.setAttribute('media', sd.media);
-              videoEl.appendChild(s);
-              sources.push(s);
-            } catch {}
-          }
-        } else {
-          for (let i = 0; i < sources.length; i++) {
-            const sd = meta.sources[i];
-            const s = sources[i];
-            if (!s || !sd || !sd.src) continue;
-            try { s.setAttribute('src', sd.src); } catch {}
-            try { s.src = sd.src; } catch {}
-          }
-        }
-      }
-
-      // Restore direct src if it existed (or fall back to currentSrc we captured).
-      if (meta.videoSrcAttr) {
-        try { videoEl.setAttribute('src', meta.videoSrcAttr); } catch {}
-        try { videoEl.src = meta.videoSrcAttr; } catch {}
-      } else if (meta.videoCurrentSrc && (!meta.sources || meta.sources.length === 0)) {
-        try { videoEl.setAttribute('src', meta.videoCurrentSrc); } catch {}
-        try { videoEl.src = meta.videoCurrentSrc; } catch {}
-      }
-
-	      try {
-	        videoEl.load();
-	      } catch {}
-
-	      meta.unloaded = false;
-	      meta.lastActiveMs = Date.now();
-	      meta.unloadAtMs = 0;
-	      videoRestoredTotal += 1;
-	      try {
-	        if (videoIo) videoIo.unobserve(videoEl);
-	      } catch {}
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-	  function ensureVideoIntersectionObserver() {
-	    if (videoIo) return videoIo;
-	    try {
-	      if (typeof IntersectionObserver !== 'function') return null;
-	      // Keep this generous so scroll-back restores before it becomes visible.
-	      videoIo = new IntersectionObserver(
-	        (entries) => {
-	          const now = Date.now();
-	          for (const ent of entries || []) {
-	            const v = ent && ent.target;
-	            if (!v) continue;
-	            const meta = getOrInitVideoMeta(v);
-	            if (ent.isIntersecting) {
-	              meta.lastActiveMs = now;
-	              if (meta.unloaded) {
-	                restoreVideoSourcesIfNeeded(v, meta);
-	              }
-	              try {
-	                videoIo && videoIo.unobserve(v);
-	              } catch {}
-	            }
-	          }
-	        },
-	        { root: null, rootMargin: VIDEO_IO_ROOT_MARGIN, threshold: 0.01 }
-	      );
-	      videoIoLastResetMs = Date.now();
-	    } catch {
-	      videoIo = null;
-	    }
-	    return videoIo;
-	  }
-
-  function stopVideoPurge() {
-    try {
-      if (videoPurgeTimerId) clearTimeout(videoPurgeTimerId);
-    } catch {}
-    videoPurgeTimerId = null;
-    videoPurgeScheduled = false;
-    try {
-      if (videoIo) videoIo.disconnect();
-    } catch {}
-    videoIo = null;
-  }
-
-  function shouldPurgeVideosNow() {
-    if (!VIDEO_PURGE_ENABLED) return false;
-    if (isDraftDetail()) return false;
-    return isGatheringActiveThisTab || isExplore() || isProfile() || isDrafts() || isPost();
-  }
-
-  function isOffscreenRect(rect, viewportH, marginPx) {
-    if (!rect) return false;
-    // Hidden/zero-sized elements are never visible; treat as offscreen so we can purge.
-    if ((rect.width || 0) < 2 || (rect.height || 0) < 2) return true;
-    return rect.bottom < -marginPx || rect.top > viewportH + marginPx;
-  }
-
-  function isInViewportRect(rect, viewportH) {
-    if (!rect) return false;
-    return rect.bottom > 0 && rect.top < viewportH;
-  }
-
-	  function runVideoPurge(reason = 'unknown') {
-	    if (!shouldPurgeVideosNow()) return;
-	    const now = Date.now();
-	    videoPurgeLastRunMs = now;
-
-	    const gather = !!isGatheringActiveThisTab;
-	    let maxLoaded = gather ? VIDEO_MAX_LOADED_GATHER : VIDEO_MAX_LOADED_NORMAL;
-	    const marginPx = gather ? VIDEO_OFFSCREEN_MARGIN_PX_GATHER : VIDEO_OFFSCREEN_MARGIN_PX_NORMAL;
-	    const ttlMs = gather ? VIDEO_OFFSCREEN_TTL_MS_GATHER : VIDEO_OFFSCREEN_TTL_MS_NORMAL;
-
-	    const viewportH = window.innerHeight || 0;
-	    const scrollY = Number(window.scrollY || window.pageYOffset || 0);
-	    const scrollingDown = scrollY >= (videoPurgeLastScrollY || 0);
-	    videoPurgeLastScrollY = scrollY;
-
-	    // In Gather, IntersectionObserver can retain thousands of old/unmounted targets.
-	    // Kill it aggressively to keep memory bounded.
-	    if (gather && VIDEO_IO_DISABLE_IN_GATHER && videoIo) {
-	      try { videoIo.disconnect(); } catch {}
-	      videoIo = null;
-	    }
-	    if (!gather && videoIo && VIDEO_IO_RESET_INTERVAL_MS > 0 && now - (videoIoLastResetMs || 0) > VIDEO_IO_RESET_INTERVAL_MS) {
-	      // Defensive: periodic reset prevents IO from retaining unmounted elements indefinitely.
-	      try { videoIo.disconnect(); } catch {}
-	      videoIo = null;
-	      videoIoLastResetMs = now;
-	    }
-
-	    let videos = [];
-	    try {
-	      videos = Array.from(document.querySelectorAll('video'));
-	    } catch {
-	      videos = [];
-	    }
-	    if (!videos.length) return;
-
-	    // Adaptive caps: as the DOM grows (infinite scroll), clamp loaded videos further
-	    // to prevent memory runaway.
-	    if (gather) {
-	      if (videos.length > 80) maxLoaded = Math.min(maxLoaded, 6);
-	      if (videos.length > 140) maxLoaded = Math.min(maxLoaded, 4);
-	    } else {
-	      if (videos.length > 120) maxLoaded = Math.min(maxLoaded, 18);
-	      if (videos.length > 240) maxLoaded = Math.min(maxLoaded, 12);
-	    }
-
-	    let loaded = 0;
-	    const above = [];
-	    const below = [];
-	    const hidden = [];
-	    const visibleLoaded = [];
-
-	    for (const v of videos) {
-	      if (!v || !v.isConnected) continue;
-	      const meta = getOrInitVideoMeta(v);
-	      const rect = v.getBoundingClientRect ? v.getBoundingClientRect() : null;
-	      const inViewport = isInViewportRect(rect, viewportH);
-	      let hasSrc = videoHasSources(v);
-
-	      // If it's in/near the viewport, keep it warm and ensure it can restore.
-	      if (inViewport) {
-	        meta.lastActiveMs = now;
-	        if (meta.unloaded) {
-	          // In Gather, we intentionally keep some visible videos unloaded to cap memory.
-	          if (!gather || loaded < maxLoaded) {
-	            const cooldownActive =
-	              gather && meta.unloadAtMs && now - meta.unloadAtMs < VIDEO_RESTORE_COOLDOWN_MS_GATHER;
-	            if (!cooldownActive) {
-	              if (restoreVideoSourcesIfNeeded(v, meta)) hasSrc = true;
-	            }
-	          }
-	        }
-	      }
-
-	      if (hasSrc) {
-	        loaded += 1;
-	        if (inViewport) visibleLoaded.push({ v, rect, meta });
-	      }
-
-	      if (hasSrc && isOffscreenRect(rect, viewportH, marginPx)) {
-	        const isHidden = rect && ((rect.width || 0) < 2 || (rect.height || 0) < 2);
-	        if (isHidden) {
-	          hidden.push({ v, rect, meta });
-	        } else {
-          const isAbove = rect && rect.bottom < -marginPx;
-          (isAbove ? above : below).push({ v, rect, meta });
-        }
-      }
-    }
-
-    let unloaded = 0;
-
-	    // Gather-specific: if we're scrolling down, drop anything above the viewport quickly
-	    // to avoid accumulating decoded frames for content we will not revisit.
-	    if (gather && scrollingDown && VIDEO_GATHER_PURGE_ABOVE_ALWAYS) {
-	      for (const c of above) {
-	        if (!c || !c.v || !c.meta) continue;
-	        const r = c.v.getBoundingClientRect ? c.v.getBoundingClientRect() : c.rect;
-	        if (!r) continue;
-	        if (r.bottom > -VIDEO_GATHER_PURGE_ABOVE_MIN_PX) continue;
-	        if (unloadVideoSources(c.v, c.meta, `gather_above:${reason}`)) {
-	          unloaded += 1;
-	          loaded = Math.max(0, loaded - 1);
-	        }
-	      }
-	    }
-
-	    // Normal browsing: when scrolling down, aggressively purge far-above videos even if under cap.
-	    if (!gather && scrollingDown && VIDEO_NORMAL_PURGE_ABOVE_WHILE_SCROLLING_DOWN) {
-	      for (const c of above) {
-	        if (!c || !c.v || !c.meta) continue;
-	        if (unloadVideoSources(c.v, c.meta, `above:${reason}`)) {
-	          unloaded += 1;
-	          loaded = Math.max(0, loaded - 1);
-	        }
-	      }
-	    }
-
-	    // 1) TTL-based purge (drop old offscreen videos even if we're under the cap).
-	    const ttlEvictFrom = (list, label) => {
-	      for (const c of list || []) {
-	        if (!c || !c.v || !c.meta) continue;
-	        const last = Number(c.meta.lastActiveMs) || 0;
-	        if (last && now - last < ttlMs) continue;
-	        if (unloadVideoSources(c.v, c.meta, `ttl_${label}:${reason}`)) {
-	          unloaded += 1;
-	          loaded = Math.max(0, loaded - 1);
-	        }
-	      }
-	    };
-	    ttlEvictFrom(hidden, 'hidden');
-	    ttlEvictFrom(above, 'above');
-	    ttlEvictFrom(below, 'below');
-
-	    // 2) Count-based purge (enforce a hard cap; purge older/above-viewport first).
-	    if (loaded > maxLoaded) {
-	      const evictFrom = (list, label) => {
-	        for (const c of list) {
-	          if (loaded <= maxLoaded) break;
-	          if (!c || !c.v || !c.meta) continue;
-	          // Ensure it's still offscreen; avoid thrash while scrolling.
-	          const r = c.v.getBoundingClientRect ? c.v.getBoundingClientRect() : c.rect;
-	          if (!isOffscreenRect(r, viewportH, marginPx)) continue;
-	          if (unloadVideoSources(c.v, c.meta, `cap_${label}:${reason}`)) {
-	            unloaded += 1;
-	            loaded = Math.max(0, loaded - 1);
-	          }
-	        }
-	      };
-	      // Hidden videos are the least valuable to keep loaded.
-	      evictFrom(hidden, 'hidden');
-	      evictFrom(above, 'above');
-	      evictFrom(below, 'below');
-	    }
-
-	    // 3) Gather: If the viewport itself contains too many videos, unload edge-of-viewport
-	    // videos first to enforce a hard cap. This keeps Gather usable on dense grids.
-	    if (gather && VIDEO_GATHER_EVICT_VISIBLE_WHEN_OVER_CAP && loaded > maxLoaded && visibleLoaded.length) {
-	      const centerY = viewportH / 2;
-	      const edgeBand = Math.max(VIDEO_GATHER_VISIBLE_EDGE_BAND_PX_MIN, viewportH * VIDEO_GATHER_VISIBLE_EDGE_BAND_RATIO);
-	      const edgeCandidates = visibleLoaded
-	        .filter((c) => {
-	          if (!c || !c.v || !c.rect) return false;
-	          if (c.v === document.activeElement) return false;
-	          try { if (c.v.matches && c.v.matches(':hover')) return false; } catch {}
-	          const mid = (c.rect.top + c.rect.bottom) / 2;
-	          return mid < edgeBand || mid > viewportH - edgeBand;
-	        })
-	        .sort((a, b) => {
-	          const am = (a.rect.top + a.rect.bottom) / 2;
-	          const bm = (b.rect.top + b.rect.bottom) / 2;
-	          const ad = Math.abs(am - centerY);
-	          const bd = Math.abs(bm - centerY);
-	          return bd - ad;
-	        });
-	      for (const c of edgeCandidates) {
-	        if (loaded <= maxLoaded) break;
-	        // Re-check it is still in viewport; avoid unload thrash during fast scroll.
-	        const r = c.v.getBoundingClientRect ? c.v.getBoundingClientRect() : c.rect;
-	        if (!isInViewportRect(r, viewportH)) continue;
-	        if (unloadVideoSources(c.v, c.meta, `gather_visible_cap:${reason}`)) {
-	          unloaded += 1;
-	          loaded = Math.max(0, loaded - 1);
-	        }
-	      }
-	    }
-
-	    videoPurgeLastResult = {
-	      reason,
-	      gather,
-	      scrollingDown,
-      maxLoaded,
-      marginPx,
-      ttlMs,
-      totalVideos: videos.length,
-      loadedAfter: loaded,
-      unloadedThisRun: unloaded,
-      at: now,
-    };
-  }
-
-	  function scheduleVideoPurge(reason = 'scheduled') {
-	    if (!shouldPurgeVideosNow()) return;
-	    const now = Date.now();
-	    let throttleMs = isGatheringActiveThisTab ? VIDEO_PURGE_SCAN_THROTTLE_MS_GATHER : VIDEO_PURGE_SCAN_THROTTLE_MS_NORMAL;
-	    if (!isGatheringActiveThisTab && reason === 'scroll') throttleMs = Math.min(throttleMs, 1200);
-	    const waitMs = Math.max(0, throttleMs - (now - videoPurgeLastRunMs));
-	    if (videoPurgeScheduled) return;
-	    videoPurgeScheduled = true;
-	    try {
-	      const run = () => {
-	        videoPurgeTimerId = null;
-	        videoPurgeScheduled = false;
-	        runVideoPurge(reason);
-	      };
-	      const useIdle =
-	        typeof requestIdleCallback === 'function' && !isGatheringActiveThisTab && reason !== 'scroll';
-	      if (useIdle) {
-	        // In normal browsing, prefer idle time to reduce jank.
-	        requestIdleCallback(run, { timeout: Math.min(1200, waitMs + 300) });
-	      } else {
-	        videoPurgeTimerId = setTimeout(run, waitMs);
-	      }
-	    } catch {}
-	  }
-
-	  function unloadAllVideosNow(reason = 'all') {
-	    if (!VIDEO_PURGE_ENABLED) return;
-	    try {
-	      if (videoIo) videoIo.disconnect();
-	    } catch {}
-	    videoIo = null;
-
-	    let vids = [];
-	    try {
-	      vids = Array.from(document.querySelectorAll('video'));
-	    } catch {
-	      vids = [];
-	    }
-	    for (const v of vids) {
-	      if (!v || !v.isConnected) continue;
-	      const meta = getOrInitVideoMeta(v);
-	      if (meta.unloaded) continue;
-	      if (!videoHasSources(v)) continue;
-	      unloadVideoSources(v, meta, `all:${reason}`);
-	    }
-	  }
-
-	  function installVideoVisibilityPurge() {
-	    try {
-	      document.addEventListener('visibilitychange', () => {
-	        try {
-	          if (document.hidden) unloadAllVideosNow('hidden');
-	          else scheduleVideoPurge('visible');
-	        } catch {}
-	      });
-	    } catch {}
-	    try {
-	      window.addEventListener('pagehide', () => {
-	        try {
-	          unloadAllVideosNow('pagehide');
-	        } catch {}
-	      });
-	    } catch {}
-	  }
 
   function bestDraftDownloadUrl(item) {
     if (!item || typeof item !== 'object') return null;
@@ -1621,16 +724,6 @@
 
   // Tooltip (1s delayed, cursor-follow)
   let sharedTooltip;
-  let activeTooltipAnchorEl = null;
-  let tooltipDelegationInstalled = false;
-  let tooltipHoverCandidateEl = null;
-  let tooltipShowTimer = null;
-  let tooltipMoveRaf = null;
-  let tooltipLastX = 0;
-  let tooltipLastY = 0;
-  const TOOLTIP_DELAY_MS = 750;
-  const TOOLTIP_OFFSET_Y = 1;
-  const TOOLTIP_TOUCH_HIDE_MS = 1600;
   function getTooltip() {
     if (sharedTooltip && document.contains(sharedTooltip)) return sharedTooltip;
     const t = document.createElement('div');
@@ -1677,168 +770,64 @@
       document.body.removeChild(ta);
     }
   }
-	  function showPromptClickTooltip(clientX, clientY, text = 'Prompt copied!', ms = 1000) {
-	    const tip = getTooltip();
-	    tip.textContent = text;
-	    tip.style.left = `${clientX}px`;
-	    tip.style.top = `${clientY + 1}px`;
-	    tip.style.display = 'block';
-	    // Treat click-toasts as not being bound to a hover anchor.
-	    activeTooltipAnchorEl = null;
-	    tooltipHoverCandidateEl = null;
-	    if (_promptTipTimer) clearTimeout(_promptTipTimer);
-	    _promptTipTimer = setTimeout(() => { tip.style.display = 'none'; }, ms);
-	  }
-	
-	
-	  // Tooltip handling is delegated globally to avoid per-pill listeners.
-	  function installTooltipDelegation() {
-	    if (tooltipDelegationInstalled) return;
-	    tooltipDelegationInstalled = true;
-	
-	    const hide = (opts = {}) => {
-	      const keepCandidate = !!opts.keepCandidate;
-	      try {
-	        if (tooltipShowTimer) clearTimeout(tooltipShowTimer);
-	      } catch {}
-	      tooltipShowTimer = null;
-	      if (!keepCandidate) tooltipHoverCandidateEl = null;
-	      activeTooltipAnchorEl = null;
-	      try {
-	        if (sharedTooltip) sharedTooltip.style.display = 'none';
-	      } catch {}
-	    };
-	
-	    const updatePosition = () => {
-	      tooltipMoveRaf = null;
-	      if (!activeTooltipAnchorEl || !sharedTooltip) return;
-	      if (sharedTooltip.style.display === 'none') return;
-	      sharedTooltip.style.left = `${tooltipLastX}px`;
-	      sharedTooltip.style.top = `${tooltipLastY + TOOLTIP_OFFSET_Y}px`;
-	    };
-	
-	    const schedulePosition = () => {
-	      if (tooltipMoveRaf) return;
-	      tooltipMoveRaf = requestAnimationFrame(updatePosition);
-	    };
-	
-	    const showFor = (anchorEl, text) => {
-	      if (!anchorEl || !text) return;
-	      if (!anchorEl.isConnected) return;
-	      const tip = getTooltip();
-	      tip.textContent = text;
-	      tip.style.display = 'block';
-	      activeTooltipAnchorEl = anchorEl;
-	      schedulePosition();
-	    };
-	
-	    const findAnchor = (target) => {
-	      if (!target || !target.closest) return null;
-	      const el = target.closest('[data-sora-uv-tooltip]');
-	      const text = el && typeof el.dataset.soraUvTooltip === 'string' ? el.dataset.soraUvTooltip : '';
-	      if (!el || !text) return null;
-	      return el;
-	    };
-	
-	    document.addEventListener(
-	      'mouseover',
-	      (e) => {
-	        const anchor = findAnchor(e.target);
-	        if (!anchor) return;
-	        const text = anchor.dataset.soraUvTooltip;
-	        if (!text) return;
-	
-	        // Record last-known mouse position from the hover event.
-	        tooltipLastX = Number(e.clientX) || 0;
-	        tooltipLastY = Number(e.clientY) || 0;
-	
-	        if (tooltipHoverCandidateEl === anchor) return;
-	        hide({ keepCandidate: true });
-	        tooltipHoverCandidateEl = anchor;
-	        try {
-	          if (tooltipShowTimer) clearTimeout(tooltipShowTimer);
-	        } catch {}
-	        tooltipShowTimer = setTimeout(() => {
-	          if (tooltipHoverCandidateEl !== anchor) return;
-	          showFor(anchor, text);
-	        }, TOOLTIP_DELAY_MS);
-	      },
-	      true
-	    );
-	
-	    document.addEventListener(
-	      'mouseout',
-	      (e) => {
-	        const from = findAnchor(e.target);
-	        if (!from) return;
-	        const to = e.relatedTarget;
-	        if (to && from.contains(to)) return;
-	        if (tooltipHoverCandidateEl === from || activeTooltipAnchorEl === from) hide();
-	      },
-	      true
-	    );
-	
-	    document.addEventListener(
-	      'mousemove',
-	      (e) => {
-	        if (!activeTooltipAnchorEl || !sharedTooltip) return;
-	        if (sharedTooltip.style.display === 'none') return;
-	        tooltipLastX = Number(e.clientX) || 0;
-	        tooltipLastY = Number(e.clientY) || 0;
-	        schedulePosition();
-	      },
-	      { passive: true }
-	    );
+  function showPromptClickTooltip(clientX, clientY, text = 'Prompt copied!', ms = 1000) {
+    const tip = getTooltip();
+    tip.textContent = text;
+    tip.style.left = `${clientX}px`;
+    tip.style.top = `${clientY + 1}px`;
+    tip.style.display = 'block';
+    if (_promptTipTimer) clearTimeout(_promptTipTimer);
+    _promptTipTimer = setTimeout(() => { tip.style.display = 'none'; }, ms);
+  }
 
-	    // Touch-friendly: show tooltip on tap and auto-hide shortly after.
-	    // This makes pills usable on mobile where hover doesn't exist.
-	    document.addEventListener(
-	      'pointerdown',
-	      (e) => {
-	        try {
-	          const anchor = findAnchor(e.target);
-	          if (!anchor) return;
-	          const text = anchor.dataset.soraUvTooltip;
-	          if (!text) return;
 
-	          // Use pointer position; if missing, fall back to anchor center.
-	          const rect = anchor.getBoundingClientRect ? anchor.getBoundingClientRect() : null;
-	          const cx = Number(e.clientX) || (rect ? rect.left + rect.width / 2 : 0);
-	          const cy = Number(e.clientY) || (rect ? rect.top + rect.height / 2 : 0);
-	          tooltipLastX = cx;
-	          tooltipLastY = cy;
+  function attachTooltip(el, text, enabled = true) {
+    if (!enabled || !text) return;
+    let timerId = null;
+    let tracking = false;
+    const DELAY_MS = 750;
+    const OFFSET_Y = 1;
 
-	          showFor(anchor, text);
-	          setTimeout(() => {
-	            try {
-	              if (activeTooltipAnchorEl === anchor) hide();
-	            } catch {}
-	          }, TOOLTIP_TOUCH_HIDE_MS);
-	        } catch {}
-	      },
-	      true
-	    );
-	
-	    // If the user scrolls or tabs away, hide any hover tooltip quickly.
-	    window.addEventListener(
-	      'scroll',
-	      () => {
-	        if (activeTooltipAnchorEl) hide();
-	      },
-	      { passive: true, capture: true }
-	    );
-	    document.addEventListener('visibilitychange', () => {
-	      if (document.visibilityState !== 'visible') hide();
-	    });
-	  }
-	
-	  function attachTooltip(el, text, enabled = true) {
-	    if (!el || !enabled || !text) return;
-	    installTooltipDelegation();
-	    try {
-	      el.dataset.soraUvTooltip = String(text);
-	    } catch {}
-	  }
+    const move = (e) => {
+      const tip = getTooltip();
+      tip.textContent = text;
+      tip.style.left = `${e.clientX}px`;
+      tip.style.top = `${e.clientY + OFFSET_Y}px`;
+    };
+
+    el.addEventListener('mouseenter', (e) => {
+      timerId = setTimeout(() => {
+        const tip = getTooltip();
+        tip.textContent = text;
+        tip.style.display = 'block';
+        move(e);
+        if (!tracking) {
+          tracking = true;
+          el.addEventListener('mousemove', move);
+        }
+      }, DELAY_MS);
+    });
+
+    const hide = () => {
+      if (timerId) clearTimeout(timerId);
+      const tip = getTooltip();
+      tip.style.display = 'none';
+      if (tracking) {
+        el.removeEventListener('mousemove', move);
+        tracking = false;
+      }
+    };
+
+    el.addEventListener('mouseleave', hide);
+
+    const obs = new MutationObserver(() => {
+      if (!document.contains(el)) {
+        hide();
+        obs.disconnect();
+      }
+    });
+    obs.observe(document.documentElement, { childList: true, subtree: true });
+  }
 
   function ensureBadge(card) {
     let badge = card.querySelector('.sora-uv-badge');
@@ -2200,12 +1189,12 @@
 
         if (remixTargetPostId) {
           // This is a remix of a post - navigate to the post remix page
-          const remixUrl = `${location.origin}/p/${remixTargetPostId}?remix=`;
+          const remixUrl = `https://sora.chatgpt.com/p/${remixTargetPostId}?remix=`;
           sessionStorage.setItem('SORA_UV_REDO_PROMPT', prompt);
           window.location.href = remixUrl;
         } else if (remixTargetDraftId) {
           // This is a remix of a draft - navigate to the draft remix page
-          const remixUrl = `${location.origin}/d/${remixTargetDraftId}?remix=`;
+          const remixUrl = `https://sora.chatgpt.com/d/${remixTargetDraftId}?remix=`;
           sessionStorage.setItem('SORA_UV_REDO_PROMPT', prompt);
           window.location.href = remixUrl;
         } else {
@@ -2306,7 +1295,7 @@
         }
 
         // Navigate to the remix page for this draft
-        const remixUrl = `${location.origin}/d/${draftId}?remix=`;
+        const remixUrl = `https://sora.chatgpt.com/d/${draftId}?remix=`;
         window.location.href = remixUrl;
       });
 
@@ -2550,22 +1539,22 @@
     }
   } 
 
-  function renderBadges(cards) {
+  function renderBadges() {
     ensureControlBar();
-    const cardList = Array.isArray(cards) ? cards : selectAllCards();
-    for (const card of cardList) {
+    for (const card of selectAllCards()) {
       const id = extractIdFromCard(card);
       if (!id) continue;
       const uv = idToUnique.get(id);
       const meta = idToMeta.get(id);
       addBadge(card, uv, meta);
     }
+    applyFilter();
   }
 
-  function renderBookmarkButtons(draftCardsArg) {
+  function renderBookmarkButtons() {
     if (!isDrafts()) return;
     ensureControlBar();
-    const draftCards = Array.isArray(draftCardsArg) ? draftCardsArg : selectAllDrafts();
+    const draftCards = selectAllDrafts();
 
     // Early exit: if all cards are already processed, skip
     if (draftCards.length > 0 && draftCards.length === processedDraftCardsCount) {
@@ -2659,10 +1648,10 @@
   }
 
 
-  function renderDraftButtons(draftCardsArg) {
+  function renderDraftButtons() {
     if (!isDrafts()) return;
 
-    const draftCards = Array.isArray(draftCardsArg) ? draftCardsArg : selectAllDrafts();
+    const draftCards = selectAllDrafts();
 
     // Early exit: if all cards are already processed, skip
     if (draftCards.length > 0 && draftCards.length === processedDraftCardsCount) {
@@ -2846,7 +1835,6 @@
       if (metrics?.users) {
         // Helper function to load post data from a post object
         const loadPostData = (post, postId) => {
-          touchPostId(postId);
           const latest = __sorauv_latestSnapshot(post.snapshots);
           if (latest) {
             // Only set values if they're not null/undefined
@@ -3029,7 +2017,7 @@
   async function fetchPostDetailOnce(sid) {
     if (!sid) return;
     if (processedPostDetailIds.has(sid) || pendingPostDetailIds.has(sid)) return;
-    notePendingPostDetailId(sid);
+    pendingPostDetailIds.add(sid);
     try {
       const urls = buildPostDetailUrls(sid);
       for (const url of urls) {
@@ -3048,7 +2036,7 @@
         } catch {}
       }
     } finally {
-      clearPendingPostDetailId(sid);
+      pendingPostDetailIds.delete(sid);
     }
   }
 
@@ -3077,7 +2065,6 @@
       el.innerHTML = '';
       return;
     }
-    touchPostId(sid);
     
     dlog('feed', 'renderDetailBadge for post', { 
       sid, 
@@ -3334,9 +2321,10 @@
 
     let impactText = null;
     try {
+      const u = new URL(location.href);
       const handle = currentProfileHandleFromURL();
-      if (handle && handle.toLowerCase() === 'sora') impactText = '∞';
-      if (handle && handle.toLowerCase() === 'sama') impactText = '∞';
+      if (u.origin === 'https://sora.chatgpt.com' && handle && handle.toLowerCase() === 'sora') impactText = '∞';
+      if (u.origin === 'https://sora.chatgpt.com' && handle && handle.toLowerCase() === 'sama') impactText = '∞';
     } catch {}
     if (!impactText) impactText = formatImpactRatio(likes, followers);
 
@@ -3375,15 +2363,15 @@
     }
   }
 
-	  function makePill(btn, label, hasArrow = false) {
-	    // inject shared CSS once
-	    if (!document.getElementById('sora-uv-btn-style')) {
-	      const st = document.createElement('style');
-	      st.id = 'sora-uv-btn-style';
-	      st.textContent = `
-	        .sora-uv-btn {
-	          display: flex;
-	          height: 40px;
+  function makePill(btn, label, hasArrow = false) {
+    // inject shared CSS once
+    if (!document.getElementById('sora-uv-btn-style')) {
+      const st = document.createElement('style');
+      st.id = 'sora-uv-btn-style';
+      st.textContent = `
+        .sora-uv-btn {
+          display: flex;
+          height: 40px;
           align-items: center;
           justify-content: space-between;
           gap: 6px;
@@ -3429,21 +2417,12 @@
         .sora-uv-btn:hover svg {
           opacity: 1;
         }
-	        .sora-uv-btn[data-active="true"] svg {
-	          opacity: 0.8;
-	        }
-
-	        /* Mobile: slightly smaller pills so 3 buttons can fit without overflowing */
-	        @media (max-width: 520px) {
-	          .sora-uv-btn {
-	            height: 36px;
-	            padding: 0 12px;
-	            font-size: 14px;
-	          }
-	        }
-	      `;
-	      document.head.appendChild(st);
-	    }
+        .sora-uv-btn[data-active="true"] svg {
+          opacity: 0.8;
+        }
+      `;
+      document.head.appendChild(st);
+    }
 
     // reset + label
     while (btn.firstChild) btn.removeChild(btn.firstChild);
@@ -3482,7 +2461,7 @@
     return btn;
   }
 
-	  function ensureControlBar() {
+  function ensureControlBar() {
     // Make sure the shared .sora-uv-btn styles exist even if we early-return
     if (!document.getElementById('sora-uv-btn-style')) {
       // leverage makePill's injector by creating a throwaway button once
@@ -3491,33 +2470,13 @@
 
     if (controlBar && document.contains(controlBar)) return controlBar;
 
-	    const bar = document.createElement('div');
-	    bar.className = 'sora-uv-controls';
-
-	    const isMobileViewport = () => {
-	      try {
-	        if (window.matchMedia) return window.matchMedia('(max-width: 520px)').matches;
-	      } catch {}
-	      return (window.innerWidth || 0) <= 520;
-	    };
-	    const safePx = (side, px) => `calc(${px}px + env(safe-area-inset-${side}, 0px))`;
-	    const safeTopPx = (pxString) => `calc(${pxString} + env(safe-area-inset-top, 0px))`;
-	    const applyDropdownSizing = (dropdownEl) => {
-	      if (!dropdownEl) return;
-	      // Fit within viewport while keeping a reasonable minimum width.
-	      const vw = Number(window.innerWidth) || 0;
-	      const w = Math.max(180, Math.min(260, vw ? vw - 24 : 260));
-	      dropdownEl.style.minWidth = `${w}px`;
-	      dropdownEl.style.maxWidth = `${w}px`;
-	      // Avoid super tall menus on small screens.
-	      dropdownEl.style.maxHeight = '60vh';
-	      dropdownEl.style.overflowY = 'auto';
-	    };
-	    
-	    // Helper function to calculate top position based on scroll distance
-	    // Linear movement: starts at 42px (12px + 30px), moves to 8px over 30px of scroll
-	    // Only applies on explore pages
-	    const getBarTopPosition = () => {
+    const bar = document.createElement('div');
+    bar.className = 'sora-uv-controls';
+    
+    // Helper function to calculate top position based on scroll distance
+    // Linear movement: starts at 42px (12px + 30px), moves to 8px over 30px of scroll
+    // Only applies on explore pages
+    const getBarTopPosition = () => {
       // Only apply scroll-based positioning on explore pages
       if (!isExplore()) {
         return '12px'; // Default position on non-explore pages
@@ -3540,60 +2499,50 @@
       }
     };
     
-	    // Update bar position based on scroll
-	    const updateBarPosition = () => {
-	      bar.style.top = safeTopPx(getBarTopPosition());
-	    };
-	    
-	    Object.assign(bar.style, {
-	      position: 'fixed',
-	      top: safeTopPx(getBarTopPosition()), // Start 30px lower (42px), move linearly to 12px
-	      right: safePx('right', 12),
-	      zIndex: 2147483640, // Lower than max to allow notifications (toasts) to be on top
-	      display: 'flex',
-	      gap: '8px',
-	      padding: '0',
+    // Update bar position based on scroll
+    const updateBarPosition = () => {
+      bar.style.top = getBarTopPosition();
+    };
+    
+    Object.assign(bar.style, {
+      position: 'fixed',
+      top: getBarTopPosition(), // Start 30px lower (42px), move linearly to 12px
+      right: '12px',
+      zIndex: 2147483640, // Lower than max to allow notifications (toasts) to be on top
+      display: 'flex',
+      gap: '8px',
+      padding: '0',
       borderRadius: '0',
       background: 'transparent',
       color: '#fff',
       fontSize: '12px',
       alignItems: 'center',
       userSelect: 'none',
-	      flexDirection: 'column',
-	      // No transition - direct movement tied to scroll
-	    });
-
-	    // Constrain width on small screens so button rows can wrap instead of overflowing.
-	    bar.style.maxWidth = 'calc(100vw - 24px - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px))';
-	    bar.dataset.mobile = isMobileViewport() ? '1' : '0';
-	    
-	    // Function to update feed selector button position based on scroll
-	    let feedButtonFixedContainer = null;
-	    const updateFeedButtonPosition = () => {
+      flexDirection: 'column',
+      // No transition - direct movement tied to scroll
+    });
+    
+    // Function to update feed selector button position based on scroll
+    const updateFeedButtonPosition = () => {
       // Only apply scroll-based positioning on explore pages
       if (!isExplore()) {
         return; // Don't modify feed button position on non-explore pages
       }
       
-      let container = feedButtonFixedContainer;
-      if (!container || !container.isConnected) {
-        feedButtonFixedContainer = null;
-        // Find the feed selector button container (the one with "Choose a feed" aria-label)
-        const feedButton = document.querySelector('button[aria-label="Choose a feed"]');
-        if (!feedButton) return;
-
-        // Find the parent container with fixed positioning
-        container = feedButton.closest('.fixed');
-        if (!container) {
-          // If no fixed container found, look for parent with top-4 or top-2 classes
-          container = feedButton.parentElement;
-          while (container && !container.classList.contains('fixed')) {
-            container = container.parentElement;
-          }
+      // Find the feed selector button container (the one with "Choose a feed" aria-label)
+      const feedButton = document.querySelector('button[aria-label="Choose a feed"]');
+      if (!feedButton) return;
+      
+      // Find the parent container with fixed positioning
+      let container = feedButton.closest('.fixed');
+      if (!container) {
+        // If no fixed container found, look for parent with top-4 or top-2 classes
+        container = feedButton.parentElement;
+        while (container && !container.classList.contains('fixed')) {
+          container = container.parentElement;
         }
-        if (!container) return;
-        feedButtonFixedContainer = container;
       }
+      if (!container) return;
       
       const scrollY = window.scrollY || window.pageYOffset || 0;
       const maxScroll = 30;
@@ -3631,28 +2580,21 @@
     
     // Try immediately and after a delay
     tryUpdateFeedButton();
-
-    // Add scroll event listener (rAF throttled)
-    let scrollRafId = null;
-	    const handleScroll = () => {
-	      if (scrollRafId) return;
-	      scrollRafId = requestAnimationFrame(() => {
-	        scrollRafId = null;
-	        updateBarPosition();
-	        updateFeedButtonPosition();
-	        try {
-	          scheduleVideoPurge('scroll');
-	        } catch {}
-	      });
-	    };
+    
+    // Watch for DOM changes in case button is added dynamically
+    const observer = new MutationObserver(() => {
+      tryUpdateFeedButton();
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    bar._feedButtonObserver = observer;
+    
+    // Add scroll event listener - update directly on every scroll
+    const handleScroll = () => {
+      updateBarPosition();
+      updateFeedButtonPosition();
+    };
     window.addEventListener('scroll', handleScroll, { passive: true });
     bar._handleScroll = handleScroll;
-    bar._cancelScrollRaf = () => {
-      try {
-        if (scrollRafId) cancelAnimationFrame(scrollRafId);
-      } catch {}
-      scrollRafId = null;
-    };
     bar._feedButtonTimers = [
       setTimeout(tryUpdateFeedButton, 100),
       setTimeout(tryUpdateFeedButton, 500),
@@ -3661,17 +2603,14 @@
     // Store the update function on the bar for later use
     bar.updateBarPosition = updateBarPosition;
 
-	    const buttonRow = document.createElement('div');
-	    Object.assign(buttonRow.style, {
-	      display: 'flex',
-	      gap: '8px',
-	      background: 'transparent',
-	      justifyContent: 'center',
-	      alignItems: 'center',
-	      flexWrap: 'nowrap',
-	      maxWidth: '100%',
-	    });
-	    bar._buttonRow = buttonRow;
+    const buttonRow = document.createElement('div');
+    Object.assign(buttonRow.style, {
+      display: 'flex',
+      gap: '8px',
+      background: 'transparent',
+      justifyContent: 'center',
+      alignItems: 'center',
+    });
 
     // prefs
     let prefs = getPrefs();
@@ -3988,22 +2927,20 @@
       if (!isGatheringActiveThisTab) applyFilterLockState();
     };
 
-	    // Wire Filter button
-	    filterBtn.onclick = (e) => {
-	      if (filterBtn.disabled) return;
-	      e.stopPropagation();
-	      const isOpen = filterDropdown.style.display === 'flex';
-	      if (!isOpen) applyDropdownSizing(filterDropdown);
-	      filterDropdown.style.display = isOpen ? 'none' : 'flex';
-	    };
+    // Wire Filter button
+    filterBtn.onclick = (e) => {
+      if (filterBtn.disabled) return;
+      e.stopPropagation();
+      const isOpen = filterDropdown.style.display === 'flex';
+      filterDropdown.style.display = isOpen ? 'none' : 'flex';
+    };
     
     // Close dropdown when clicking outside
-    bar._onFilterOutsideClick = (e) => {
+    document.addEventListener('click', (e) => {
       if (!filterContainer.contains(e.target)) {
         filterDropdown.style.display = 'none';
       }
-    };
-    document.addEventListener('click', bar._onFilterOutsideClick);
+    });
 
     // Guard clicks on disabled buttons
     gatherBtn.onclick = () => {
@@ -4038,24 +2975,22 @@
       toggleAnalyzeMode();
     };
 
-	    bookmarksBtn.onclick = (e) => {
-	      if (bookmarksBtn.disabled) return;
-	      e.stopPropagation();
-	      const isOpen = bookmarksDropdown.style.display === 'flex';
-	      if (!isOpen) {
-	        updateBookmarksDropdownSelection();
-	        applyDropdownSizing(bookmarksDropdown);
-	      }
-	      bookmarksDropdown.style.display = isOpen ? 'none' : 'flex';
-	    };
+    bookmarksBtn.onclick = (e) => {
+      if (bookmarksBtn.disabled) return;
+      e.stopPropagation();
+      const isOpen = bookmarksDropdown.style.display === 'flex';
+      if (!isOpen) {
+        updateBookmarksDropdownSelection();
+      }
+      bookmarksDropdown.style.display = isOpen ? 'none' : 'flex';
+    };
     
     // Close bookmarks dropdown when clicking outside
-    bar._onBookmarksOutsideClick = (e) => {
+    document.addEventListener('click', (e) => {
       if (bookmarksContainer && !bookmarksContainer.contains(e.target)) {
         bookmarksDropdown.style.display = 'none';
       }
-    };
-    document.addEventListener('click', bar._onBookmarksOutsideClick);
+    });
 
     bar.updateGatherState = () => {
       const filterLockActive = (getGatherState().filterIndex ?? 0) > 0;
@@ -4077,23 +3012,19 @@
 
         // Align gatherControlsWrapper with the button's current width
         // Use requestAnimationFrame to ensure the button has rendered with new label
-	        requestAnimationFrame(() => {
-	          const buttonWidth = gatherBtn.offsetWidth;
-	          const minWidth = isMobileViewport() ? 200 : 220;
-	          const desiredWidth = Math.max(buttonWidth, minWidth);
-	          const barRect = bar.getBoundingClientRect();
-	          const maxAllowed = barRect && barRect.width ? Math.max(0, barRect.width) : desiredWidth;
-	          const finalWidth = Math.min(desiredWidth, maxAllowed || desiredWidth);
-	          gatherControlsWrapper.style.width = `${finalWidth}px`;
-	          gatherControlsWrapper.style.alignSelf = 'flex-start';
-	          // Center the controls under the Gather button
-	          const buttonRect = gatherBtn.getBoundingClientRect();
-	          const buttonCenter = buttonRect.left - barRect.left + buttonRect.width / 2;
-	          const offsetLeft = buttonCenter - finalWidth / 2;
-	          const clamp = (x, min, max) => Math.max(min, Math.min(max, x));
-	          const maxLeft = Math.max(0, (barRect.width || finalWidth) - finalWidth);
-	          gatherControlsWrapper.style.marginLeft = `${clamp(offsetLeft, 0, maxLeft)}px`;
-	        });
+        requestAnimationFrame(() => {
+          const buttonWidth = gatherBtn.offsetWidth;
+          const minWidth = 220;
+          const desiredWidth = Math.max(buttonWidth, minWidth);
+          gatherControlsWrapper.style.width = `${desiredWidth}px`;
+          gatherControlsWrapper.style.alignSelf = 'flex-start';
+          // Center the controls under the Gather button
+          const buttonRect = gatherBtn.getBoundingClientRect();
+          const barRect = bar.getBoundingClientRect();
+          const buttonCenter = buttonRect.left - barRect.left + buttonRect.width / 2;
+          const offsetLeft = buttonCenter - desiredWidth / 2;
+          gatherControlsWrapper.style.marginLeft = `${offsetLeft}px`;
+        });
 
         if (isProfile()) {
           gatherControlsWrapper.style.display = 'flex';
@@ -4134,35 +3065,11 @@
       if (typeof bar.updateFilterLabel === 'function') bar.updateFilterLabel();
     };
 
-	    // Initial label + lock application
-	    bar.updateFilterLabel();
-
-	    // Responsive adjustments (wrap buttons on small screens, keep within safe areas).
-	    const applyResponsiveLayout = () => {
-	      const isMobile = isMobileViewport();
-	      bar.dataset.mobile = isMobile ? '1' : '0';
-	      // Keep the bar pinned top-right but safe-area aware.
-	      bar.style.right = safePx('right', 12);
-	      bar.style.top = safeTopPx(getBarTopPosition());
-	      bar.style.maxWidth =
-	        'calc(100vw - 24px - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px))';
-	      // Wrap buttons on mobile so Filter/Gather/Analyze don't overflow.
-	      try {
-	        if (bar._buttonRow) {
-	          bar._buttonRow.style.flexWrap = isMobile ? 'wrap' : 'nowrap';
-	          bar._buttonRow.style.justifyContent = isMobile ? 'flex-end' : 'center';
-	        }
-	      } catch {}
-	    };
-	    bar._applyResponsiveLayout = applyResponsiveLayout;
-	    bar._onResize = () => {
-	      try { applyResponsiveLayout(); } catch {}
-	    };
-	    window.addEventListener('resize', bar._onResize, { passive: true });
-	    applyResponsiveLayout();
-	    
-	    // Set initial position based on current scroll
-	    updateBarPosition();
+    // Initial label + lock application
+    bar.updateFilterLabel();
+    
+    // Set initial position based on current scroll
+    updateBarPosition();
 
     document.documentElement.appendChild(bar);
     controlBar = bar;
@@ -4173,23 +3080,10 @@
     const bar = controlBar;
     if (!bar) return;
     try {
-      if (bar._onResize) window.removeEventListener('resize', bar._onResize);
-    } catch {}
-    try {
-      if (bar._onFilterOutsideClick) {
-        document.removeEventListener('click', bar._onFilterOutsideClick);
-      }
-    } catch {}
-    try {
-      if (bar._onBookmarksOutsideClick) {
-        document.removeEventListener('click', bar._onBookmarksOutsideClick);
-      }
-    } catch {}
-    try {
       if (bar._handleScroll) window.removeEventListener('scroll', bar._handleScroll);
     } catch {}
     try {
-      if (bar._cancelScrollRaf) bar._cancelScrollRaf();
+      if (bar._feedButtonObserver) bar._feedButtonObserver.disconnect();
     } catch {}
     try {
       const timers = Array.isArray(bar._feedButtonTimers) ? bar._feedButtonTimers : [];
@@ -4243,12 +3137,8 @@
           // We just need to wait a bit for it to process, then the render will pick up new data
           const json = await response.json();
           dlog('analyze', 'fetched new posts', { items: (json?.items || json?.data?.items || []).length });
-          // Avoid double-processing when fetch sniffer already handles this endpoint (e.g., /profile/...).
-          const snifferHandlesEndpoint =
-            FEED_RE.test(feedUrl) || POST_DETAIL_RE.test(feedUrl) || DRAFTS_RE.test(feedUrl) || CHARACTERS_RE.test(feedUrl);
-          if (!snifferHandlesEndpoint) {
-            processFeedJson(json);
-          }
+          // Process directly as well to ensure immediate update (fetch sniffer may have already done this)
+          processFeedJson(json);
         }
       }
     } catch (error) {
@@ -5744,22 +4634,13 @@ async function renderAnalyzeTable(force = false) {
   }
 
   // == Filtering ==
-  function applyFilter(cards) {
+  function applyFilter() {
     if (analyzeActive) return; // overlay handles visibility
     const s = getGatherState();
     const idx = s.filterIndex ?? 0;
     const limitMin = FILTER_STEPS_MIN[idx];
-    const cardList = Array.isArray(cards) ? cards : selectAllCards();
-    const routeMode = isProfile() ? 'profile' : isExplore() ? 'explore' : isPost() ? 'post' : 'other';
-    const timeBucket =
-      Number.isFinite(limitMin) && limitMin > 0 ? Math.floor(Date.now() / 30000) : 0;
-    const firstCardId = cardList.length ? extractIdFromCard(cardList[0]) || '' : '';
-    const lastCardId = cardList.length ? extractIdFromCard(cardList[cardList.length - 1]) || '' : '';
-    const sig = `${routeMode}|${idx}|${isGatheringActiveThisTab ? 1 : 0}|${cardList.length}|${firstCardId}|${lastCardId}|${timeBucket}`;
-    if (sig === lastFilterPassSignature) return;
-    lastFilterPassSignature = sig;
 
-    for (const card of cardList) {
+    for (const card of selectAllCards()) {
       const id = extractIdFromCard(card);
       const meta = idToMeta.get(id);
       // If we're not on a page where filters apply, don't hide anything.
@@ -5769,7 +4650,7 @@ async function renderAnalyzeTable(force = false) {
       // Also apply on Post routes: opening a post from Explore often updates the URL to `/p/...` while the
       // Explore grid remains mounted underneath a modal, and we want to keep the filtered view stable.
       if ((!isProfile() && !isExplore() && !isPost()) || limitMin == null || isGatheringActiveThisTab) {
-        if (card.style.display !== '') card.style.display = '';
+        card.style.display = '';
         continue;
       }
 
@@ -5784,14 +4665,12 @@ async function renderAnalyzeTable(force = false) {
         // If remix count is unknown yet, hide until data arrives (like time filters).
         const nRx = Number(rx);
         const show = Number.isFinite(nRx) && nRx === 0;
-        const nextDisplay = show ? '' : 'none';
-        if (card.style.display !== nextDisplay) card.style.display = nextDisplay;
+        card.style.display = show ? '' : 'none';
         continue;
       }
 
       const show = Number.isFinite(meta?.ageMin) && meta.ageMin <= limitMin;
-      const nextDisplay = show ? '' : 'none';
-      if (card.style.display !== nextDisplay) card.style.display = nextDisplay;
+      card.style.display = show ? '' : 'none';
     }
   }
 
@@ -5875,12 +4754,6 @@ async function renderAnalyzeTable(force = false) {
     } else {
       gatherTimerEl.textContent = '';
     }
-
-    // Gather mode is the biggest memory risk: keep the number of loaded videos bounded.
-    // Throttled internally.
-    try {
-      scheduleVideoPurge('gather_tick');
-    } catch {}
   }
 
   function startGathering(forceNewDeadline = false) {
@@ -6116,8 +4989,6 @@ async function renderAnalyzeTable(force = false) {
 
   function installFetchSniffer() {
     dlog('feed', 'install fetch sniffer');
-    const MAX_ENDPOINT_JSON_BYTES = 2 * 1024 * 1024; // 2 MB guardrail for known endpoint payloads.
-    const MAX_AUTODETECT_JSON_BYTES = 750 * 1024; // 750 KB safety cap for fallback parsing.
     const isLikelyJsonResponse = (res) => {
       try {
         const ct = String(res?.headers?.get?.('content-type') || '').toLowerCase();
@@ -6125,56 +4996,6 @@ async function renderAnalyzeTable(force = false) {
       } catch {
         return false;
       }
-    };
-    const isLikelySoraDataEndpoint = (url) => {
-      if (typeof url !== 'string') return false;
-      if (!url.startsWith(location.origin)) return false;
-      return /\/backend\/|\/posts?\//i.test(url);
-    };
-    const shouldAutodetectFetchBody = (url, res) => {
-      if (!isLikelySoraDataEndpoint(url)) return false;
-      if (!isLikelyJsonResponse(res)) return false;
-      try {
-        const len = Number(res?.headers?.get?.('content-length') || 0);
-        if (Number.isFinite(len) && len > MAX_AUTODETECT_JSON_BYTES) return false;
-      } catch {}
-      return true;
-    };
-    const shouldAutodetectXhrBody = (url, xhr) => {
-      if (!isLikelySoraDataEndpoint(url)) return false;
-      try {
-        const ct = String(xhr?.getResponseHeader?.('content-type') || '').toLowerCase();
-        if (!(ct.includes('application/json') || ct.includes('+json'))) return false;
-      } catch {
-        return false;
-      }
-      try {
-        const textLen = typeof xhr?.responseText === 'string' ? xhr.responseText.length : 0;
-        if (textLen > MAX_AUTODETECT_JSON_BYTES) return false;
-      } catch {
-        return false;
-      }
-      return true;
-    };
-    const shouldParseNamedFetchBody = (res, urlTag) => {
-      try {
-        const len = Number(res?.headers?.get?.('content-length') || 0);
-        if (Number.isFinite(len) && len > MAX_ENDPOINT_JSON_BYTES) {
-          dlog('feed', 'skipped parsing large fetch payload', { urlTag, contentLength: len });
-          return false;
-        }
-      } catch {}
-      return true;
-    };
-    const shouldParseNamedXhrBody = (text, urlTag) => {
-      try {
-        const len = typeof text === 'string' ? text.length : 0;
-        if (len > MAX_ENDPOINT_JSON_BYTES) {
-          dlog('feed', 'skipped parsing large xhr payload', { urlTag, textLength: len });
-          return false;
-        }
-      } catch {}
-      return true;
     };
     const origFetch = window.fetch;
     window.fetch = async function (input, init) {
@@ -6210,7 +5031,6 @@ async function renderAnalyzeTable(force = false) {
 
         // Check POST_DETAIL_RE, DRAFTS_RE and CHARACTERS_RE before FEED_RE since they would also match FEED_RE
         if (POST_DETAIL_RE.test(url)) {
-          if (!shouldParseNamedFetchBody(res, 'post_detail')) return res;
           dlog('feed', 'fetch matched post detail', { url });
           rememberPostDetailTemplate(url);
           res.clone().json().then((j) => {
@@ -6220,18 +5040,15 @@ async function renderAnalyzeTable(force = false) {
             console.error('[SoraUV] Error parsing post detail fetch response:', err);
           });
         } else if (CHARACTERS_RE.test(url)) {
-          if (!shouldParseNamedFetchBody(res, 'characters')) return res;
           res.clone().json().then(processCharactersJson).catch((err) => {
             console.error('[SoraUV] Error parsing characters fetch response:', err);
           });
         } else if (DRAFTS_RE.test(url)) {
-          if (!shouldParseNamedFetchBody(res, 'drafts')) return res;
           decorateDraftsResponse(res);
           res.clone().json().then(processDraftsJson).catch((err) => {
             console.error('[SoraUV] Error parsing drafts fetch response:', err);
           });
         } else if (FEED_RE.test(url)) {
-          if (!shouldParseNamedFetchBody(res, 'feed')) return res;
           dlog('feed', 'fetch matched', { url });
           res
             .clone()
@@ -6241,22 +5058,25 @@ async function renderAnalyzeTable(force = false) {
               processFeedJson(j);
             })
             .catch(() => {});
-        } else if (shouldAutodetectFetchBody(url, res)) {
-          res
-            .clone()
-            .json()
-            .then((j) => {
-              if (looksLikePostDetail(j)) {
-                dlog('feed', 'fetch autodetected post detail', { url, hasPost: !!j?.post });
-                processPostDetailJson(j);
-              } else if (looksLikeSoraFeed(j)) {
-                dlog('feed', 'fetch autodetected feed', { url, items: (j?.items || j?.data?.items || []).length });
-                processFeedJson(j);
-              } else if (looksLikeProfile(j)) {
-                processProfileJson(j);
-              }
-            })
-            .catch(() => {});
+        } else if (typeof url === 'string' && url.startsWith(location.origin)) {
+          // Avoid cloning/parsing bodies for non-JSON same-origin requests (can be very expensive on /d/...).
+          if (isLikelyJsonResponse(res)) {
+            res
+              .clone()
+              .json()
+              .then((j) => {
+                if (looksLikePostDetail(j)) {
+                  dlog('feed', 'fetch autodetected post detail', { url, hasPost: !!j?.post });
+                  processPostDetailJson(j);
+                } else if (looksLikeSoraFeed(j)) {
+                  dlog('feed', 'fetch autodetected feed', { url, items: (j?.items || j?.data?.items || []).length });
+                  processFeedJson(j);
+                } else if (looksLikeProfile(j)) {
+                  processProfileJson(j);
+                }
+              })
+              .catch(() => {});
+          }
         }
       } catch {}
       return res;
@@ -6296,7 +5116,6 @@ async function renderAnalyzeTable(force = false) {
 
               // Check POST_DETAIL_RE, CHARACTERS_RE and DRAFTS_RE before FEED_RE since they would also match FEED_RE
               if (POST_DETAIL_RE.test(url)) {
-                if (!shouldParseNamedXhrBody(this.responseText, 'post_detail')) return;
                 dlog('feed', 'xhr matched post detail', { url });
                 rememberPostDetailTemplate(url);
                 try {
@@ -6307,38 +5126,38 @@ async function renderAnalyzeTable(force = false) {
                 console.error('[SoraUV] Error parsing post detail XHR:', err);
               }
             } else if (CHARACTERS_RE.test(url)) {
-              if (!shouldParseNamedXhrBody(this.responseText, 'characters')) return;
               try {
                 processCharactersJson(JSON.parse(this.responseText));
               } catch (err) {
                 console.error('[SoraUV] Error parsing characters XHR:', err);
               }
             } else if (DRAFTS_RE.test(url)) {
-              if (!shouldParseNamedXhrBody(this.responseText, 'drafts')) return;
               try {
                 processDraftsJson(JSON.parse(this.responseText));
               } catch (err) {
                 console.error('[SoraUV] Error parsing drafts XHR:', err);
               }
             } else if (FEED_RE.test(url)) {
-              if (!shouldParseNamedXhrBody(this.responseText, 'feed')) return;
               dlog('feed', 'xhr matched', { url });
               try {
                 const j = JSON.parse(this.responseText);
                 dlog('feed', 'xhr parsed', { url, items: (j?.items || j?.data?.items || []).length });
                 processFeedJson(j);
               } catch {}
-            } else if (shouldAutodetectXhrBody(url, this)) {
+            } else if (url.startsWith(location.origin)) {
               try {
-                const j = JSON.parse(this.responseText);
-                if (looksLikePostDetail(j)) {
-                  dlog('feed', 'xhr autodetected post detail', { url, hasPost: !!j?.post });
-                  processPostDetailJson(j);
-                } else if (looksLikeSoraFeed(j)) {
-                  dlog('feed', 'xhr autodetected feed', { url, items: (j?.items || j?.data?.items || []).length });
-                  processFeedJson(j);
-                } else if (looksLikeProfile(j)) {
-                  processProfileJson(j);
+                const ct = String(this.getResponseHeader('content-type') || '').toLowerCase();
+                if (ct.includes('application/json') || ct.includes('+json')) {
+                  const j = JSON.parse(this.responseText);
+                  if (looksLikePostDetail(j)) {
+                    dlog('feed', 'xhr autodetected post detail', { url, hasPost: !!j?.post });
+                    processPostDetailJson(j);
+                  } else if (looksLikeSoraFeed(j)) {
+                    dlog('feed', 'xhr autodetected feed', { url, items: (j?.items || j?.data?.items || []).length });
+                    processFeedJson(j);
+                  } else if (looksLikeProfile(j)) {
+                    processProfileJson(j);
+                  }
                 }
               } catch {}
             }
@@ -6439,6 +5258,7 @@ async function renderAnalyzeTable(force = false) {
     for (const it of items) {
       const id = getItemId(it);
       if (!id) continue;
+
       // Safety check: ensure we don't process comments/replies as if they were the main post
       // This happens because comments often contain the post_id they belong to, and getItemId finds it via deep search
       const rawP = it?.post || it || {};
@@ -6452,7 +5272,6 @@ async function renderAnalyzeTable(force = false) {
         ];
         if (refs.some((r) => typeof r === 'string' && r === id)) continue;
       }
-      touchPostId(id);
 
       const uv = getUniqueViews(it);
       const likes = getLikes(it);
@@ -6661,7 +5480,6 @@ async function renderAnalyzeTable(force = false) {
         for (const remixItem of remixPosts) {
           const remixId = getItemId(remixItem);
           if (!remixId) continue;
-          touchPostId(remixId);
           
           // Extract all the same data for the remix post
           const remixUv = getUniqueViews(remixItem);
@@ -6787,14 +5605,11 @@ async function renderAnalyzeTable(force = false) {
         window.postMessage({ __sora_uv__: true, type: 'metrics_batch', items: batch }, '*');
       } catch {}
 
-    scheduleRenderPass({
-      cards: true,
-      filter: true,
-      detail: !suppressDetailBadgeRender && isPost(),
-      profile: isProfile(),
-      controls: true,
-      dashboard: true,
-    });
+    renderBadges();
+    if (!suppressDetailBadgeRender) {
+      renderDetailBadge();
+    }
+    renderProfileImpact();
   }
 
   function processPostDetailJson(json) {
@@ -6840,9 +5655,8 @@ async function renderAnalyzeTable(force = false) {
         
         // Lock this post's data only if it matches the currently viewed post
         if (isCurrentPost) {
-          touchPostId(mainPostId);
           lockedPostIds.add(mainPostId);
-          noteProcessedPostDetailId(mainPostId);
+          processedPostDetailIds.add(mainPostId);
           
           dlog('feed', 'processed and LOCKED current main post', { 
             id: mainPostId, 
@@ -6894,14 +5708,7 @@ async function renderAnalyzeTable(force = false) {
     } finally {
       // Re-enable rendering and trigger a single render with all data loaded
       suppressDetailBadgeRender = false;
-      scheduleRenderPass({
-        cards: true,
-        detail: true,
-        filter: true,
-        profile: isProfile(),
-        controls: true,
-        dashboard: true,
-      });
+      renderDetailBadge();
       dlog('feed', 'processPostDetailJson complete, rendered badges');
     }
   }
@@ -6927,7 +5734,6 @@ async function renderAnalyzeTable(force = false) {
         if (!looksLikePendingV2Task(task)) continue;
         const taskId = task?.id;
         const taskPrompt = typeof task?.prompt === 'string' ? task.prompt : null;
-        if (taskId) touchTaskId(taskId);
         if (taskId && taskPrompt) taskToPrompt.set(taskId, taskPrompt);
 
         const taskGens = Array.isArray(task?.generations) ? task.generations : [];
@@ -6973,7 +5779,6 @@ async function renderAnalyzeTable(force = false) {
         let draftId = item?.id || item?.generation_id || item?.draft_id;
         if (!draftId) continue;
         draftId = normalizeId(draftId);
-        touchDraftId(draftId);
 
         // Extract n_frames and fps from creation_config for duration
         const nFrames = item?.creation_config?.n_frames;
@@ -6990,7 +5795,6 @@ async function renderAnalyzeTable(force = false) {
 
         // Extract prompt from creation_config
         const taskIdForPrompt = item?.task_id;
-        if (taskIdForPrompt) touchTaskId(taskIdForPrompt);
         const prompt =
           (typeof item?.creation_config?.prompt === 'string' && item.creation_config.prompt) ||
           (typeof item?.prompt === 'string' && item.prompt) ||
@@ -7019,7 +5823,6 @@ async function renderAnalyzeTable(force = false) {
         // Check if this draft is a remix of another draft (only if not already mapped)
         if (!idToRemixTargetDraft.has(draftId)) {
           const taskId = item?.task_id;
-          if (taskId) touchTaskId(taskId);
           if (taskId && taskToSourceDraft.has(taskId)) {
             const sourceDraftId = taskToSourceDraft.get(taskId);
             idToRemixTargetDraft.set(draftId, sourceDraftId);
@@ -7062,14 +5865,11 @@ async function renderAnalyzeTable(force = false) {
         const userId = item?.user_id;
         const username = item?.username;
         if (!userId) continue;
-        touchCharacterId(userId);
         const isCharacter = typeof userId === 'string' && userId.startsWith('ch_');
 
         // Store username -> userId mapping
         if (username) {
-          const uname = username.toLowerCase();
-          usernameToUserId.set(uname, userId);
-          touchUsernameKey(uname);
+          usernameToUserId.set(username.toLowerCase(), userId);
         }
 
         // Store original index for date sorting (only if not already stored)
@@ -7673,164 +6473,32 @@ async function renderAnalyzeTable(force = false) {
   }
 
   // == Observers & Lifecycle ==
-  const RENDER_PASS_MIN_INTERVAL_MS = 120;
-  const CONTROLS_REFRESH_MIN_INTERVAL_MS = 300;
-  const DASHBOARD_REFRESH_MIN_INTERVAL_MS = 600;
-
-  let renderPassLastRunMs = 0;
-  let controlsLastRunMs = 0;
-  let dashboardLastRunMs = 0;
-  let renderPassTimer = null;
-  let renderPassRaf = null;
-  let renderPassScheduled = false;
-  let pendingRenderFlags = {
-    cards: false,
-    detail: false,
-    profile: false,
-    drafts: false,
-    characters: false,
-    filter: false,
-    controls: false,
-    dashboard: false,
-    force: false,
-  };
-
-  function mergeRenderFlags(next) {
-    const flags = next && typeof next === 'object' ? next : {};
-    for (const key of Object.keys(pendingRenderFlags)) {
-      if (flags[key]) pendingRenderFlags[key] = true;
-    }
-  }
-
-  function hasPendingRenderFlags() {
-    for (const v of Object.values(pendingRenderFlags)) {
-      if (v) return true;
-    }
-    return false;
-  }
-
-  function resetPendingRenderFlags() {
-    pendingRenderFlags = {
-      cards: false,
-      detail: false,
-      profile: false,
-      drafts: false,
-      characters: false,
-      filter: false,
-      controls: false,
-      dashboard: false,
-      force: false,
-    };
-  }
-
-  function scheduleRenderPass(flags = {}) {
-    mergeRenderFlags(flags);
-    if (renderPassScheduled) return;
-    renderPassScheduled = true;
-
-    const run = () => {
-      renderPassTimer = null;
-      renderPassRaf = null;
-      const now = Date.now();
-      const waitMs = RENDER_PASS_MIN_INTERVAL_MS - (now - renderPassLastRunMs);
-      if (waitMs > 0) {
-        renderPassTimer = setTimeout(run, waitMs);
-        return;
-      }
-
-      const nextFlags = { ...pendingRenderFlags };
-      resetPendingRenderFlags();
-      renderPassLastRunMs = Date.now();
-      renderPassScheduled = false;
-      runRenderPass(nextFlags);
-
-      if (hasPendingRenderFlags()) {
-        scheduleRenderPass();
-      }
-    };
-
-    renderPassRaf = requestAnimationFrame(run);
-  }
-
-  function runRenderPass(flags = null) {
+  function runRenderPass() {
     if (isDraftDetail()) return;
-    const now = Date.now();
-    const f = flags && typeof flags === 'object' ? flags : null;
-    const force = !f || !!f.force;
     const onExplore = isExplore();
     const onProfile = isProfile();
     const onPost = isPost();
     const onDrafts = isDrafts();
     const shouldRenderCards = onExplore || onProfile || onPost;
-    const cards =
-      shouldRenderCards && (force || f.cards || f.filter || f.detail || f.profile)
-        ? selectAllCards()
-        : null;
 
-    if (shouldRenderCards && (force || f.cards)) renderBadges(cards);
-    if (onPost && (force || f.detail || f.cards)) renderDetailBadge();
+    if (shouldRenderCards) renderBadges();
+    if (onPost) renderDetailBadge();
     else teardownDetailBadge();
-    if (onProfile && (force || f.profile || f.cards)) renderProfileImpact();
+    if (onProfile) renderProfileImpact();
     if (onDrafts) {
-      if (force || f.drafts || f.cards) {
-        const draftCards = selectAllDrafts();
-        renderBookmarkButtons(draftCards);
-        renderDraftButtons(draftCards);
-      }
+      renderBookmarkButtons();
+      renderDraftButtons();
     }
     // Character stats only matters on profile/characters views; it does its own internal gating.
-    if (location.pathname.includes('/profile') && (force || f.characters || f.cards || f.profile)) {
-      renderCharacterStats();
-    }
-    if (shouldRenderCards && (force || f.filter || f.cards)) applyFilter(cards);
-
-    // Keep the tab memory stable by unloading old/offscreen videos.
-    // Throttled internally; safe to call frequently.
-    try {
-      scheduleVideoPurge('render_pass');
-    } catch {}
-
-    if (force || f.controls || now - controlsLastRunMs >= CONTROLS_REFRESH_MIN_INTERVAL_MS) {
-      controlsLastRunMs = now;
-      updateControlsVisibility();
-      // Keep Explore feed selector pinned nicely without a second MutationObserver.
-      try {
-        if (onExplore && typeof window.updateFeedButtonPosition === 'function') window.updateFeedButtonPosition();
-      } catch {}
-    }
-    if (force || f.dashboard || now - dashboardLastRunMs >= DASHBOARD_REFRESH_MIN_INTERVAL_MS) {
-      dashboardLastRunMs = now;
-      scheduleInjectDashboardButton();
-    }
+    if (location.pathname.includes('/profile')) renderCharacterStats();
+    updateControlsVisibility();
+    scheduleInjectDashboardButton();
   }
 
-  const mo = new MutationObserver((records) => {
-    let hasDomChanges = false;
-    for (const r of records || []) {
-      if (!r || r.type !== 'childList') continue;
-      if ((r.addedNodes && r.addedNodes.length) || (r.removedNodes && r.removedNodes.length)) {
-        hasDomChanges = true;
-        break;
-      }
-    }
-    if (!hasDomChanges) return;
-    // Clean up tooltip state if its anchor was removed (avoid lingering tooltips without
-    // the previous per-pill MutationObservers).
-    try {
-      if (activeTooltipAnchorEl && !activeTooltipAnchorEl.isConnected) {
-        activeTooltipAnchorEl = null;
-        if (sharedTooltip) sharedTooltip.style.display = 'none';
-      }
-    } catch {}
-    scheduleRenderPass({
-      cards: true,
-      detail: isPost(),
-      profile: isProfile(),
-      drafts: isDrafts(),
-      characters: location.pathname.includes('/profile'),
-      filter: true,
-      controls: true,
-      dashboard: true,
+  const mo = new MutationObserver(() => {
+    if (mo._raf) cancelAnimationFrame(mo._raf);
+    mo._raf = requestAnimationFrame(() => {
+      runRenderPass();
     });
   });
 
@@ -7840,7 +6508,7 @@ async function renderAnalyzeTable(force = false) {
     if (observersActive) return;
     observersActive = true;
     mo.observe(document.documentElement, { childList: true, subtree: true });
-    scheduleRenderPass({ force: true, cards: true, detail: true, profile: true, drafts: true, characters: true, filter: true, controls: true, dashboard: true });
+    runRenderPass();
   }
 
   function stopObservers() {
@@ -7850,25 +6518,15 @@ async function renderAnalyzeTable(force = false) {
       mo.disconnect();
     } catch {}
     try {
-      stopVideoPurge();
+      if (mo._raf) cancelAnimationFrame(mo._raf);
     } catch {}
-    try {
-      if (renderPassRaf) cancelAnimationFrame(renderPassRaf);
-    } catch {}
-    renderPassRaf = null;
-    try {
-      if (renderPassTimer) clearTimeout(renderPassTimer);
-    } catch {}
-    renderPassTimer = null;
-    renderPassScheduled = false;
-    resetPendingRenderFlags();
+    mo._raf = null;
   }
 
   function resetFilterFreshSlate() {
     const newState = { filterIndex: 0, isGathering: false };
     setGatherState(newState);
     isGatheringActiveThisTab = false;
-    lastFilterPassSignature = '';
     const bar = controlBar || ensureControlBar();
     if (bar && typeof bar.updateFilterLabel === 'function') bar.updateFilterLabel();
     applyFilter();
@@ -7913,7 +6571,6 @@ async function renderAnalyzeTable(force = false) {
     s.isGathering = false;
     delete s.refreshDeadline;
     setGatherState(s);
-    lastFilterPassSignature = '';
     const bar = controlBar || ensureControlBar();
     if (bar && typeof bar.updateFilterLabel === 'function') bar.updateFilterLabel();
     applyFilter();
@@ -8090,8 +6747,6 @@ async function renderAnalyzeTable(force = false) {
         if (dashboardInjectRetryId) clearTimeout(dashboardInjectRetryId);
       } catch {}
       dashboardInjectRetryId = null;
-      // Release large in-page maps while on draft-detail routes.
-      clearAllInPageCaches();
       scheduleInjectDashboardButton();
       return;
     } else if (!observersActive) {
@@ -8105,7 +6760,6 @@ async function renderAnalyzeTable(force = false) {
       // Reset bookmarks filter on navigation
       bookmarksFilterState = 0;
       lastAppliedFilterState = -1;
-      lastFilterPassSignature = '';
       if (bookmarksBtn) {
         bookmarksBtn.setActive(false);
         bookmarksBtn.setLabel('All Drafts');
@@ -8133,28 +6787,25 @@ async function renderAnalyzeTable(force = false) {
       }
     }
 
-    scheduleRenderPass({
-      force: true,
-      cards: true,
-      detail: true,
-      profile: true,
-      drafts: true,
-      characters: true,
-      filter: true,
-      controls: true,
-      dashboard: true,
-    });
+    runRenderPass();
+
+    // SPA navigation can update the URL without a full re-render; always re-apply current filter.
+    applyFilter();
     
     // On post pages, retry rendering detail badge after a delay to allow DOM to settle
     if (isPost() && navigated) {
       setTimeout(() => {
         detailBadgeEl = null; // Force re-find
-        scheduleRenderPass({ detail: true, cards: true, filter: true });
+        renderDetailBadge();
       }, 100);
       setTimeout(() => {
         detailBadgeEl = null;
-        scheduleRenderPass({ detail: true, cards: true, filter: true });
+        renderDetailBadge();
       }, 300);
+      setTimeout(() => {
+        detailBadgeEl = null;
+        renderDetailBadge();
+      }, 600);
     }
   }
 
@@ -8201,7 +6852,6 @@ async function renderAnalyzeTable(force = false) {
     try {
       const data = JSON.parse(localStorage.getItem(TASK_TO_DRAFT_KEY) || '{}');
       for (const [taskId, sourceDraftId] of Object.entries(data)) {
-        touchTaskId(taskId);
         taskToSourceDraft.set(taskId, sourceDraftId);
       }
     } catch {
@@ -8209,7 +6859,6 @@ async function renderAnalyzeTable(force = false) {
     }
   }
   function saveTaskToSourceDraft(taskId, sourceDraftId) {
-    touchTaskId(taskId);
     taskToSourceDraft.set(taskId, sourceDraftId);
     try {
       const data = JSON.parse(localStorage.getItem(TASK_TO_DRAFT_KEY) || '{}');
@@ -8391,153 +7040,14 @@ async function renderAnalyzeTable(force = false) {
     document.head.appendChild(st);
   }
 
-  function collectLocalMemoryStats() {
-    const stats = {
-      caps: {
-        POST_ENTITY_CACHE_MAX,
-        DRAFT_ENTITY_CACHE_MAX,
-        TASK_CACHE_MAX,
-        CHARACTER_CACHE_MAX,
-        USERNAME_CACHE_MAX,
-        POST_DETAIL_TRACK_MAX,
-      },
-      lru: {
-        postEntityLru: postEntityLru.size,
-        draftEntityLru: draftEntityLru.size,
-        taskLru: taskLru.size,
-        characterLru: characterLru.size,
-        usernameLru: usernameLru.size,
-      },
-      maps: {
-        idToUnique: idToUnique.size,
-        idToLikes: idToLikes.size,
-        idToViews: idToViews.size,
-        idToComments: idToComments.size,
-        idToRemixes: idToRemixes.size,
-        idToCameos: idToCameos.size,
-        idToMeta: idToMeta.size,
-        idToDuration: idToDuration.size,
-        idToDimensions: idToDimensions.size,
-        idToPrompt: idToPrompt.size,
-        idToDownloadUrl: idToDownloadUrl.size,
-        idToViolation: idToViolation.size,
-        idToRemixTarget: idToRemixTarget.size,
-        idToRemixTargetDraft: idToRemixTargetDraft.size,
-        taskToSourceDraft: taskToSourceDraft.size,
-        taskToPrompt: taskToPrompt.size,
-        charToCameoCount: charToCameoCount.size,
-        charToLikesCount: charToLikesCount.size,
-        charToCanCameo: charToCanCameo.size,
-        charToCreatedAt: charToCreatedAt.size,
-        usernameToUserId: usernameToUserId.size,
-        charToOriginalIndex: charToOriginalIndex.size,
-      },
-      sets: {
-        lockedPostIds: lockedPostIds.size,
-        processedPostDetailIds: processedPostDetailIds.size,
-        pendingPostDetailIds: pendingPostDetailIds.size,
-      },
-	      video: {
-	        enabled: VIDEO_PURGE_ENABLED,
-	        mode: isGatheringActiveThisTab ? 'gather' : 'normal',
-	        maxLoaded:
-	          (videoPurgeLastResult && typeof videoPurgeLastResult.maxLoaded === 'number' ? videoPurgeLastResult.maxLoaded : null) ||
-	          (isGatheringActiveThisTab ? VIDEO_MAX_LOADED_GATHER : VIDEO_MAX_LOADED_NORMAL),
-	        lastRunAt: videoPurgeLastRunMs || 0,
-	        last: videoPurgeLastResult,
-	        unloadedTotal: videoUnloadedTotal,
-	        restoredTotal: videoRestoredTotal,
-	        blobRevokedTotal: videoBlobRevokeTotal,
-	      },
-	      route: routeKey(),
-	      sampledAt: Date.now(),
-	    };
-	    // These counts are only used for diagnostics (manual console checks).
-	    try {
-	      const vids = Array.from(document.querySelectorAll('video'));
-	      let loadedDom = 0;
-	      let unloadedFlag = 0;
-	      let blobLoaded = 0;
-	      for (const v of vids) {
-	        if (!v || !v.isConnected) continue;
-	        if (videoHasSources(v)) {
-	          loadedDom += 1;
-	          try {
-	            const u = (typeof v.currentSrc === 'string' && v.currentSrc) || (v.getAttribute && v.getAttribute('src')) || '';
-	            if (isBlobUrl(u)) blobLoaded += 1;
-	          } catch {}
-	        }
-	        const m = videoMeta.get(v);
-	        if (m && m.unloaded) unloadedFlag += 1;
-	      }
-	      stats.video.domTotal = vids.length;
-	      stats.video.domLoaded = loadedDom;
-	      stats.video.domUnloadedFlag = unloadedFlag;
-	      stats.video.domBlobLoaded = blobLoaded;
-	    } catch {}
-	    try {
-	      const mem = performance?.memory;
-	      if (mem) {
-	        stats.heap = {
-          usedJSHeapSize: mem.usedJSHeapSize,
-          totalJSHeapSize: mem.totalJSHeapSize,
-          jsHeapSizeLimit: mem.jsHeapSizeLimit,
-        };
-      }
-    } catch {}
-    return stats;
-  }
-
-  function requestMetricsStatsFromContent(timeoutMs = 1800) {
-    return new Promise((resolve) => {
-      const req = `stats_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-      let done = false;
-      const finish = (val) => {
-        if (done) return;
-        done = true;
-        try {
-          window.removeEventListener('message', onReply);
-        } catch {}
-        resolve(val || null);
-      };
-      const onReply = (ev) => {
-        const d = ev?.data;
-        if (!d || d.__sora_uv__ !== true || d.type !== 'metrics_response' || d.req !== req) return;
-        finish(d?.metrics?.stats || null);
-      };
-      window.addEventListener('message', onReply);
-      window.postMessage(
-        {
-          __sora_uv__: true,
-          type: 'metrics_request',
-          req,
-          scope: 'stats',
-        },
-        '*'
-      );
-      setTimeout(() => finish(null), timeoutMs);
-    });
-  }
-
-  async function getSoraUvStats() {
-    const local = collectLocalMemoryStats();
-    const persisted = await requestMetricsStatsFromContent().catch(() => null);
-    return {
-      local,
-      persisted,
-      sampledAt: Date.now(),
-    };
-  }
-
-	  function init() {
-	    dlog('feed', 'init');
-	    ensureToastStyles();
-	    installVideoVisibilityPurge();
-	    if (isDraftDetail()) {
-	      dlog('feed', 'draft detail route detected; injecting dashboard only');
-	      scheduleInjectDashboardButton();
-	      return;
-	    }
+  function init() {
+    dlog('feed', 'init');
+    ensureToastStyles();
+    if (isDraftDetail()) {
+      dlog('feed', 'draft detail route detected; injecting dashboard only');
+      scheduleInjectDashboardButton();
+      return;
+    }
     // Allow auto-starting Gather on Top feed or Profile via URL param.
     let shouldAutoGather = false;
     try {
@@ -8589,26 +7099,6 @@ async function renderAnalyzeTable(force = false) {
       }, 200);
     }
   }
-
-  // Console diagnostics:
-  //   await __soraUvStats()
-  //   await __soraUvStatsPrint()
-  //   __soraUvVideoPurgeNow('manual')
-  //   __soraUvUnloadAllVideos('manual')
-  window.__soraUvStats = () => getSoraUvStats();
-  window.__soraUvVideoPurgeNow = (reason = 'manual') => {
-    try { runVideoPurge(String(reason || 'manual')); } catch {}
-  };
-  window.__soraUvUnloadAllVideos = (reason = 'manual') => {
-    try { unloadAllVideosNow(String(reason || 'manual')); } catch {}
-  };
-  window.__soraUvStatsPrint = async () => {
-    const stats = await getSoraUvStats();
-    try {
-      console.log('[SoraUV] stats', stats);
-    } catch {}
-    return stats;
-  };
 
   // Debug helper - only available when DEBUG.drafts is enabled
   if (DEBUG.drafts) {

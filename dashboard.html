@@ -11,7 +11,6 @@
   <header class="topbar">
     <div class="brand">Sora Creator Tools – Dashboard <span id="dashboardModeTap">Mode</span></div>
     <div class="actions">
-      <button id="mobileSidebarToggle" class="mobile-only" type="button" aria-controls="sidebarPanel" aria-expanded="false">Filters</button>
       <button id="themeToggle" type="button" aria-controls="themePicker" aria-expanded="false">Theme<span class="theme-notif-dot" aria-hidden="true"></span></button>
       <div id="themePicker" class="theme-picker is-hidden" role="group" aria-label="Theme color" aria-hidden="true">
         <div class="theme-row" role="presentation">
@@ -63,11 +62,7 @@
   </header>
 
   <main class="layout">
-    <aside class="sidebar" id="sidebarPanel">
-      <div class="sidebar-mobile-header">
-        <div class="sidebar-mobile-title">Filters</div>
-        <button id="mobileSidebarClose" class="sidebar-mobile-close" type="button" aria-label="Close filters">Close</button>
-      </div>
+    <aside class="sidebar">
       <div class="sidebar-scroll">
         <h3>Select Profile</h3>
         <div class="user-select-bar">
@@ -598,8 +593,6 @@
       </div>
     </div>
   </div>
-
-  <div id="sidebarBackdrop" class="sidebar-backdrop" aria-hidden="true"></div>
 
   <script src="dashboard.js"></script>
 </body>

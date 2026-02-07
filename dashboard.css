@@ -171,7 +171,6 @@ html.is-booting .layout{
 }
 .sct-toast.show{opacity:1;transform:translateY(0)}
 .actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;overflow:visible}
-.mobile-only{display:none}
 button,input[type=search],select,.action-link{font-family:inherit}
 input[type=search], select, button, .action-link{
   background:var(--surface);
@@ -304,7 +303,7 @@ button:focus-visible{
 }
 .user-picker{position:relative}
 .suggestions{
-  position:absolute;top:calc(100% + 6px);left:0;right:0;
+  position:absolute;top:36px;left:0;right:0;
   background:linear-gradient(150deg, rgba(var(--surface-rgb),0.96), rgba(var(--bg-alt-rgb),0.95));
   border:1px solid var(--border-subtle);
   border-radius:12px;
@@ -357,45 +356,6 @@ button:focus-visible{
   overflow:visible;
   background-clip:padding-box;
 }
-.sidebar-mobile-header{
-  display:none;
-  align-items:center;
-  justify-content:space-between;
-  gap:10px;
-  padding:12px 12px;
-  border-bottom:1px solid var(--border-subtle);
-  background:
-    linear-gradient(160deg, var(--accent-tint), transparent 65%),
-    linear-gradient(135deg, rgba(var(--surface-strong-rgb),0.96), rgba(var(--bg-alt-rgb),0.98));
-}
-.sidebar-mobile-title{
-  font-family:var(--font-system);
-  font-weight:900;
-  letter-spacing:0.02em;
-}
-.sidebar-mobile-close{
-  padding:8px 12px;
-  border-radius:999px;
-  background:rgba(var(--panel-mid-rgb),0.65);
-}
-.sidebar-backdrop{
-  position:fixed;
-  inset:0;
-  background:rgba(var(--bg-ultra-rgb),0.74);
-  opacity:0;
-  pointer-events:none;
-  transition:opacity 180ms ease;
-}
-#mobileSidebarToggle{
-  background:rgba(var(--accent-rgb),0.28);
-  border-color:rgba(var(--accent-rgb),0.55);
-  color:#dff1ff;
-}
-body.is-sidebar-open #mobileSidebarToggle{
-  background:rgba(var(--accent-rgb),0.42);
-  border-color:rgba(var(--accent-rgb),0.85);
-}
-html.is-sidebar-open{overflow:hidden}
 body.is-purging .sidebar{
   visibility:hidden;
   pointer-events:none;
@@ -1830,99 +1790,10 @@ body.is-resizing{cursor:col-resize;user-select:none}
 .compare-add-btn:disabled{opacity:0.4;cursor:not-allowed}
 
 @media (max-width: 900px){
-  html,body{height:auto}
-  html,body{font-size:14px}
-  body{
-    overflow:auto;
-    overflow-x:hidden;
-    min-height:100dvh;
-  }
-  body.is-sidebar-open{
-    overflow:hidden;
-    overscroll-behavior:none;
-  }
-
-  .mobile-only{display:inline-flex}
-
-  .layout{
-    display:block;
-    height:auto;
-    padding:10px;
-  }
-
-  .content{
-    overflow:visible;
-    padding:16px 16px 18px;
-    border-radius:14px;
-  }
-
-  .sidebar{
-    position:fixed;
-    top:0;
-    left:0;
-    bottom:0;
-    width:min(420px, 92vw);
-    max-width:92vw;
-    min-width:0;
-    max-height:100dvh;
-    border-radius:0 18px 18px 0;
-    transform:translateX(-105%);
-    transition:transform 200ms ease;
-    z-index:2147483001;
-    pointer-events:none;
-    box-shadow:0 20px 60px rgba(0,0,0,0.6);
-    will-change:transform;
-  }
-  body.is-sidebar-open .sidebar{
-    transform:translateX(0);
-    pointer-events:auto;
-  }
-  .sidebar-mobile-header{display:flex}
-  .sidebar-scroll{
-    padding:14px 12px 16px;
-    -webkit-overflow-scrolling:touch;
-  }
+  .layout{grid-template-columns:1fr;padding:10px;row-gap:12px}
+  .sidebar{order:2;max-width:none;border-radius:14px}
+  .content{padding:16px 18px 20px;border-radius:14px}
   .sidebar-resizer{display:none}
-
-  .sidebar-backdrop{z-index:2147483000}
-  body.is-sidebar-open .sidebar-backdrop{
-    opacity:1;
-    pointer-events:auto;
-  }
-
-  input[type=search], select{font-size:16px}
-
-  .actions{gap:10px}
-  .actions button:not(.theme-swatch), .actions .action-link{padding:10px 14px;font-size:14px}
-
-  .list-actions{
-    flex-wrap:nowrap;
-    overflow-x:auto;
-    -webkit-overflow-scrolling:touch;
-    scrollbar-width:none;
-    padding-bottom:4px;
-    scroll-snap-type:x proximity;
-  }
-  .list-actions::-webkit-scrollbar{display:none}
-  .list-actions button{
-    padding:10px 14px;
-    scroll-snap-align:start;
-  }
-  .toggle-group{gap:8px}
-  .toggle-group--lg .toggle-pill{padding:10px 14px;font-size:14px}
-  .toggle-group--sm .toggle-pill{padding:8px 12px;font-size:13px}
-}
-
-@media (hover: none) and (pointer: coarse){
-  button:hover,.action-link:hover{transform:none}
-  .post .post-purge-btn{
-    opacity:1;
-    visibility:visible;
-    width:26px;
-    height:26px;
-    font-size:14px;
-  }
-  .post:hover .post-purge-btn{transform:none}
 }
 
 /* Purge Modal Styles */
