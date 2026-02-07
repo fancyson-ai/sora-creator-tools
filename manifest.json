@@ -32,7 +32,10 @@
   "permissions": ["storage", "unlimitedStorage"],
   "browser_specific_settings": {
     "gecko": {
-      "id": "sora-creator-tools@fancyson.ai"
+      "id": "sora-creator-tools@fancyson.ai",
+      "data_collection_permissions": {
+        "required": ["none"]
+      }
     }
   },
   "background": {
