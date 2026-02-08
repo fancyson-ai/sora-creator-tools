@@ -2908,32 +2908,24 @@
     }
     // 'all' shows everything
 
-    // Apply sort
+    // Apply sort — purely by api_order (position in paginated API results).
+    // "Newest" = API order (ascending api_order), "Oldest" = reverse.
     if (!skipSort) {
       const withOrder = filtered.map((draft, order) => ({ draft, order }));
       withOrder.sort((a, b) => {
-        const aApiOrder = getDraftNoDateOrderValue(a.draft);
-        const bApiOrder = getDraftNoDateOrderValue(b.draft);
-        const aMissingApiOrder = aApiOrder == null;
-        const bMissingApiOrder = bApiOrder == null;
+        const aOrd = Number(a.draft?.api_order);
+        const bOrd = Number(b.draft?.api_order);
+        const aHas = Number.isFinite(aOrd) && aOrd >= 0;
+        const bHas = Number.isFinite(bOrd) && bOrd >= 0;
 
-        if (aMissingApiOrder || bMissingApiOrder) {
-          if (aMissingApiOrder && bMissingApiOrder) {
-            if (uvDraftsSortState === 'oldest') {
-              return b.order - a.order;
-            }
-            return a.order - b.order;
-          }
-          if (uvDraftsSortState === 'oldest') {
-            return aMissingApiOrder ? -1 : 1;
-          }
-          return aMissingApiOrder ? 1 : -1;
-        }
+        if (!aHas && !bHas) return a.order - b.order;
+        if (!aHas) return 1;
+        if (!bHas) return -1;
 
         if (uvDraftsSortState === 'oldest') {
-          return (aApiOrder - bApiOrder) || (a.order - b.order);
+          return (bOrd - aOrd) || (b.order - a.order);
         }
-        return (bApiOrder - aApiOrder) || (a.order - b.order);
+        return (aOrd - bOrd) || (a.order - b.order);
       });
       filtered = withOrder.map((entry) => entry.draft);
     }
