@@ -18,7 +18,6 @@
     const COMPOSER_MODELS = [
       { value: 'sora2', label: 'Sora 2' },
       { value: 'sora2pro', label: 'Sora 2 Pro' },
-      { value: 'sy_8_20251208', label: 'Sora 🦷' },
     ];
     const COMPOSER_MODEL_VALUES = new Set(COMPOSER_MODELS.map((item) => item.value));
 

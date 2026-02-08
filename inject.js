@@ -99,7 +99,7 @@
 
   // == UV Drafts Page Constants ==
   let capturedAuthToken = null; // Captured from intercepted fetch requests
-  let modelOverride = null; // Custom model override for create requests (e.g., 'sy_8_20251208' for Sora Tooth)
+  let modelOverride = null; // Custom model override for create requests
   let uvDraftsPage = null;
   const UV_DRAFTS_DOC_TITLE = 'My Drafts - Sora';
   let uvDraftsPrevDocTitle = null;
@@ -6674,129 +6674,19 @@ async function renderAnalyzeTable(force = false) {
 
   let observersActive = false;
 
-  // == Model Selector Injection (Sora Tooth) ==
-  function startModelSelectorObserver() {
-    const SORA_TOOTH_LABEL = 'Sora 🦷';
-    const SORA_TOOTH_MODEL = 'sy_8_20251208';
-
-    const injectSoraToothOption = (menuContent) => {
-      // Check if already injected
-      if (menuContent.querySelector('[data-sora-tooth]')) return;
-
-      // Find the menu group containing Sora 2 / Sora 2 Pro options
-      const menuGroup = menuContent.querySelector('[role="group"]');
-      if (!menuGroup) return;
-
-      // Find existing menu items to clone structure
-      const existingItems = menuGroup.querySelectorAll('[role="menuitemradio"]');
-      if (existingItems.length === 0) return;
-
-      // Clone the first item as a template (prefer unchecked one if available)
-      let template = existingItems[0];
-      for (const item of existingItems) {
-        if (item.getAttribute('data-state') === 'unchecked') {
-          template = item;
-          break;
-        }
-      }
-      const newItem = template.cloneNode(true);
-      newItem.setAttribute('data-sora-tooth', 'true');
-
-      // Always start unchecked unless our override is active
-      const isChecked = getActiveModelOverride() === SORA_TOOTH_MODEL;
-      newItem.setAttribute('aria-checked', isChecked ? 'true' : 'false');
-      newItem.setAttribute('data-state', isChecked ? 'checked' : 'unchecked');
-
-      // Ensure the checkmark SVG has correct opacity (it's in the shrink-0 container, not the first svg)
-      const checkContainer = newItem.querySelector('.shrink-0 svg, div:last-child svg');
-      if (checkContainer) {
-        checkContainer.style.setProperty('opacity', isChecked ? '1' : '0', 'important');
-      }
-
-      // Update the label
-      const labelSpan = newItem.querySelector('span.truncate');
-      if (labelSpan) labelSpan.textContent = SORA_TOOTH_LABEL;
-
-      // Add hover state handling (the original uses focus: but we need hover too)
-      newItem.addEventListener('mouseenter', () => {
-        newItem.style.backgroundColor = 'var(--token-bg-light, rgba(255,255,255,0.1))';
-      });
-      newItem.addEventListener('mouseleave', () => {
-        newItem.style.backgroundColor = '';
-      });
-
-      // Handle click
-      newItem.addEventListener('click', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-
-        // Set our model override
-        setCurrentModelOverride(SORA_TOOTH_MODEL);
-
-        // Update all items' checked state and SVG opacity
-        menuGroup.querySelectorAll('[role="menuitemradio"]').forEach((item) => {
-          const isTooth = item.hasAttribute('data-sora-tooth');
-          item.setAttribute('aria-checked', isTooth ? 'true' : 'false');
-          item.setAttribute('data-state', isTooth ? 'checked' : 'unchecked');
-          // Target the checkmark SVG (in shrink-0 container), not the icon SVG
-          const checkSvg = item.querySelector('.shrink-0 svg, div:last-child svg');
-          if (checkSvg) checkSvg.style.setProperty('opacity', isTooth ? '1' : '0', 'important');
-        });
-
-        // Update the trigger button display to show selected model
-        const trigger = document.querySelector('[role="menuitem"][aria-haspopup="menu"][data-state="open"]');
-        if (trigger) {
-          const modelDisplay = trigger.querySelector('.text-token-text-tertiary');
-          if (modelDisplay) {
-            modelDisplay.textContent = SORA_TOOTH_LABEL;
-          }
-        }
-
-        // Close the dropdown by clicking outside or pressing escape
-        setTimeout(() => {
-          document.body.click();
-        }, 50);
-      });
-
-      // Also handle clicks on other items to clear our override (use flag to prevent duplicate handlers)
-      existingItems.forEach((item) => {
-        if (!item.hasAttribute('data-tooth-listener')) {
-          item.setAttribute('data-tooth-listener', 'true');
-          item.addEventListener('click', () => {
-            setCurrentModelOverride(null);
-            const toothItem = menuGroup.querySelector('[data-sora-tooth]');
-            if (toothItem) {
-              toothItem.setAttribute('aria-checked', 'false');
-              toothItem.setAttribute('data-state', 'unchecked');
-              const checkSvg = toothItem.querySelector('.shrink-0 svg, div:last-child svg');
-              if (checkSvg) checkSvg.style.setProperty('opacity', '0', 'important');
-            }
-          }, { capture: true });
-        }
-      });
-
-      // Insert at the end of the group
-      menuGroup.appendChild(newItem);
-    };
-
-    // Observer for when model dropdown appears
-    const modelMenuObserver = new MutationObserver((mutations) => {
+  // == Duration Selector Unlocker ==
+  function startMenuObserver() {
+    // Observer for when dropdown menus appear
+    const menuObserver = new MutationObserver((mutations) => {
       for (const mutation of mutations) {
         for (const node of mutation.addedNodes) {
           if (!(node instanceof HTMLElement)) continue;
 
-          // Look for the radix dropdown menu content
           const menuContent = node.matches?.('[data-radix-menu-content]')
             ? node
             : node.querySelector?.('[data-radix-menu-content]');
 
           if (menuContent) {
-            // Check if this is the model selector (contains Sora 2 options)
-            const hasSoraOptions = menuContent.textContent?.includes('Sora 2');
-            if (hasSoraOptions) {
-              injectSoraToothOption(menuContent);
-            }
-
             // Check if this is the duration selector (contains "seconds" options) and enable disabled items
             const hasDurationOptions = menuContent.textContent?.includes('seconds');
             if (hasDurationOptions) {
@@ -6810,7 +6700,7 @@ async function renderAnalyzeTable(force = false) {
       }
     });
 
-    modelMenuObserver.observe(document.body, { childList: true, subtree: true });
+    menuObserver.observe(document.body, { childList: true, subtree: true });
   }
 
   function startObservers() {
@@ -7493,7 +7383,7 @@ async function renderAnalyzeTable(force = false) {
     loadTaskToSourceDraft(); // Load task->draft mappings from localStorage
     installFetchSniffer();
     startObservers();
-    startModelSelectorObserver(); // Inject Sora Tooth option into model dropdown
+    startMenuObserver();
     onRouteChange();
     window.addEventListener('storage', handleStorageChange);
     startScheduledPostsTimer(); // Start background timer for scheduled posts
