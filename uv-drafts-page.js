@@ -3090,7 +3090,8 @@
     if (uvDraftsFilterState === 'bookmarked') {
       filtered = filtered.filter(d => {
         const isNew = d?.is_unsynced !== true && isDraftUnreadState(d) && !uvDraftsJustSeenIds.has(d.id);
-        return bookmarks.has(d.id) || isNew;
+        const justSeen = d?.is_unsynced !== true && uvDraftsJustSeenIds.has(d.id);
+        return bookmarks.has(d.id) || isNew || justSeen;
       });
     } else if (uvDraftsFilterState === 'hidden') {
       filtered = filtered.filter(d => d?.is_unsynced !== true && d.hidden);
