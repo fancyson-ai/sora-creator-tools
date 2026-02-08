@@ -944,6 +944,7 @@
   let uvDraftsComposerEl = null;
   let uvDraftsComposerSource = null;
   let uvDraftsComposerState = null;
+  let uvDraftsComposerFirstFrame = null; // { object_url, fileName } or null
   let uvDraftsSyncButtonEl = null;
   let uvDraftsMarkAllButtonEl = null;
   let uvDraftsMarkAllStatusEl = null;
@@ -2352,7 +2353,7 @@
     if (statusEl) {
       statusEl.textContent = nextSource
         ? 'Source ready. Use Remix or Extend.'
-        : 'No source selected. Use Create, or drop a source for Remix/Extend.';
+        : 'No source selected. Use Create, or drop a draft card for Remix/Extend.';
       statusEl.dataset.tone = nextSource ? 'ok' : '';
     }
   }
@@ -2402,6 +2403,7 @@
       style: style || null,
       seed: seed || null,
       mode,
+      firstFrameImage: uvDraftsComposerFirstFrame?.object_url || null,
     };
     savePendingCreateOverrides(createOverrides);
     if (state.model) modelOverride = normalizeComposerModel(state.model) || modelOverride;
@@ -2486,6 +2488,10 @@
   }
 
   function buildUVDraftsComposer() {
+    if (uvDraftsComposerFirstFrame?.object_url) {
+      try { URL.revokeObjectURL(uvDraftsComposerFirstFrame.object_url); } catch {}
+      uvDraftsComposerFirstFrame = null;
+    }
     loadUVDraftsComposerState();
     const modelOptionsHtml = COMPOSER_MODELS
       .map((model) => `<option value="${model.value}">${model.label}</option>`)
@@ -2495,10 +2501,12 @@
     composer.innerHTML = `
       <div class="uvd-composer-head">
         <h2>Compose</h2>
-        <p>Create from prompt, or drop a draft card, video URL, or local file to remix or extend.</p>
+        <p>Create from prompt, or drop a draft card to remix or extend.</p>
       </div>
       <div class="uvd-dropzone" data-uvd-dropzone="1">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:.45"><rect x="2" y="2" width="20" height="20" rx="2"/><polygon points="10,8 16,12 10,16"/></svg>
         <strong>Drop Source Video</strong>
+        <span>Drag a draft card here to remix or extend</span>
       </div>
       <div class="uvd-compose-source-card" data-uvd-compose-source-panel="1" hidden>
         <div class="uvd-compose-source-preview" data-uvd-compose-source-preview="1"></div>
@@ -2509,6 +2517,19 @@
         <button type="button" class="uvd-compose-source-clear" data-uvd-compose-source-clear="1">Remove</button>
       </div>
       <div class="uvd-compose-source-empty" data-uvd-compose-source-empty="1">No source selected.</div>
+      <div class="uvd-firstframe-zone" data-uvd-firstframe-zone="1">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:.45"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
+        <strong>First Frame Image</strong>
+        <span>Click to browse or drop an image</span>
+        <input type="file" accept="image/*" data-uvd-firstframe-input="1" hidden />
+      </div>
+      <div class="uvd-firstframe-preview" data-uvd-firstframe-preview="1" hidden>
+        <img data-uvd-firstframe-img="1" alt="First frame" />
+        <div class="uvd-firstframe-meta">
+          <div class="uvd-firstframe-name" data-uvd-firstframe-name="1"></div>
+          <button type="button" class="uvd-firstframe-clear" data-uvd-firstframe-clear="1">Remove</button>
+        </div>
+      </div>
       <label class="uvd-field">
         <span>Prompt</span>
         <textarea data-uvd-compose-prompt="1" placeholder="Describe your video..."></textarea>
@@ -2689,7 +2710,63 @@
       if (source) {
         setComposerSource(source, statusEl);
       } else if (statusEl) {
-        statusEl.textContent = 'Unsupported drop content. Drop a draft card, URL, or video file.';
+        statusEl.textContent = 'Unsupported drop content. Drop a draft card to use as source.';
+        statusEl.dataset.tone = 'error';
+      }
+    });
+
+    // -- First Frame Image picker --
+    const firstFrameZone = composer.querySelector('[data-uvd-firstframe-zone="1"]');
+    const firstFrameInput = composer.querySelector('[data-uvd-firstframe-input="1"]');
+    const firstFramePreview = composer.querySelector('[data-uvd-firstframe-preview="1"]');
+    const firstFrameImg = composer.querySelector('[data-uvd-firstframe-img="1"]');
+    const firstFrameName = composer.querySelector('[data-uvd-firstframe-name="1"]');
+    const firstFrameClear = composer.querySelector('[data-uvd-firstframe-clear="1"]');
+
+    const setFirstFrame = (file) => {
+      if (uvDraftsComposerFirstFrame?.object_url) {
+        try { URL.revokeObjectURL(uvDraftsComposerFirstFrame.object_url); } catch {}
+      }
+      if (!file) {
+        uvDraftsComposerFirstFrame = null;
+        if (firstFramePreview) firstFramePreview.hidden = true;
+        if (firstFrameZone) firstFrameZone.style.display = '';
+        return;
+      }
+      const objectUrl = URL.createObjectURL(file);
+      uvDraftsComposerFirstFrame = { object_url: objectUrl, fileName: file.name };
+      if (firstFrameImg) firstFrameImg.src = objectUrl;
+      if (firstFrameName) firstFrameName.textContent = file.name;
+      if (firstFramePreview) firstFramePreview.hidden = false;
+      if (firstFrameZone) firstFrameZone.style.display = 'none';
+    };
+
+    firstFrameZone?.addEventListener('click', () => {
+      firstFrameInput?.click();
+    });
+    firstFrameInput?.addEventListener('change', () => {
+      const file = firstFrameInput.files?.[0];
+      if (file && file.type.startsWith('image/')) setFirstFrame(file);
+      firstFrameInput.value = '';
+    });
+    firstFrameClear?.addEventListener('click', () => setFirstFrame(null));
+
+    // First frame drop support
+    firstFrameZone?.addEventListener('dragenter', (e) => { e.preventDefault(); firstFrameZone.classList.add('is-active'); });
+    firstFrameZone?.addEventListener('dragover', (e) => { e.preventDefault(); firstFrameZone.classList.add('is-active'); });
+    firstFrameZone?.addEventListener('dragleave', (e) => {
+      e.preventDefault();
+      if (e.relatedTarget && firstFrameZone.contains(e.relatedTarget)) return;
+      firstFrameZone.classList.remove('is-active');
+    });
+    firstFrameZone?.addEventListener('drop', (e) => {
+      e.preventDefault();
+      firstFrameZone.classList.remove('is-active');
+      const file = e.dataTransfer?.files?.[0];
+      if (file && file.type.startsWith('image/')) {
+        setFirstFrame(file);
+      } else if (statusEl) {
+        statusEl.textContent = 'Drop an image file for the first frame.';
         statusEl.dataset.tone = 'error';
       }
     });
@@ -4312,11 +4389,23 @@
       .uvd-composer { position: fixed; left: 0; top: 0; bottom: 0; width: 390px; box-sizing: border-box; padding: 22px 18px 24px; overflow: auto; border-right: 1px solid var(--uvd-border); background: var(--token-bg-primary, #0a0e18); z-index: 2; }
       .uvd-composer-head h2 { margin: 0; font-size: 52px; line-height: .92; letter-spacing: -0.03em; color: var(--uvd-text); font-weight: 700; }
       .uvd-composer-head p { margin: 10px 0 0; color: var(--uvd-subtext); font-size: 16px; line-height: 1.35; }
-      .uvd-dropzone { margin-top: 14px; border: 1px dashed var(--uvd-border-strong); border-radius: 12px; padding: 12px; background: var(--uvd-surface); display:flex; flex-direction:column; gap:5px; transition: background .15s ease, border-color .15s ease; }
+      .uvd-dropzone { margin-top: 14px; border: 2px dashed var(--uvd-border-strong); border-radius: 12px; padding: 20px 14px; background: transparent; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:6px; text-align:center; transition: background .15s ease, border-color .15s ease; cursor: default; }
       .uvd-composer.is-source-ready .uvd-dropzone { display: none !important; }
-      .uvd-dropzone strong { font-size: 16px; }
+      .uvd-dropzone strong { font-size: 15px; color: var(--uvd-text); }
       .uvd-dropzone span { font-size: 12px; color: var(--uvd-subtext); line-height: 1.4; }
       .uvd-dropzone.is-active { background: var(--uvd-surface-hover); border-color: rgba(255,255,255,0.45); }
+      .uvd-firstframe-zone { margin-top: 10px; border: 2px dashed var(--uvd-border-strong); border-radius: 12px; padding: 16px 14px; background: transparent; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:5px; text-align:center; cursor:pointer; transition: background .15s ease, border-color .15s ease; }
+      .uvd-firstframe-zone:hover { background: var(--uvd-surface-hover); border-color: rgba(255,255,255,0.35); }
+      .uvd-firstframe-zone.is-active { background: var(--uvd-surface-hover); border-color: rgba(255,255,255,0.45); }
+      .uvd-firstframe-zone strong { font-size: 14px; color: var(--uvd-text); pointer-events: none; }
+      .uvd-firstframe-zone span { font-size: 12px; color: var(--uvd-subtext); line-height: 1.4; pointer-events: none; }
+      .uvd-firstframe-zone svg { pointer-events: none; }
+      .uvd-firstframe-preview { margin-top: 10px; border: 1px solid var(--uvd-border); border-radius: 12px; background: var(--uvd-surface); display: flex; align-items: center; gap: 10px; padding: 8px; }
+      .uvd-firstframe-preview img { width: 56px; height: 56px; object-fit: cover; border-radius: 8px; border: 1px solid var(--uvd-border); background: #121722; display: block; }
+      .uvd-firstframe-meta { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 4px; }
+      .uvd-firstframe-name { font-size: 13px; color: var(--uvd-text); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .uvd-firstframe-clear { align-self: flex-start; border: 1px solid var(--uvd-border); background: transparent; color: var(--uvd-text); border-radius: 8px; min-height: 26px; padding: 0 8px; font-size: 11px; font-weight: 600; cursor: pointer; }
+      .uvd-firstframe-clear:hover { background: var(--uvd-surface-hover); border-color: var(--uvd-border-strong); }
       .uvd-compose-source-card { margin-top: 10px; border: 1px solid var(--uvd-border); border-radius: 12px; background: var(--uvd-surface); display: none !important; grid-template-columns: 72px minmax(0, 1fr); gap: 8px; padding: 8px; align-items: center; }
       .uvd-composer.is-source-ready .uvd-compose-source-card { display: grid !important; }
       .uvd-compose-source-preview { width: 72px; height: 96px; border-radius: 8px; overflow: hidden; background: #121722; border: 1px solid var(--uvd-border); }
@@ -4703,6 +4792,10 @@
     if (uvDraftsComposerEl) {
       const statusEl = uvDraftsComposerEl.querySelector('[data-uvd-compose-status="1"]');
       setComposerSource(null, statusEl);
+    }
+    if (uvDraftsComposerFirstFrame?.object_url) {
+      try { URL.revokeObjectURL(uvDraftsComposerFirstFrame.object_url); } catch {}
+      uvDraftsComposerFirstFrame = null;
     }
     if (uvDraftsPageEl) {
       uvDraftsPageEl.style.display = 'none';
