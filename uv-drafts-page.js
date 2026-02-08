@@ -2523,7 +2523,7 @@
         <span>Click to browse or drop an image</span>
         <input type="file" accept="image/*" data-uvd-firstframe-input="1" hidden />
       </div>
-      <div class="uvd-firstframe-preview" data-uvd-firstframe-preview="1" hidden>
+      <div class="uvd-firstframe-preview" data-uvd-firstframe-preview="1">
         <img data-uvd-firstframe-img="1" alt="First frame" />
         <div class="uvd-firstframe-meta">
           <div class="uvd-firstframe-name" data-uvd-firstframe-name="1"></div>
@@ -2729,7 +2729,7 @@
       }
       if (!file) {
         uvDraftsComposerFirstFrame = null;
-        if (firstFramePreview) firstFramePreview.hidden = true;
+        if (firstFramePreview) firstFramePreview.classList.remove('is-visible');
         if (firstFrameZone) firstFrameZone.style.display = '';
         return;
       }
@@ -2737,7 +2737,7 @@
       uvDraftsComposerFirstFrame = { object_url: objectUrl, fileName: file.name };
       if (firstFrameImg) firstFrameImg.src = objectUrl;
       if (firstFrameName) firstFrameName.textContent = file.name;
-      if (firstFramePreview) firstFramePreview.hidden = false;
+      if (firstFramePreview) firstFramePreview.classList.add('is-visible');
       if (firstFrameZone) firstFrameZone.style.display = 'none';
     };
 
@@ -4400,7 +4400,8 @@
       .uvd-firstframe-zone strong { font-size: 14px; color: var(--uvd-text); pointer-events: none; }
       .uvd-firstframe-zone span { font-size: 12px; color: var(--uvd-subtext); line-height: 1.4; pointer-events: none; }
       .uvd-firstframe-zone svg { pointer-events: none; }
-      .uvd-firstframe-preview { margin-top: 10px; border: 1px solid var(--uvd-border); border-radius: 12px; background: var(--uvd-surface); display: flex; align-items: center; gap: 10px; padding: 8px; }
+      .uvd-firstframe-preview { margin-top: 10px; border: 1px solid var(--uvd-border); border-radius: 12px; background: var(--uvd-surface); align-items: center; gap: 10px; padding: 8px; display: none; }
+      .uvd-firstframe-preview.is-visible { display: flex; }
       .uvd-firstframe-preview img { width: 56px; height: 56px; object-fit: cover; border-radius: 8px; border: 1px solid var(--uvd-border); background: #121722; display: block; }
       .uvd-firstframe-meta { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 4px; }
       .uvd-firstframe-name { font-size: 13px; color: var(--uvd-text); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
