@@ -140,10 +140,12 @@
   const STACKED_WINDOW_MINUTES_DEFAULT = 24 * 60;
   const STACKED_WINDOW_MINUTES_MAX = 15 * 24 * 60;
   const STACKED_WINDOW_MIN_GAP_MINUTES = 60;
+  const COLD_PREFIX = 'snapshots_';
   let metrics = { users: {} };
   let lastMetricsUpdatedAt = 0;
   let usersIndex = null;
   let isMetricsPartial = false;
+  let snapshotsHydrated = false;
   let lastSessionCacheAt = 0;
   let currentUserKey = null;
   let lastSelectedUserKey = null;
@@ -1480,7 +1482,40 @@
 
   async function saveMetrics(nextMetrics, opts = {}){
     const metricsUpdatedAt = Date.now();
-    const payload = { metrics: nextMetrics, metricsUpdatedAt };
+    const affectedUserKeys = opts.userKeys || Object.keys(nextMetrics.users || {});
+
+    // Extract full snapshots into cold shards for affected users, then trim hot to latest-only
+    const coldPayload = {};
+    for (const userKey of affectedUserKeys) {
+      const user = nextMetrics.users?.[userKey];
+      if (!user?.posts) continue;
+      const shardData = {};
+      let hasColdData = false;
+      for (const [postId, post] of Object.entries(user.posts)) {
+        if (!Array.isArray(post.snapshots) || post.snapshots.length === 0) continue;
+        if (post.snapshots.length > 1) {
+          shardData[postId] = post.snapshots.slice();
+          post.snapshots = [post.snapshots[post.snapshots.length - 1]];
+          hasColdData = true;
+        } else {
+          // Even single-snapshot posts go to cold (to maintain complete cold shards)
+          shardData[postId] = post.snapshots.slice();
+        }
+      }
+      if (hasColdData || Object.keys(shardData).length > 0) {
+        coldPayload[COLD_PREFIX + userKey] = shardData;
+      }
+    }
+
+    // Also remove cold shards for users that were deleted from metrics
+    const keysToRemove = [];
+    for (const userKey of affectedUserKeys) {
+      if (!nextMetrics.users?.[userKey]) {
+        keysToRemove.push(COLD_PREFIX + userKey);
+      }
+    }
+
+    const payload = { metrics: nextMetrics, metricsUpdatedAt, ...coldPayload };
     const shouldUpdateIndex = opts.updateIndex !== false && !isMetricsPartial;
     if (shouldUpdateIndex) {
       usersIndex = buildUsersIndexFromMetrics(nextMetrics);
@@ -1488,6 +1523,9 @@
     }
     try {
       await chrome.storage.local.set(payload);
+      if (keysToRemove.length > 0) {
+        await chrome.storage.local.remove(keysToRemove);
+      }
       lastMetricsUpdatedAt = metricsUpdatedAt;
     } catch {}
   }
@@ -1526,7 +1564,39 @@
       try { await chrome.storage.local.set({ metricsUpdatedAt: ts }); } catch {}
     }
     usersIndex = buildUsersIndexFromMetrics(metrics);
+    snapshotsHydrated = false;
     return metrics;
+  }
+
+  async function ensureFullSnapshots() {
+    if (snapshotsHydrated) return;
+    try {
+      const allStorage = await chrome.storage.local.get(null);
+      for (const [key, shard] of Object.entries(allStorage)) {
+        if (!key.startsWith(COLD_PREFIX)) continue;
+        const userKey = key.slice(COLD_PREFIX.length);
+        const user = metrics.users?.[userKey];
+        if (!user?.posts) continue;
+        for (const [postId, coldSnaps] of Object.entries(shard)) {
+          if (!Array.isArray(coldSnaps) || !coldSnaps.length) continue;
+          const post = user.posts[postId];
+          if (!post) continue;
+          if (!Array.isArray(post.snapshots)) post.snapshots = [];
+          // Merge cold snapshots, deduplicating by timestamp
+          const existingTs = new Set(post.snapshots.map(s => s.t));
+          for (const s of coldSnaps) {
+            if (!existingTs.has(s.t)) {
+              post.snapshots.push(s);
+            }
+          }
+          // Sort by timestamp
+          post.snapshots.sort((a, b) => (a.t || 0) - (b.t || 0));
+        }
+      }
+    } catch (err) {
+      try { console.warn('[SoraMetrics] cold shard hydration failed', err); } catch {}
+    }
+    snapshotsHydrated = true;
   }
 
   function buildUserOptions(metrics){
@@ -4691,7 +4761,8 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
 
   // Legend removed — left list serves as legend
 
-  function exportCSV(user){
+  async function exportCSV(user){
+    await ensureFullSnapshots();
     const lines = ['post_id,timestamp,unique,likes,views,interaction_rate'];
     for (const [pid,p] of Object.entries(user.posts||{})){
       for (const s of (p.snapshots||[])){
@@ -4730,6 +4801,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
   async function exportAllDataCSV(){
     try {
       const metrics = await loadMetrics();
+      await ensureFullSnapshots();
       const allLines = [];
       
       // === SHEET 1: Posts Summary (one row per post with latest snapshot) ===
@@ -6245,13 +6317,14 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       $('#compareSuggestions').style.display = 'none';
     }
 
-    function updateCompareCharts(){
+    async function updateCompareCharts(){
       const userKeys = Array.from(compareUsers);
       if (userKeys.length === 0){
         refreshUserUI();
         return;
       }
-      
+      await ensureFullSnapshots();
+
       // Update allViewsChart
       try {
         const useUnique = compareViewsChartType === 'unique';
@@ -6964,8 +7037,9 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       }
       bestTimeRefreshInFlight = true;
       const metricsStamp = lastMetricsUpdatedAt || 0;
-      const run = () => {
+      const run = async () => {
         try {
+          await ensureFullSnapshots();
           bestTimeData = calculateBestPostTimeForLikes();
           lastBestTimeUpdate = Date.now();
           if (metricsStamp) lastBestTimeMetricsUpdatedAt = metricsStamp;
@@ -7930,6 +8004,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         }
         updateStaleButtonCount(user);
         if (!skipCharts) {
+          await ensureFullSnapshots();
           const perfCharts = perfStart('charts + summaries');
           try {
             const useUnique = viewsChartType === 'unique';
@@ -9056,16 +9131,17 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
 
     async function runCombModePurge(){
       if (!combModeEnabled) return;
-      
+
       await chrome.storage.local.set({ purgeLock: Date.now() });
       try {
         const now = Date.now();
         const sixtyMinutesMs = 60 * 60 * 1000;
-        
+
         let purgedSnapshots = 0;
         let purgedUsers = 0;
         let purgedPosts = 0;
         metrics = await loadMetrics();
+        await ensureFullSnapshots();
         
         // Process each user
         for (const [userKey, user] of Object.entries(metrics.users || {})){
@@ -9653,6 +9729,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         try {
           await purgeLockPromise;
           const loadedMetrics = await loadMetrics();
+          await ensureFullSnapshots();
           const { purgedUsers, purgedPosts } = applyPurgeToMetrics(loadedMetrics, purgeOpts);
           await saveMetrics(loadedMetrics, { userKeys: Object.keys(loadedMetrics.users || {}) });
           await updateStorageSizeDisplay();
@@ -9730,6 +9807,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         await chrome.storage.local.set({ purgeLock: Date.now() });
         try {
           const loadedMetrics = await loadMetrics();
+          await ensureFullSnapshots();
           const { removedAny, affectedKeys } = removePostFromMetrics(loadedMetrics, pid);
           if (removedAny) await saveMetrics(loadedMetrics, { userKeys: Array.from(affectedKeys) });
         } catch (e) {

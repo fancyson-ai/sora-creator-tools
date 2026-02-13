@@ -214,6 +214,8 @@
   let characterSortMode = 'date'; // 'date', 'likes', 'cameos', 'likesPerDay'
   let charAutoLoadLastAttemptMs = 0;
   let suppressDetailBadgeRender = false; // Flag to prevent renderDetailBadge during bulk processing
+  let badgeDataGeneration = 0; // Incremented when new metric data arrives; badges skip re-render when unchanged
+  let renderPassInFlight = false; // Suppresses observer-triggered renders while processFeedJson is rendering
 
   let gatherScrollIntervalId = null;
   let gatherRefreshTimeoutId = null;
@@ -657,8 +659,11 @@
   function isBadCardContainer(el) {
     try {
       if (!el || el === document.body || el === document.documentElement) return true;
-      const style = getComputedStyle(el);
-      if (style.position === 'fixed' || style.position === 'sticky') return true;
+      const cls = typeof el.className === 'string' ? el.className : '';
+      if (cls.includes('fixed') || cls.includes('sticky')) return true;
+      // Check inline style as fallback
+      const pos = el.style?.position;
+      if (pos === 'fixed' || pos === 'sticky') return true;
       // Avoid nav/sidebars/toolbars that sometimes contain post links.
       const role = el.getAttribute?.('role');
       if (role === 'navigation' || role === 'menubar' || role === 'toolbar') return true;
@@ -677,7 +682,9 @@
         if (!isBadCardContainer(el)) return el;
       }
       const cls = typeof el.className === 'string' ? el.className : '';
-      const hasMedia = !!el.querySelector?.('video, img, canvas');
+      const hasMedia = el.dataset.uvHasMedia != null
+        ? el.dataset.uvHasMedia === '1'
+        : (el.dataset.uvHasMedia = el.querySelector('video, img, canvas') ? '1' : '0') === '1';
       const looksCardy =
         hasMedia &&
         (cls.includes('rounded') || cls.includes('overflow-hidden') || cls.includes('shadow') || cls.includes('group'));
@@ -942,7 +949,9 @@
   function ensureBadge(card) {
     let badge = card.querySelector('.sora-uv-badge');
     if (!badge) {
-      if (getComputedStyle(card).position === 'static') card.style.position = 'relative';
+      if (!card.style.position && !card.className?.includes('relative') && !card.className?.includes('absolute')) {
+        card.style.position = 'relative';
+      }
       badge = document.createElement('div');
       badge.className = 'sora-uv-badge';
       Object.assign(badge.style, {
@@ -1651,14 +1660,18 @@
 
   function renderBadges() {
     ensureControlBar();
-    for (const card of selectAllCards()) {
+    const cards = selectAllCards();
+    const gen = String(badgeDataGeneration);
+    for (const card of cards) {
+      if (card.dataset.uvBadgeGen === gen) continue; // skip if no new data
       const id = extractIdFromCard(card);
       if (!id) continue;
       const uv = idToUnique.get(id);
       const meta = idToMeta.get(id);
       addBadge(card, uv, meta);
+      card.dataset.uvBadgeGen = gen;
     }
-    applyFilter();
+    applyFilter(cards);
   }
 
   function renderBookmarkButtons() {
@@ -2692,8 +2705,13 @@
     tryUpdateFeedButton();
     
     // Watch for DOM changes in case button is added dynamically
+    let _feedBtnRaf = null;
     const observer = new MutationObserver(() => {
-      tryUpdateFeedButton();
+      if (_feedBtnRaf) cancelAnimationFrame(_feedBtnRaf);
+      _feedBtnRaf = requestAnimationFrame(() => {
+        _feedBtnRaf = null;
+        tryUpdateFeedButton();
+      });
     });
     observer.observe(document.body, { childList: true, subtree: true });
     bar._feedButtonObserver = observer;
@@ -4556,8 +4574,8 @@ async function renderAnalyzeTable(force = false) {
 	  }
 
 
-  function hideAllCards(hide) {
-    for (const card of selectAllCards()) {
+  function hideAllCards(hide, cachedCards) {
+    for (const card of (cachedCards || selectAllCards())) {
       if (hide) card.style.display = 'none';
       else card.style.display = '';
     }
@@ -4745,13 +4763,13 @@ async function renderAnalyzeTable(force = false) {
   }
 
   // == Filtering ==
-  function applyFilter() {
+  function applyFilter(cachedCards) {
     if (analyzeActive) return; // overlay handles visibility
     const s = getGatherState();
     const idx = s.filterIndex ?? 0;
     const limitMin = FILTER_STEPS_MIN[idx];
 
-    for (const card of selectAllCards()) {
+    for (const card of (cachedCards || selectAllCards())) {
       const id = extractIdFromCard(card);
       const meta = idToMeta.get(id);
       // If we're not on a page where filters apply, don't hide anything.
@@ -5775,11 +5793,14 @@ async function renderAnalyzeTable(force = false) {
         window.postMessage({ __sora_uv__: true, type: 'metrics_batch', items: batch }, '*');
       } catch {}
 
+    badgeDataGeneration++;
+    renderPassInFlight = true;
     renderBadges();
     if (!suppressDetailBadgeRender) {
       renderDetailBadge();
     }
     renderProfileImpact();
+    renderPassInFlight = false;
   }
 
   function processPostDetailJson(json) {
@@ -6644,6 +6665,7 @@ async function renderAnalyzeTable(force = false) {
 
   // == Observers & Lifecycle ==
   function runRenderPass() {
+    if (renderPassInFlight) return;
     if (isDraftDetail()) return;
     const onExplore = isExplore();
     const onProfile = isProfile();
