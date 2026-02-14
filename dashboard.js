@@ -413,11 +413,11 @@
   const SNAP_DEBUG_ENABLED = (function(){
     try {
       const raw = localStorage.getItem(SNAP_DEBUG_STORAGE_KEY);
-      if (raw == null) return true;
+      if (raw == null) return false;
       const norm = String(raw).trim().toLowerCase();
       return norm === '1' || norm === 'true' || norm === 'yes' || norm === 'on' || norm === 'all';
     } catch {
-      return true;
+      return false;
     }
   })();
   let snapDebugSeq = 0;
@@ -483,7 +483,7 @@
   }
   snapLog('debug:enabled', {
     storageKey: SNAP_DEBUG_STORAGE_KEY,
-    hint: `localStorage.setItem('${SNAP_DEBUG_STORAGE_KEY}','0') to disable`
+    hint: `localStorage.setItem('${SNAP_DEBUG_STORAGE_KEY}','1') to enable`
   });
   function invalidateSnapshotHydration(reason, details = {}){
     const wasHydrated = snapshotsHydrated;
