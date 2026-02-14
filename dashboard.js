@@ -1520,41 +1520,81 @@
     }
     return { handle: 'Top Today', id: null, posts, followers: [], cameos: [], __specialKey: TOP_TODAY_KEY };
   }
+  function getUserPostCount(user){
+    return Object.keys(user?.posts || {}).length;
+  }
+  function getUserSnapshotCount(user){
+    let total = 0;
+    for (const post of Object.values(user?.posts || {})){
+      if (!Array.isArray(post?.snapshots)) continue;
+      total += post.snapshots.length;
+    }
+    return total;
+  }
+  function pickPreferredUserCandidate(best, candidate, opts = {}){
+    if (!candidate) return best;
+    if (!best) return candidate;
+    const bestPosts = getUserPostCount(best.user);
+    const candPosts = getUserPostCount(candidate.user);
+    if (candPosts !== bestPosts) return candPosts > bestPosts ? candidate : best;
+    const bestSnaps = getUserSnapshotCount(best.user);
+    const candSnaps = getUserSnapshotCount(candidate.user);
+    if (candSnaps !== bestSnaps) return candSnaps > bestSnaps ? candidate : best;
+    if (opts.preferNonCharacter !== false) {
+      const bestChar = isCharacterId(best.user?.id);
+      const candChar = isCharacterId(candidate.user?.id);
+      if (bestChar !== candChar) return candChar ? best : candidate;
+    }
+    if (opts.preferredPrefix) {
+      const bestPrefix = String(best.key || '').startsWith(opts.preferredPrefix);
+      const candPrefix = String(candidate.key || '').startsWith(opts.preferredPrefix);
+      if (bestPrefix !== candPrefix) return candPrefix ? candidate : best;
+    }
+    if (opts.preferredExactKey) {
+      const bestExact = best.key === opts.preferredExactKey;
+      const candExact = candidate.key === opts.preferredExactKey;
+      if (bestExact !== candExact) return candExact ? candidate : best;
+    }
+    const bestCameos = Array.isArray(best.user?.cameos) ? best.user.cameos.length : 0;
+    const candCameos = Array.isArray(candidate.user?.cameos) ? candidate.user.cameos.length : 0;
+    if (candCameos !== bestCameos) return candCameos > bestCameos ? candidate : best;
+    return best;
+  }
   function findUserByHandle(metrics, handle){
     if (!handle || !metrics?.users) return null;
     const normalized = normalizeCameoName(handle);
     if (!normalized) return null;
     const directKey = `h:${normalized}`;
     const directUser = metrics.users[directKey];
-    if (directUser) return directUser;
-    let best = null;
-    for (const user of Object.values(metrics.users || {})){
+    if (directUser && getUserPostCount(directUser) > 0) return directUser;
+    let best = directUser ? { key: directKey, user: directUser } : null;
+    for (const [key, user] of Object.entries(metrics.users || {})){
       const userHandle = normalizeCameoName(user?.handle || user?.userHandle || '');
       if (!userHandle || userHandle !== normalized) continue;
-      if (!best) {
-        best = user;
-        continue;
-      }
-      if (isCharacterId(user?.id) && !isCharacterId(best?.id)) {
-        best = user;
-        continue;
-      }
-      const bestCount = Array.isArray(best?.cameos) ? best.cameos.length : 0;
-      const userCount = Array.isArray(user?.cameos) ? user.cameos.length : 0;
-      if (userCount > bestCount) best = user;
+      best = pickPreferredUserCandidate(best, { key, user }, {
+        preferredPrefix: 'h:',
+        preferredExactKey: directKey,
+        preferNonCharacter: true
+      });
     }
-    return best;
+    return best?.user || null;
   }
   function findUserById(metrics, id){
     if (!id || !metrics?.users) return null;
     const needle = String(id);
     const directKey = `id:${needle}`;
     const directUser = metrics.users[directKey];
-    if (directUser) return directUser;
-    for (const user of Object.values(metrics.users || {})){
-      if (user?.id != null && String(user.id) === needle) return user;
+    if (directUser && getUserPostCount(directUser) > 0) return directUser;
+    let best = directUser ? { key: directKey, user: directUser } : null;
+    for (const [key, user] of Object.entries(metrics.users || {})){
+      if (!(key === directKey || (user?.id != null && String(user.id) === needle))) continue;
+      best = pickPreferredUserCandidate(best, { key, user }, {
+        preferredPrefix: 'h:',
+        preferredExactKey: directKey,
+        preferNonCharacter: true
+      });
     }
-    return null;
+    return best?.user || null;
   }
   function buildCameoUser(metrics, cameoName){
     const name = normalizeCameoName(cameoName);
@@ -1617,15 +1657,15 @@
       if (cachedCameo) return cachedCameo;
       return buildCameoUser(metrics, cameoNameFromKey(userKey));
     }
-    const direct = metrics?.users?.[userKey] || null;
-    if (direct) return direct;
     if (typeof userKey === 'string' && userKey.startsWith('h:')) {
-      return findUserByHandle(metrics, userKey.slice(2));
+      const byHandle = findUserByHandle(metrics, userKey.slice(2));
+      if (byHandle) return byHandle;
     }
     if (typeof userKey === 'string' && userKey.startsWith('id:')) {
-      return findUserById(metrics, userKey.slice(3));
+      const byId = findUserById(metrics, userKey.slice(3));
+      if (byId) return byId;
     }
-    return null;
+    return metrics?.users?.[userKey] || null;
   }
   const DBG_SORT = false; // hide noisy sorting logs by default
 
@@ -8119,11 +8159,12 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       if (!currentUserKey || isVirtualUserKey(currentUserKey)) return;
       const hydrateKey = currentUserKey;
       const hydrateToken = ++postHydrationToken;
+      const currentUser = resolveUserForKey(metrics, hydrateKey);
       snapLog('hydrateCurrentUserPosts:start', {
         hydrateKey,
         hydrateToken,
         snapshotsHydrated,
-        beforeSummary: summarizeUserSnapshots(metrics?.users?.[hydrateKey])
+        beforeSummary: summarizeUserSnapshots(currentUser)
       });
       setPostsHydrateState(true);
       const chunkSize = 200;
@@ -8205,15 +8246,22 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         if (postHydrationToken !== hydrateToken || currentUserKey !== hydrateKey) return;
         try {
           const { metrics: storedMetrics } = await chrome.storage.local.get('metrics');
-          storedUser = storedMetrics?.users?.[hydrateKey];
-          targetUser = metrics?.users?.[hydrateKey];
+          storedUser = storedMetrics?.users?.[hydrateKey] || null;
+          if (!storedUser && typeof hydrateKey === 'string' && hydrateKey.startsWith('h:')) {
+            storedUser = findUserByHandle(storedMetrics, hydrateKey.slice(2));
+          } else if (!storedUser && typeof hydrateKey === 'string' && hydrateKey.startsWith('id:')) {
+            storedUser = findUserById(storedMetrics, hydrateKey.slice(3));
+          }
+          targetUser = resolveUserForKey(metrics, hydrateKey);
           const storedPosts = storedUser?.posts;
           if (!storedPosts || !targetUser) {
             setPostsHydrateState(false);
             snapLog('hydrateCurrentUserPosts:skip', {
               hydrateKey,
               hydrateToken,
-              reason: 'missing_user_or_posts'
+              reason: 'missing_user_or_posts',
+              hasStoredUser: !!storedUser,
+              hasTargetUser: !!targetUser
             });
             return;
           }
