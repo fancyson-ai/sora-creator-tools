@@ -270,6 +270,8 @@
   let usersIndex = null;
   let isMetricsPartial = false;
   let snapshotsHydrated = false;
+  let snapshotsHydrationEpoch = 0;
+  let snapshotsHydrationPromise = null;
   let lastSessionCacheAt = 0;
   let currentUserKey = null;
   let lastSelectedUserKey = null;
@@ -306,6 +308,93 @@
     if (!PERF_ENABLED) return;
     perfMarks.length = 0;
   };
+  const SNAP_DEBUG_STORAGE_KEY = 'SCT_DASHBOARD_SNAPSHOT_DEBUG';
+  const SNAP_DEBUG_ENABLED = (function(){
+    try {
+      const raw = localStorage.getItem(SNAP_DEBUG_STORAGE_KEY);
+      if (raw == null) return true;
+      const norm = String(raw).trim().toLowerCase();
+      return norm === '1' || norm === 'true' || norm === 'yes' || norm === 'on' || norm === 'all';
+    } catch {
+      return true;
+    }
+  })();
+  let snapDebugSeq = 0;
+  function summarizeUserSnapshots(user){
+    const posts = Object.values(user?.posts || {});
+    const out = {
+      postCount: posts.length,
+      postsWithSnapshots: 0,
+      postsWithHistory: 0,
+      latestOnlyPosts: 0,
+      totalSnapshots: 0,
+      minSnapshots: 0,
+      maxSnapshots: 0
+    };
+    let minSnapshots = Infinity;
+    for (const post of posts){
+      const count = Array.isArray(post?.snapshots) ? post.snapshots.length : 0;
+      if (!count) continue;
+      out.postsWithSnapshots++;
+      out.totalSnapshots += count;
+      if (count > 1) out.postsWithHistory++;
+      else out.latestOnlyPosts++;
+      if (count < minSnapshots) minSnapshots = count;
+      if (count > out.maxSnapshots) out.maxSnapshots = count;
+    }
+    out.minSnapshots = Number.isFinite(minSnapshots) ? minSnapshots : 0;
+    return out;
+  }
+  function summarizeMetricsSnapshots(inputMetrics){
+    const users = inputMetrics?.users || {};
+    const out = { userCount: 0, postCount: 0, totalSnapshots: 0, postsWithHistory: 0, latestOnlyPosts: 0 };
+    for (const user of Object.values(users)){
+      out.userCount++;
+      const summary = summarizeUserSnapshots(user);
+      out.postCount += summary.postCount;
+      out.totalSnapshots += summary.totalSnapshots;
+      out.postsWithHistory += summary.postsWithHistory;
+      out.latestOnlyPosts += summary.latestOnlyPosts;
+    }
+    return out;
+  }
+  function summarizeColdPayload(payload){
+    const out = { shardCount: 0, postCount: 0, snapshotCount: 0 };
+    for (const shard of Object.values(payload || {})){
+      out.shardCount++;
+      for (const snaps of Object.values(shard || {})){
+        out.postCount++;
+        out.snapshotCount += Array.isArray(snaps) ? snaps.length : 0;
+      }
+    }
+    return out;
+  }
+  function snapLog(event, details = {}){
+    if (!SNAP_DEBUG_ENABLED) return;
+    try {
+      console.log('[SCT][snap]', {
+        seq: ++snapDebugSeq,
+        at: new Date().toISOString(),
+        event,
+        ...details
+      });
+    } catch {}
+  }
+  snapLog('debug:enabled', {
+    storageKey: SNAP_DEBUG_STORAGE_KEY,
+    hint: `localStorage.setItem('${SNAP_DEBUG_STORAGE_KEY}','0') to disable`
+  });
+  function invalidateSnapshotHydration(reason, details = {}){
+    const wasHydrated = snapshotsHydrated;
+    snapshotsHydrated = false;
+    snapshotsHydrationEpoch += 1;
+    snapLog('snapshotsHydration:invalidated', {
+      reason,
+      wasHydrated,
+      snapshotsHydrationEpoch,
+      ...details
+    });
+  }
   const nextPaint = ()=> new Promise((resolve)=>{
     if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => resolve());
     else setTimeout(resolve, 0);
@@ -1607,27 +1696,68 @@
   async function saveMetrics(nextMetrics, opts = {}){
     const metricsUpdatedAt = Date.now();
     const affectedUserKeys = opts.userKeys || Object.keys(nextMetrics.users || {});
+    const hotMetrics = { ...nextMetrics, users: { ...(nextMetrics?.users || {}) } };
+    const shouldMergeExistingCold = !snapshotsHydrated;
+    snapLog('saveMetrics:start', {
+      metricsUpdatedAt,
+      affectedUserCount: affectedUserKeys.length,
+      shouldMergeExistingCold,
+      snapshotsHydrated,
+      isMetricsPartial,
+      inputSummary: summarizeMetricsSnapshots(nextMetrics)
+    });
 
     // Extract full snapshots into cold shards for affected users, then trim hot to latest-only
     const coldPayload = {};
     for (const userKey of affectedUserKeys) {
       const user = nextMetrics.users?.[userKey];
       if (!user?.posts) continue;
+      const hotUser = { ...user, posts: { ...user.posts } };
+      hotMetrics.users[userKey] = hotUser;
       const shardData = {};
-      let hasColdData = false;
       for (const [postId, post] of Object.entries(user.posts)) {
         if (!Array.isArray(post.snapshots) || post.snapshots.length === 0) continue;
-        if (post.snapshots.length > 1) {
-          shardData[postId] = post.snapshots.slice();
-          post.snapshots = [post.snapshots[post.snapshots.length - 1]];
-          hasColdData = true;
-        } else {
-          // Even single-snapshot posts go to cold (to maintain complete cold shards)
-          shardData[postId] = post.snapshots.slice();
-        }
+        // Even single-snapshot posts go to cold (to maintain complete cold shards).
+        shardData[postId] = post.snapshots.slice();
+        const last = post.snapshots[post.snapshots.length - 1];
+        hotUser.posts[postId] = post.snapshots.length > 1 ? { ...post, snapshots: [last] } : post;
       }
-      if (hasColdData || Object.keys(shardData).length > 0) {
+      if (Object.keys(shardData).length > 0) {
         coldPayload[COLD_PREFIX + userKey] = shardData;
+      }
+    }
+    snapLog('saveMetrics:coldPayload', summarizeColdPayload(coldPayload));
+
+    if (shouldMergeExistingCold && Object.keys(coldPayload).length > 0) {
+      const mergeStats = { shardCount: 0, postsMerged: 0, snapshotsBefore: 0, snapshotsAfter: 0 };
+      try {
+        const existingCold = await chrome.storage.local.get(Object.keys(coldPayload));
+        for (const [shardKey, shardData] of Object.entries(coldPayload)) {
+          mergeStats.shardCount++;
+          const existingShard = existingCold?.[shardKey];
+          if (!existingShard || typeof existingShard !== 'object') continue;
+          for (const [postId, newSnaps] of Object.entries(shardData)) {
+            const prevSnaps = Array.isArray(existingShard?.[postId]) ? existingShard[postId] : [];
+            if (!prevSnaps.length || !Array.isArray(newSnaps) || !newSnaps.length) continue;
+            mergeStats.postsMerged++;
+            mergeStats.snapshotsBefore += prevSnaps.length + newSnaps.length;
+            const merged = [];
+            const seenTs = new Set();
+            for (const s of prevSnaps.concat(newSnaps)) {
+              if (!s || typeof s !== 'object') continue;
+              const t = toTs(s.t);
+              if (t && seenTs.has(t)) continue;
+              if (t) seenTs.add(t);
+              merged.push(s);
+            }
+            merged.sort((a, b) => (toTs(a?.t) || 0) - (toTs(b?.t) || 0));
+            shardData[postId] = merged;
+            mergeStats.snapshotsAfter += merged.length;
+          }
+        }
+        snapLog('saveMetrics:coldMerged', mergeStats);
+      } catch (err) {
+        snapLog('saveMetrics:coldMergeFailed', { message: String(err?.message || err || 'unknown') });
       }
     }
 
@@ -1639,10 +1769,10 @@
       }
     }
 
-    const payload = { metrics: nextMetrics, metricsUpdatedAt, ...coldPayload };
+    const payload = { metrics: hotMetrics, metricsUpdatedAt, ...coldPayload };
     const shouldUpdateIndex = opts.updateIndex !== false && !isMetricsPartial;
     if (shouldUpdateIndex) {
-      usersIndex = buildUsersIndexFromMetrics(nextMetrics);
+      usersIndex = buildUsersIndexFromMetrics(hotMetrics);
       payload[USERS_INDEX_STORAGE_KEY] = usersIndex;
     }
     try {
@@ -1651,7 +1781,15 @@
         await chrome.storage.local.remove(keysToRemove);
       }
       lastMetricsUpdatedAt = metricsUpdatedAt;
-    } catch {}
+      snapLog('saveMetrics:done', {
+        keysToRemove: keysToRemove.length,
+        outputSummary: summarizeMetricsSnapshots(hotMetrics),
+        coldPayload: summarizeColdPayload(coldPayload),
+        indexUpdated: shouldUpdateIndex
+      });
+    } catch (err) {
+      snapLog('saveMetrics:failed', { message: String(err?.message || err || 'unknown') });
+    }
   }
 
   async function getMetricsUpdatedAt(){
@@ -1665,6 +1803,11 @@
   }
 
   async function loadMetrics(){
+    snapLog('loadMetrics:start', {
+      snapshotsHydrated,
+      isMetricsPartial,
+      currentUserKey
+    });
     const perfGet = perfStart('storage.get metrics');
     const { metrics = { users:{} }, metricsUpdatedAt } = await chrome.storage.local.get(['metrics', 'metricsUpdatedAt']);
     perfEnd(perfGet);
@@ -1672,9 +1815,16 @@
       const next = Number(metricsUpdatedAt);
       if (Number.isFinite(next) && next > 0) lastMetricsUpdatedAt = next;
     }
+    snapLog('loadMetrics:fetched', {
+      metricsUpdatedAt: Number(metricsUpdatedAt) || 0,
+      summary: summarizeMetricsSnapshots(metrics)
+    });
     const perfPrune = perfStart('prune empty users');
     const removed = pruneEmptyUsers(metrics);
     perfEnd(perfPrune);
+    if (removed) {
+      snapLog('loadMetrics:prunedEmptyUsers', { removed });
+    }
     if (removed) {
       const perfSet = perfStart('storage.set metrics');
       await saveMetrics(metrics, { userKeys: Object.keys(metrics.users || {}) });
@@ -1688,39 +1838,84 @@
       try { await chrome.storage.local.set({ metricsUpdatedAt: ts }); } catch {}
     }
     usersIndex = buildUsersIndexFromMetrics(metrics);
-    snapshotsHydrated = false;
+    invalidateSnapshotHydration('loadMetrics', {
+      summary: summarizeMetricsSnapshots(metrics)
+    });
+    snapLog('loadMetrics:done', {
+      snapshotsHydrated,
+      lastMetricsUpdatedAt,
+      summary: summarizeMetricsSnapshots(metrics)
+    });
     return metrics;
   }
 
   async function ensureFullSnapshots() {
-    if (snapshotsHydrated) return;
-    try {
-      const allStorage = await chrome.storage.local.get(null);
-      for (const [key, shard] of Object.entries(allStorage)) {
-        if (!key.startsWith(COLD_PREFIX)) continue;
-        const userKey = key.slice(COLD_PREFIX.length);
-        const user = metrics.users?.[userKey];
-        if (!user?.posts) continue;
-        for (const [postId, coldSnaps] of Object.entries(shard)) {
-          if (!Array.isArray(coldSnaps) || !coldSnaps.length) continue;
-          const post = user.posts[postId];
-          if (!post) continue;
-          if (!Array.isArray(post.snapshots)) post.snapshots = [];
-          // Merge cold snapshots, deduplicating by timestamp
-          const existingTs = new Set(post.snapshots.map(s => s.t));
-          for (const s of coldSnaps) {
-            if (!existingTs.has(s.t)) {
-              post.snapshots.push(s);
-            }
-          }
-          // Sort by timestamp
-          post.snapshots.sort((a, b) => (a.t || 0) - (b.t || 0));
-        }
-      }
-    } catch (err) {
-      try { console.warn('[SoraMetrics] cold shard hydration failed', err); } catch {}
+    if (snapshotsHydrated) {
+      snapLog('ensureFullSnapshots:skip', { reason: 'already_hydrated', currentUserKey });
+      return;
     }
-    snapshotsHydrated = true;
+    if (snapshotsHydrationPromise) {
+      snapLog('ensureFullSnapshots:join', {
+        currentUserKey,
+        snapshotsHydrationEpoch
+      });
+      await snapshotsHydrationPromise;
+      return;
+    }
+    const runEpoch = snapshotsHydrationEpoch;
+    snapLog('ensureFullSnapshots:start', {
+      currentUserKey,
+      runEpoch,
+      beforeSummary: summarizeMetricsSnapshots(metrics)
+    });
+    snapshotsHydrationPromise = (async () => {
+      const mergeStats = { shardCount: 0, userCount: 0, postCount: 0, snapshotsAdded: 0 };
+      try {
+        const allStorage = await chrome.storage.local.get(null);
+        for (const [key, shard] of Object.entries(allStorage)) {
+          if (!key.startsWith(COLD_PREFIX)) continue;
+          mergeStats.shardCount++;
+          const userKey = key.slice(COLD_PREFIX.length);
+          const user = metrics.users?.[userKey];
+          if (!user?.posts) continue;
+          mergeStats.userCount++;
+          for (const [postId, coldSnaps] of Object.entries(shard)) {
+            if (!Array.isArray(coldSnaps) || !coldSnaps.length) continue;
+            const post = user.posts[postId];
+            if (!post) continue;
+            mergeStats.postCount++;
+            if (!Array.isArray(post.snapshots)) post.snapshots = [];
+            // Merge cold snapshots, deduplicating by timestamp
+            const existingTs = new Set(post.snapshots.map(s => s.t));
+            for (const s of coldSnaps) {
+              if (!existingTs.has(s.t)) {
+                post.snapshots.push(s);
+                existingTs.add(s.t);
+                mergeStats.snapshotsAdded++;
+              }
+            }
+            // Sort by timestamp
+            post.snapshots.sort((a, b) => (a.t || 0) - (b.t || 0));
+          }
+        }
+      } catch (err) {
+        try { console.warn('[SoraMetrics] cold shard hydration failed', err); } catch {}
+        snapLog('ensureFullSnapshots:failed', { message: String(err?.message || err || 'unknown') });
+      }
+      const epochStable = runEpoch === snapshotsHydrationEpoch;
+      snapshotsHydrated = epochStable;
+      snapLog('ensureFullSnapshots:done', {
+        ...mergeStats,
+        runEpoch,
+        snapshotsHydrationEpoch,
+        epochStable,
+        snapshotsHydrated,
+        afterSummary: summarizeMetricsSnapshots(metrics)
+      });
+    })().finally(() => {
+      snapshotsHydrationPromise = null;
+    });
+    await snapshotsHydrationPromise;
   }
 
   function buildUserOptions(metrics){
@@ -7802,6 +7997,12 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       if (!currentUserKey || isVirtualUserKey(currentUserKey)) return;
       const hydrateKey = currentUserKey;
       const hydrateToken = ++postHydrationToken;
+      snapLog('hydrateCurrentUserPosts:start', {
+        hydrateKey,
+        hydrateToken,
+        snapshotsHydrated,
+        beforeSummary: summarizeUserSnapshots(metrics?.users?.[hydrateKey])
+      });
       setPostsHydrateState(true);
       const chunkSize = 200;
       const chunkBudgetMs = 14;
@@ -7839,6 +8040,17 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           if (Array.isArray(storedUser.cameos)) targetUser.cameos = storedUser.cameos;
           syncUserOptionCount(hydrateKey, postCount);
           setPostsHydrateState(false);
+          invalidateSnapshotHydration('hydrateCurrentUserPosts:done', {
+            hydrateKey,
+            hydrateToken,
+            postCount
+          });
+          snapLog('hydrateCurrentUserPosts:done', {
+            hydrateKey,
+            hydrateToken,
+            postCount,
+            afterSummary: summarizeUserSnapshots(targetUser)
+          });
           refreshUserUI({ preserveEmpty: true, skipRestoreZoom: true, autoRefresh: true });
         }
       };
@@ -7852,22 +8064,57 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           const storedPosts = storedUser?.posts;
           if (!storedPosts || !targetUser) {
             setPostsHydrateState(false);
+            snapLog('hydrateCurrentUserPosts:skip', {
+              hydrateKey,
+              hydrateToken,
+              reason: 'missing_user_or_posts'
+            });
             return;
           }
           postCount = Object.keys(targetUser.posts || {}).length;
           entries = Object.entries(storedPosts);
           if (!entries.length) {
             setPostsHydrateState(false);
+            snapLog('hydrateCurrentUserPosts:skip', {
+              hydrateKey,
+              hydrateToken,
+              reason: 'no_stored_posts'
+            });
             return;
           }
+          // We are about to overwrite in-memory posts with hot storage rows (latest-only).
+          // Force a cold-shard re-hydrate on the next full UI refresh.
+          invalidateSnapshotHydration('hydrateCurrentUserPosts:overwriteFromHotStorage', {
+            hydrateKey,
+            hydrateToken,
+            storedPostCount: entries.length
+          });
+          snapLog('hydrateCurrentUserPosts:overwriteFromHotStorage', {
+            hydrateKey,
+            hydrateToken,
+            storedPostCount: entries.length,
+            snapshotsHydrated
+          });
           tick();
-        } catch {}
+        } catch (err) {
+          snapLog('hydrateCurrentUserPosts:failed', {
+            hydrateKey,
+            hydrateToken,
+            message: String(err?.message || err || 'unknown')
+          });
+        }
       }, 0);
     }
 
     function hydrateMetricsFromStorageInChunks(){
       if (!isMetricsPartial || isHydratingMetrics) return Promise.resolve(false);
       const hydrateToken = ++metricsHydrationToken;
+      snapLog('hydrateMetrics:start', {
+        hydrateToken,
+        isMetricsPartial,
+        snapshotsHydrated,
+        beforeSummary: summarizeMetricsSnapshots(metrics)
+      });
       setMetricsHydrateState(true);
       const chunkSize = 60;
       const chunkBudgetMs = 14;
@@ -7892,9 +8139,22 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
             const entries = Object.entries(storedMetrics.users || {});
             if (!entries.length) {
               setMetricsHydrateState(false);
+              snapLog('hydrateMetrics:skip', { hydrateToken, reason: 'no_stored_users' });
               resolve(false);
               return;
             }
+            // Chunk hydration replaces in-memory users from hot storage; ensure cold snapshots
+            // are merged again once hydration completes.
+            invalidateSnapshotHydration('hydrateMetrics:overwriteFromHotStorage', {
+              hydrateToken,
+              storedUserCount: entries.length
+            });
+            snapLog('hydrateMetrics:overwriteFromHotStorage', {
+              hydrateToken,
+              storedUserCount: entries.length,
+              storedSummary: summarizeMetricsSnapshots(storedMetrics),
+              snapshotsHydrated
+            });
             const storedIndex = normalizeUsersIndex(stored[USERS_INDEX_STORAGE_KEY]);
             if ((!Array.isArray(usersIndex) || !usersIndex.length) && storedIndex?.length) {
               usersIndex = storedIndex;
@@ -7934,20 +8194,38 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
                   if (Number.isFinite(next)) lastMetricsUpdatedAt = next;
                 }
                 metrics.users = storedMetrics.users;
+                invalidateSnapshotHydration('hydrateMetrics:chunkingDoneReplaceUsers', {
+                  hydrateToken,
+                  storedUserCount: Object.keys(storedMetrics.users || {}).length
+                });
                 usersIndex = storedIndex && storedIndex.length ? storedIndex : buildUsersIndexFromMetrics(metrics);
                 isMetricsPartial = false;
+                snapLog('hydrateMetrics:chunkingDone', {
+                  hydrateToken,
+                  summaryAfterReplace: summarizeMetricsSnapshots(metrics),
+                  currentUserKey
+                });
                 syncUserSelectHydrateIndicator();
                 syncUserSelectionUI();
                 syncUserOptionCounts();
                 await refreshUserUI({ preserveEmpty: true, skipRestoreZoom: true, autoRefresh: true });
                 saveSessionCache();
                 setMetricsHydrateState(false);
+                snapLog('hydrateMetrics:done', {
+                  hydrateToken,
+                  snapshotsHydrated,
+                  finalSummary: summarizeMetricsSnapshots(metrics)
+                });
                 resolve(true);
               }
             };
             tick();
-          } catch {
+          } catch (err) {
             setMetricsHydrateState(false);
+            snapLog('hydrateMetrics:failed', {
+              hydrateToken,
+              message: String(err?.message || err || 'unknown')
+            });
             resolve(false);
           }
         }, 0);
@@ -7959,7 +8237,19 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       try {
         const { preserveEmpty=false, skipRestoreZoom=false, skipPostListRebuild=false, autoRefresh=false, skipCharts=false } = opts;
         const user = resolveUserForKey(metrics, currentUserKey);
+        snapLog('refreshUserUI:start', {
+          currentUserKey,
+          preserveEmpty,
+          skipRestoreZoom,
+          skipPostListRebuild,
+          autoRefresh,
+          skipCharts,
+          snapshotsHydrated,
+          isMetricsPartial,
+          userSummary: summarizeUserSnapshots(user)
+        });
         if (!user){
+          snapLog('refreshUserUI:noUser', { currentUserKey, snapshotsHydrated, isMetricsPartial });
           updateMetricsHeader(currentUserKey, null);
           updateMetricsGatherNote(currentUserKey, null);
           setListActionActive('showAll');
@@ -8129,7 +8419,17 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         }
         updateStaleButtonCount(user);
         if (!skipCharts) {
+          snapLog('refreshUserUI:ensureFullSnapshots:before', {
+            currentUserKey,
+            snapshotsHydrated,
+            userSummary: summarizeUserSnapshots(user)
+          });
           await ensureFullSnapshots();
+          snapLog('refreshUserUI:ensureFullSnapshots:after', {
+            currentUserKey,
+            snapshotsHydrated,
+            userSummary: summarizeUserSnapshots(user)
+          });
           const perfCharts = perfStart('charts + summaries');
           try {
             const useUnique = viewsChartType === 'unique';
@@ -8504,6 +8804,12 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           });
         }
       }
+      snapLog('refreshUserUI:done', {
+        currentUserKey,
+        snapshotsHydrated,
+        isMetricsPartial,
+        userSummary: summarizeUserSnapshots(resolveUserForKey(metrics, currentUserKey))
+      });
       } finally {
         perfEnd(perfUI);
       }
@@ -9954,6 +10260,15 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       postHydrationToken++;
       setPostsHydrateState(false);
       const isAutoRefresh = !!opts.autoRefresh;
+      snapLog('refreshData:start', {
+        opts,
+        isAutoRefresh,
+        currentUserKey,
+        snapshotsHydrated,
+        isMetricsPartial,
+        beforeSummary: summarizeMetricsSnapshots(metrics),
+        currentUserSummary: summarizeUserSnapshots(resolveUserForKey(metrics, currentUserKey))
+      });
       const skipRestoreZoom = !!opts.skipRestoreZoom || isAutoRefresh;
       const userSelect = $('#userSelect');
       const userSelectScrollTop = isAutoRefresh && userSelect ? userSelect.scrollTop : null;
@@ -9972,6 +10287,12 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         const nextUpdatedAt = await getMetricsUpdatedAt();
         perfEnd(perfMeta);
       if (!isMetricsPartial && nextUpdatedAt && lastMetricsUpdatedAt && nextUpdatedAt === lastMetricsUpdatedAt) {
+        snapLog('refreshData:skipNoChange', {
+          currentUserKey,
+          nextUpdatedAt,
+          lastMetricsUpdatedAt,
+          snapshotsHydrated
+        });
         const user = resolveUserForKey(metrics, currentUserKey);
         updateStaleButtonCount(user);
         perfEnd(perfRefresh);
@@ -9994,6 +10315,12 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       isMetricsPartial = false;
       syncUserSelectHydrateIndicator();
       perfEnd(perfLoad);
+      snapLog('refreshData:afterLoadMetrics', {
+        currentUserKey,
+        snapshotsHydrated,
+        isMetricsPartial,
+        loadedSummary: summarizeMetricsSnapshots(metrics)
+      });
       if (!isAutoRefresh) {
         const prev = currentUserKey; const def = buildUserOptions(metrics);
         if (!(metrics.users[prev] || isVirtualUserKey(prev))) currentUserKey = def;
@@ -10038,6 +10365,13 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       if (!isAutoRefresh) {
         saveSessionCache();
       }
+      snapLog('refreshData:done', {
+        currentUserKey,
+        snapshotsHydrated,
+        isMetricsPartial,
+        afterSummary: summarizeMetricsSnapshots(metrics),
+        currentUserSummary: summarizeUserSnapshots(resolveUserForKey(metrics, currentUserKey))
+      });
       perfEnd(perfRefresh);
       perfFlush(isAutoRefresh ? 'auto refresh' : 'refresh', !isAutoRefresh || PERF_AUTO_ENABLED);
     };
