@@ -13,10 +13,13 @@
   const CAMEO_KEY_PREFIX = 'c:';
   const ULTRA_MODE_STORAGE_KEY = 'SCT_ULTRA_MODE_V1';
   const ULTRA_MODE_TAP_COUNT = 5;
-    const SITE_ORIGIN = 'https://sora.chatgpt.com';
+  const SITE_ORIGIN = 'https://sora.chatgpt.com';
   const DEFAULT_THUMB_URL = 'icons/logo.webp';
   const EXPIRED_THUMB_URLS_STORAGE_KEY = 'SCT_EXPIRED_THUMB_URLS_V1';
+  const USABLE_THUMB_URLS_STORAGE_KEY = 'SCT_USABLE_THUMB_URLS_V1';
   const MAX_EXPIRED_THUMB_URLS = 2000;
+  const MAX_USABLE_THUMB_URLS = 4000;
+  const BLOCKED_THUMB_HOSTS = new Set(['ogimg.chatgpt.com']);
   const CUSTOM_FILTER_PREFIX = 'custom:';
   const absUrl = (u, pid) => {
     if (!u && pid) return `${SITE_ORIGIN}/p/${pid}`;
@@ -24,6 +27,15 @@
     if (/^https?:\/\//i.test(u)) return u;
     if (u.startsWith('/')) return SITE_ORIGIN + u;
     return SITE_ORIGIN + '/' + u;
+  };
+  const isBlockedThumbUrl = (rawUrl) => {
+    if (typeof rawUrl !== 'string' || !rawUrl) return false;
+    try {
+      const host = new URL(rawUrl).hostname.toLowerCase();
+      return BLOCKED_THUMB_HOSTS.has(host);
+    } catch {
+      return false;
+    }
   };
   const normalizePostThumbUrl = (raw) => {
     if (typeof raw !== 'string') return null;
@@ -40,6 +52,7 @@
     if (value.startsWith('//')) value = `https:${value}`;
     else if (value.startsWith('/')) value = `${SITE_ORIGIN}${value}`;
     if (!/^https?:\/\//i.test(value)) return null;
+    if (isBlockedThumbUrl(value)) return null;
     return value;
   };
   const loadExpiredThumbUrls = () => {
@@ -56,8 +69,23 @@
     return out;
   };
   const expiredThumbUrls = loadExpiredThumbUrls();
+  const loadUsableThumbUrls = () => {
+    const out = new Set();
+    try {
+      const raw = localStorage.getItem(USABLE_THUMB_URLS_STORAGE_KEY);
+      if (!raw) return out;
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return out;
+      for (const entry of parsed) {
+        if (typeof entry === 'string' && entry) out.add(entry);
+      }
+    } catch {}
+    return out;
+  };
+  const usableThumbUrls = loadUsableThumbUrls();
   const thumbProbeState = new Map();
-  const thumbProbeInflight = new Map();
+  const thumbValidationInflight = new Map();
+  let thumbLazyObserver = null;
   const persistExpiredThumbUrls = () => {
     try {
       while (expiredThumbUrls.size > MAX_EXPIRED_THUMB_URLS) {
@@ -68,9 +96,20 @@
       localStorage.setItem(EXPIRED_THUMB_URLS_STORAGE_KEY, JSON.stringify(Array.from(expiredThumbUrls)));
     } catch {}
   };
+  const persistUsableThumbUrls = () => {
+    try {
+      while (usableThumbUrls.size > MAX_USABLE_THUMB_URLS) {
+        const first = usableThumbUrls.values().next().value;
+        if (!first) break;
+        usableThumbUrls.delete(first);
+      }
+      localStorage.setItem(USABLE_THUMB_URLS_STORAGE_KEY, JSON.stringify(Array.from(usableThumbUrls)));
+    } catch {}
+  };
   const markThumbUrlExpired = (url) => {
     if (!url || url === DEFAULT_THUMB_URL) return;
     thumbProbeState.set(url, 'bad');
+    if (usableThumbUrls.delete(url)) persistUsableThumbUrls();
     if (!expiredThumbUrls.has(url)) {
       expiredThumbUrls.add(url);
       persistExpiredThumbUrls();
@@ -79,73 +118,135 @@
   const markThumbUrlUsable = (url) => {
     if (!url) return;
     thumbProbeState.set(url, 'ok');
+    if (!usableThumbUrls.has(url)) {
+      usableThumbUrls.add(url);
+      persistUsableThumbUrls();
+    }
     if (expiredThumbUrls.delete(url)) persistExpiredThumbUrls();
   };
   const getThumbDisplayChoice = (raw) => {
     const normalized = normalizePostThumbUrl(raw);
     if (!normalized || normalized === DEFAULT_THUMB_URL) {
-      return { displayUrl: DEFAULT_THUMB_URL, probeUrl: null };
+      return { displayUrl: DEFAULT_THUMB_URL, sourceUrl: null };
     }
     if (expiredThumbUrls.has(normalized) || thumbProbeState.get(normalized) === 'bad') {
-      return { displayUrl: DEFAULT_THUMB_URL, probeUrl: null };
+      return { displayUrl: DEFAULT_THUMB_URL, sourceUrl: null };
     }
-    if (thumbProbeState.get(normalized) === 'ok') {
-      return { displayUrl: normalized, probeUrl: null };
-    }
-    return { displayUrl: DEFAULT_THUMB_URL, probeUrl: normalized };
+    return { displayUrl: normalized, sourceUrl: normalized };
   };
   const setThumbBackgroundUrl = (thumbEl, url) => {
     if (!thumbEl) return;
     const next = typeof url === 'string' && url ? url : DEFAULT_THUMB_URL;
     thumbEl.style.backgroundImage = `url('${next.replace(/'/g,"%27")}')`;
   };
-  const probeThumbUrl = (url) => {
+  const validateThumbUrl = (url) => {
     if (!url || url === DEFAULT_THUMB_URL) return Promise.resolve(true);
-    if (expiredThumbUrls.has(url)) {
-      thumbProbeState.set(url, 'bad');
+    if (isBlockedThumbUrl(url)) {
+      markThumbUrlExpired(url);
       return Promise.resolve(false);
     }
-    const state = thumbProbeState.get(url);
-    if (state === 'ok') return Promise.resolve(true);
-    if (state === 'bad') return Promise.resolve(false);
-    const inflight = thumbProbeInflight.get(url);
+    if (expiredThumbUrls.has(url) || thumbProbeState.get(url) === 'bad') return Promise.resolve(false);
+    if (usableThumbUrls.has(url) || thumbProbeState.get(url) === 'ok') return Promise.resolve(true);
+    const inflight = thumbValidationInflight.get(url);
     if (inflight) return inflight;
     thumbProbeState.set(url, 'pending');
     const pending = new Promise((resolve) => {
       const img = new Image();
-      img.onload = () => {
-        thumbProbeInflight.delete(url);
-        markThumbUrlUsable(url);
-        resolve(true);
+      let settled = false;
+      const finish = (ok) => {
+        if (settled) return;
+        settled = true;
+        thumbValidationInflight.delete(url);
+        if (ok) markThumbUrlUsable(url);
+        else markThumbUrlExpired(url);
+        resolve(!!ok);
       };
-      img.onerror = () => {
-        thumbProbeInflight.delete(url);
-        markThumbUrlExpired(url);
-        resolve(false);
-      };
-      img.src = url;
+      img.onload = () => finish(true);
+      img.onerror = () => finish(false);
+      try {
+        img.src = url;
+      } catch {
+        finish(false);
+      }
     });
-    thumbProbeInflight.set(url, pending);
+    thumbValidationInflight.set(url, pending);
     return pending;
   };
-  const scheduleThumbProbeForRow = (row, thumbEl, url) => {
-    if (!row || !thumbEl || !url) return;
-    row._sctDesiredThumbUrl = url;
-    probeThumbUrl(url).then((ok) => {
-      if (row._sctDesiredThumbUrl !== url) return;
-      const next = ok ? url : DEFAULT_THUMB_URL;
-      if (row._sctThumbUrl !== next) {
-        setThumbBackgroundUrl(thumbEl, next);
-        row._sctThumbUrl = next;
-      }
+  const loadThumbForElement = (thumbEl) => {
+    if (!thumbEl) return;
+    const desiredUrl = thumbEl.dataset.thumbDisplayUrl || '';
+    const sourceUrl = thumbEl.dataset.thumbSourceUrl || '';
+    if (!desiredUrl || !sourceUrl || desiredUrl === DEFAULT_THUMB_URL) {
+      setThumbBackgroundUrl(thumbEl, DEFAULT_THUMB_URL);
+      thumbEl.dataset.thumbLoaded = '1';
+      thumbEl.dataset.thumbLoadedUrl = DEFAULT_THUMB_URL;
+      return;
+    }
+    if (thumbEl.dataset.thumbLoaded === '1' && thumbEl.dataset.thumbLoadedUrl === desiredUrl) return;
+    validateThumbUrl(sourceUrl).then((ok) => {
+      if ((thumbEl.dataset.thumbSourceUrl || '') !== sourceUrl) return;
+      const next = ok ? desiredUrl : DEFAULT_THUMB_URL;
+      setThumbBackgroundUrl(thumbEl, next);
+      thumbEl.dataset.thumbLoaded = '1';
+      thumbEl.dataset.thumbLoadedUrl = next;
+      const observer = ensureThumbLazyObserver();
+      if (observer) observer.unobserve(thumbEl);
     }).catch(() => {
-      if (row._sctDesiredThumbUrl !== url) return;
-      markThumbUrlExpired(url);
-      if (row._sctThumbUrl !== DEFAULT_THUMB_URL) {
-        setThumbBackgroundUrl(thumbEl, DEFAULT_THUMB_URL);
-        row._sctThumbUrl = DEFAULT_THUMB_URL;
-      }
+      if ((thumbEl.dataset.thumbSourceUrl || '') !== sourceUrl) return;
+      markThumbUrlExpired(sourceUrl);
+      setThumbBackgroundUrl(thumbEl, DEFAULT_THUMB_URL);
+      thumbEl.dataset.thumbLoaded = '1';
+      thumbEl.dataset.thumbLoadedUrl = DEFAULT_THUMB_URL;
+      const observer = ensureThumbLazyObserver();
+      if (observer) observer.unobserve(thumbEl);
     });
+  };
+  const ensureThumbLazyObserver = () => {
+    if (thumbLazyObserver || typeof IntersectionObserver !== 'function') return thumbLazyObserver;
+    thumbLazyObserver = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        const thumbEl = entry?.target;
+        if (!thumbEl) continue;
+        if (!entry.isIntersecting && entry.intersectionRatio <= 0) continue;
+        thumbEl.dataset.thumbVisible = '1';
+        loadThumbForElement(thumbEl);
+      }
+    }, { root: null, rootMargin: '300px 0px', threshold: 0.01 });
+    return thumbLazyObserver;
+  };
+  const setThumbImageUrl = (thumbEl, url, sourceUrl = null) => {
+    if (!thumbEl) return;
+    const next = typeof url === 'string' && url ? url : DEFAULT_THUMB_URL;
+    const nextSource = sourceUrl && sourceUrl !== DEFAULT_THUMB_URL ? sourceUrl : '';
+    const unchanged = thumbEl.dataset.thumbDisplayUrl === next && thumbEl.dataset.thumbSourceUrl === nextSource;
+    thumbEl.dataset.thumbDisplayUrl = next;
+    thumbEl.dataset.thumbSourceUrl = nextSource;
+    if (!nextSource) {
+      setThumbBackgroundUrl(thumbEl, next);
+      thumbEl.dataset.thumbLoaded = '1';
+      thumbEl.dataset.thumbLoadedUrl = next;
+      const observer = ensureThumbLazyObserver();
+      if (observer) observer.unobserve(thumbEl);
+      return;
+    }
+    if (unchanged) {
+      if (thumbEl.dataset.thumbLoaded !== '1') {
+        const observer = ensureThumbLazyObserver();
+        if (observer) observer.observe(thumbEl);
+        else loadThumbForElement(thumbEl);
+      }
+      return;
+    }
+    thumbEl.dataset.thumbLoaded = '0';
+    thumbEl.dataset.thumbLoadedUrl = '';
+    setThumbBackgroundUrl(thumbEl, DEFAULT_THUMB_URL);
+    const observer = ensureThumbLazyObserver();
+    if (observer) {
+      observer.observe(thumbEl);
+      if (thumbEl.dataset.thumbVisible === '1') loadThumbForElement(thumbEl);
+    } else {
+      loadThumbForElement(thumbEl);
+    }
   };
   const COLORS = [
     '#7dc4ff','#ff8a7a','#ffd166','#95e06c','#c792ea','#64d3ff','#ffa7c4','#9fd3c7','#f6bd60','#84a59d','#f28482',
@@ -2874,11 +2975,11 @@
     }
     const thumbChoice = getThumbDisplayChoice(p.thumb);
     if (thumbDiv) {
-      if (row._sctThumbUrl !== thumbChoice.displayUrl) {
-        setThumbBackgroundUrl(thumbDiv, thumbChoice.displayUrl);
+      if (row._sctThumbUrl !== thumbChoice.displayUrl || row._sctThumbSourceUrl !== thumbChoice.sourceUrl) {
+        setThumbImageUrl(thumbDiv, thumbChoice.displayUrl, thumbChoice.sourceUrl);
         row._sctThumbUrl = thumbChoice.displayUrl;
+        row._sctThumbSourceUrl = thumbChoice.sourceUrl;
       }
-      if (thumbChoice.probeUrl) scheduleThumbProbeForRow(row, thumbDiv, thumbChoice.probeUrl);
       const dotDiv = cache.dotDiv || thumbDiv.querySelector('.dot');
       if (dotDiv && typeof colorFor === 'function') {
         const nextColor = colorFor(p.pid);
@@ -2931,7 +3032,7 @@
 
     const thumbDiv = document.createElement('div');
     thumbDiv.className = 'thumb';
-    setThumbBackgroundUrl(thumbDiv, thumbChoice.displayUrl);
+    setThumbImageUrl(thumbDiv, thumbChoice.displayUrl, thumbChoice.sourceUrl);
     const dotDiv = document.createElement('div');
     dotDiv.className = 'dot';
     dotDiv.style.background = color;
@@ -2983,9 +3084,9 @@
     row._sctCache = { thumbDiv, thumbLink, dotDiv, link, statsDiv, toggleDiv };
     row._sctLabelKey = buildPostLabelKey(p);
     row._sctThumbUrl = thumbChoice.displayUrl;
+    row._sctThumbSourceUrl = thumbChoice.sourceUrl;
     row._sctPurgeSnippet = truncateForPurgeCaption(p.caption || p.label || p.pid);
     if (opts && typeof opts.onPurge === 'function') row._sctOnPurge = opts.onPurge;
-    if (thumbChoice.probeUrl) scheduleThumbProbeForRow(row, thumbDiv, thumbChoice.probeUrl);
 
     if (visibleSet && !visibleSet.has(p.pid)) { row.classList.add('hidden'); toggleDiv.textContent = 'Show'; }
     return row;
