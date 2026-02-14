@@ -1863,23 +1863,43 @@
       return;
     }
     const runEpoch = snapshotsHydrationEpoch;
+    const allUserKeys = Object.keys(metrics?.users || {});
+    const targetUserKeys = (function(){
+      if (!isMetricsPartial) return allUserKeys;
+      if (currentUserKey && metrics?.users?.[currentUserKey]) return [currentUserKey];
+      return allUserKeys;
+    })();
     snapLog('ensureFullSnapshots:start', {
       currentUserKey,
       runEpoch,
+      isMetricsPartial,
+      allUserCount: allUserKeys.length,
+      targetUserCount: targetUserKeys.length,
       beforeSummary: summarizeMetricsSnapshots(metrics)
     });
     snapshotsHydrationPromise = (async () => {
-      const mergeStats = { shardCount: 0, userCount: 0, postCount: 0, snapshotsAdded: 0 };
+      const mergeStats = { requestedShards: 0, hydratedShards: 0, userCount: 0, postCount: 0, snapshotsAdded: 0, aborted: false };
       try {
-        const allStorage = await chrome.storage.local.get(null);
-        for (const [key, shard] of Object.entries(allStorage)) {
-          if (!key.startsWith(COLD_PREFIX)) continue;
-          mergeStats.shardCount++;
-          const userKey = key.slice(COLD_PREFIX.length);
+        const shardKeys = targetUserKeys.map((userKey)=> COLD_PREFIX + userKey);
+        const allStorage = shardKeys.length ? await chrome.storage.local.get(shardKeys) : {};
+        mergeStats.requestedShards = shardKeys.length;
+        for (const userKey of targetUserKeys) {
+          if (runEpoch !== snapshotsHydrationEpoch) {
+            mergeStats.aborted = true;
+            break;
+          }
+          const key = COLD_PREFIX + userKey;
+          const shard = allStorage?.[key];
+          if (!shard || typeof shard !== 'object') continue;
+          mergeStats.hydratedShards++;
           const user = metrics.users?.[userKey];
           if (!user?.posts) continue;
           mergeStats.userCount++;
           for (const [postId, coldSnaps] of Object.entries(shard)) {
+            if (runEpoch !== snapshotsHydrationEpoch) {
+              mergeStats.aborted = true;
+              break;
+            }
             if (!Array.isArray(coldSnaps) || !coldSnaps.length) continue;
             const post = user.posts[postId];
             if (!post) continue;
@@ -1897,6 +1917,7 @@
             // Sort by timestamp
             post.snapshots.sort((a, b) => (a.t || 0) - (b.t || 0));
           }
+          if (mergeStats.aborted) break;
         }
       } catch (err) {
         try { console.warn('[SoraMetrics] cold shard hydration failed', err); } catch {}
@@ -8006,13 +8027,42 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       setPostsHydrateState(true);
       const chunkSize = 200;
       const chunkBudgetMs = 14;
-      const uiThrottleMs = 200;
+      const uiThrottleMs = 450;
       let lastUiAt = 0;
       let entries = null;
       let storedUser = null;
       let targetUser = null;
       let idx = 0;
       let postCount = 0;
+      let queuedRefreshOpts = null;
+      let refreshScheduled = false;
+      let refreshInFlight = false;
+
+      const scheduleQueuedRefresh = () => {
+        if (refreshScheduled || refreshInFlight || !queuedRefreshOpts) return;
+        refreshScheduled = true;
+        setTimeout(() => {
+          refreshScheduled = false;
+          if (postHydrationToken !== hydrateToken || currentUserKey !== hydrateKey) {
+            queuedRefreshOpts = null;
+            return;
+          }
+          const opts = queuedRefreshOpts;
+          queuedRefreshOpts = null;
+          if (!opts) return;
+          refreshInFlight = true;
+          Promise.resolve(refreshUserUI(opts))
+            .catch(() => {})
+            .finally(() => {
+              refreshInFlight = false;
+              scheduleQueuedRefresh();
+            });
+        }, 0);
+      };
+      const queueRefresh = (opts) => {
+        queuedRefreshOpts = opts;
+        scheduleQueuedRefresh();
+      };
 
       const tick = () => {
         if (postHydrationToken !== hydrateToken) return;
@@ -8030,7 +8080,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         const now = performance.now();
         if (processed && (now - lastUiAt >= uiThrottleMs || idx >= entries.length)) {
           syncUserOptionCount(hydrateKey, postCount);
-          refreshUserUI({ preserveEmpty: true, skipRestoreZoom: true, autoRefresh: true, skipCharts: true, skipPostListRebuild: true });
+          queueRefresh({ preserveEmpty: true, skipRestoreZoom: true, autoRefresh: true, skipCharts: true, skipPostListRebuild: true });
           lastUiAt = now;
         }
         if (idx < entries.length) {
@@ -8040,18 +8090,13 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           if (Array.isArray(storedUser.cameos)) targetUser.cameos = storedUser.cameos;
           syncUserOptionCount(hydrateKey, postCount);
           setPostsHydrateState(false);
-          invalidateSnapshotHydration('hydrateCurrentUserPosts:done', {
-            hydrateKey,
-            hydrateToken,
-            postCount
-          });
           snapLog('hydrateCurrentUserPosts:done', {
             hydrateKey,
             hydrateToken,
             postCount,
             afterSummary: summarizeUserSnapshots(targetUser)
           });
-          refreshUserUI({ preserveEmpty: true, skipRestoreZoom: true, autoRefresh: true });
+          queueRefresh({ preserveEmpty: true, skipRestoreZoom: true, autoRefresh: true });
         }
       };
 
@@ -8118,7 +8163,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       setMetricsHydrateState(true);
       const chunkSize = 60;
       const chunkBudgetMs = 14;
-      const uiThrottleMs = 200;
+      const uiThrottleMs = 600;
       let lastUiAt = 0;
 
       return new Promise((resolve) => {
@@ -8145,10 +8190,6 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
             }
             // Chunk hydration replaces in-memory users from hot storage; ensure cold snapshots
             // are merged again once hydration completes.
-            invalidateSnapshotHydration('hydrateMetrics:overwriteFromHotStorage', {
-              hydrateToken,
-              storedUserCount: entries.length
-            });
             snapLog('hydrateMetrics:overwriteFromHotStorage', {
               hydrateToken,
               storedUserCount: entries.length,
@@ -8181,9 +8222,6 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
               const now = performance.now();
               if (processed && (now - lastUiAt >= uiThrottleMs || idx >= entries.length)) {
                 syncUserOptionCounts();
-                if (currentUserKey && resolveUserForKey(metrics, currentUserKey)) {
-                  refreshUserUI({ preserveEmpty: true, skipRestoreZoom: true, autoRefresh: true, skipCharts: true, skipPostListRebuild: true });
-                }
                 lastUiAt = now;
               }
               if (idx < entries.length) {
