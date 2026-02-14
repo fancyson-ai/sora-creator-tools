@@ -69,7 +69,7 @@ This project is licensed under the MIT License (see [LICENSE](./LICENSE)).
 Contributors:
 - Will ([@fancyson](https://fancyson.ai))
 - Topher ([@cameoed](https://sora.com/profile/cameoed))
-- Skye ([@cosmic-skye](https://skye.page))
+- Skye ([@cosmicskye](https://skye.page))
 
 Contributions are accepted under the DCO (see [CONTRIBUTING.md](./CONTRIBUTING.md)).
 

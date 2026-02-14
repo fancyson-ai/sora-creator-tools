@@ -14,7 +14,9 @@
   const ULTRA_MODE_STORAGE_KEY = 'SCT_ULTRA_MODE_V1';
   const ULTRA_MODE_TAP_COUNT = 5;
     const SITE_ORIGIN = 'https://sora.chatgpt.com';
-  const DEFAULT_THUMB_URL = 'icons/blank.webp';
+  const DEFAULT_THUMB_URL = 'icons/logo.webp';
+  const EXPIRED_THUMB_URLS_STORAGE_KEY = 'SCT_EXPIRED_THUMB_URLS_V1';
+  const MAX_EXPIRED_THUMB_URLS = 2000;
   const CUSTOM_FILTER_PREFIX = 'custom:';
   const absUrl = (u, pid) => {
     if (!u && pid) return `${SITE_ORIGIN}/p/${pid}`;
@@ -22,6 +24,128 @@
     if (/^https?:\/\//i.test(u)) return u;
     if (u.startsWith('/')) return SITE_ORIGIN + u;
     return SITE_ORIGIN + '/' + u;
+  };
+  const normalizePostThumbUrl = (raw) => {
+    if (typeof raw !== 'string') return null;
+    let value = raw.trim();
+    if (!value) return null;
+    value = value
+      .replace(/^['"]+|['"]+$/g, '')
+      .replace(/\\u003a/gi, ':')
+      .replace(/\\u002f/gi, '/')
+      .replace(/\\u0026/gi, '&')
+      .replace(/\\\//g, '/')
+      .replace(/&amp;/gi, '&');
+    if (!value || value.startsWith('data:')) return null;
+    if (value.startsWith('//')) value = `https:${value}`;
+    else if (value.startsWith('/')) value = `${SITE_ORIGIN}${value}`;
+    if (!/^https?:\/\//i.test(value)) return null;
+    return value;
+  };
+  const loadExpiredThumbUrls = () => {
+    const out = new Set();
+    try {
+      const raw = localStorage.getItem(EXPIRED_THUMB_URLS_STORAGE_KEY);
+      if (!raw) return out;
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return out;
+      for (const entry of parsed) {
+        if (typeof entry === 'string' && entry) out.add(entry);
+      }
+    } catch {}
+    return out;
+  };
+  const expiredThumbUrls = loadExpiredThumbUrls();
+  const thumbProbeState = new Map();
+  const thumbProbeInflight = new Map();
+  const persistExpiredThumbUrls = () => {
+    try {
+      while (expiredThumbUrls.size > MAX_EXPIRED_THUMB_URLS) {
+        const first = expiredThumbUrls.values().next().value;
+        if (!first) break;
+        expiredThumbUrls.delete(first);
+      }
+      localStorage.setItem(EXPIRED_THUMB_URLS_STORAGE_KEY, JSON.stringify(Array.from(expiredThumbUrls)));
+    } catch {}
+  };
+  const markThumbUrlExpired = (url) => {
+    if (!url || url === DEFAULT_THUMB_URL) return;
+    thumbProbeState.set(url, 'bad');
+    if (!expiredThumbUrls.has(url)) {
+      expiredThumbUrls.add(url);
+      persistExpiredThumbUrls();
+    }
+  };
+  const markThumbUrlUsable = (url) => {
+    if (!url) return;
+    thumbProbeState.set(url, 'ok');
+    if (expiredThumbUrls.delete(url)) persistExpiredThumbUrls();
+  };
+  const getThumbDisplayChoice = (raw) => {
+    const normalized = normalizePostThumbUrl(raw);
+    if (!normalized || normalized === DEFAULT_THUMB_URL) {
+      return { displayUrl: DEFAULT_THUMB_URL, probeUrl: null };
+    }
+    if (expiredThumbUrls.has(normalized) || thumbProbeState.get(normalized) === 'bad') {
+      return { displayUrl: DEFAULT_THUMB_URL, probeUrl: null };
+    }
+    if (thumbProbeState.get(normalized) === 'ok') {
+      return { displayUrl: normalized, probeUrl: null };
+    }
+    return { displayUrl: DEFAULT_THUMB_URL, probeUrl: normalized };
+  };
+  const setThumbBackgroundUrl = (thumbEl, url) => {
+    if (!thumbEl) return;
+    const next = typeof url === 'string' && url ? url : DEFAULT_THUMB_URL;
+    thumbEl.style.backgroundImage = `url('${next.replace(/'/g,"%27")}')`;
+  };
+  const probeThumbUrl = (url) => {
+    if (!url || url === DEFAULT_THUMB_URL) return Promise.resolve(true);
+    if (expiredThumbUrls.has(url)) {
+      thumbProbeState.set(url, 'bad');
+      return Promise.resolve(false);
+    }
+    const state = thumbProbeState.get(url);
+    if (state === 'ok') return Promise.resolve(true);
+    if (state === 'bad') return Promise.resolve(false);
+    const inflight = thumbProbeInflight.get(url);
+    if (inflight) return inflight;
+    thumbProbeState.set(url, 'pending');
+    const pending = new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        thumbProbeInflight.delete(url);
+        markThumbUrlUsable(url);
+        resolve(true);
+      };
+      img.onerror = () => {
+        thumbProbeInflight.delete(url);
+        markThumbUrlExpired(url);
+        resolve(false);
+      };
+      img.src = url;
+    });
+    thumbProbeInflight.set(url, pending);
+    return pending;
+  };
+  const scheduleThumbProbeForRow = (row, thumbEl, url) => {
+    if (!row || !thumbEl || !url) return;
+    row._sctDesiredThumbUrl = url;
+    probeThumbUrl(url).then((ok) => {
+      if (row._sctDesiredThumbUrl !== url) return;
+      const next = ok ? url : DEFAULT_THUMB_URL;
+      if (row._sctThumbUrl !== next) {
+        setThumbBackgroundUrl(thumbEl, next);
+        row._sctThumbUrl = next;
+      }
+    }).catch(() => {
+      if (row._sctDesiredThumbUrl !== url) return;
+      markThumbUrlExpired(url);
+      if (row._sctThumbUrl !== DEFAULT_THUMB_URL) {
+        setThumbBackgroundUrl(thumbEl, DEFAULT_THUMB_URL);
+        row._sctThumbUrl = DEFAULT_THUMB_URL;
+      }
+    });
   };
   const COLORS = [
     '#7dc4ff','#ff8a7a','#ffd166','#95e06c','#c792ea','#64d3ff','#ffa7c4','#9fd3c7','#f6bd60','#84a59d','#f28482',
@@ -2532,13 +2656,13 @@
       if (thumbLink.href !== p.url) thumbLink.href = p.url;
       if (thumbLink.title !== p.title) thumbLink.title = p.title;
     }
-    const nextThumbUrl = p.thumb || DEFAULT_THUMB_URL;
+    const thumbChoice = getThumbDisplayChoice(p.thumb);
     if (thumbDiv) {
-      if (row._sctThumbUrl !== nextThumbUrl) {
-        const nextThumb = nextThumbUrl ? `url('${nextThumbUrl.replace(/'/g,"%27")}')` : '';
-        thumbDiv.style.backgroundImage = nextThumb;
-        row._sctThumbUrl = nextThumbUrl;
+      if (row._sctThumbUrl !== thumbChoice.displayUrl) {
+        setThumbBackgroundUrl(thumbDiv, thumbChoice.displayUrl);
+        row._sctThumbUrl = thumbChoice.displayUrl;
       }
+      if (thumbChoice.probeUrl) scheduleThumbProbeForRow(row, thumbDiv, thumbChoice.probeUrl);
       const dotDiv = cache.dotDiv || thumbDiv.querySelector('.dot');
       if (dotDiv && typeof colorFor === 'function') {
         const nextColor = colorFor(p.pid);
@@ -2580,7 +2704,7 @@
     row.className = 'post';
     row.dataset.pid = p.pid;
     const color = typeof colorFor === 'function' ? colorFor(p.pid) : getPaletteColor(0);
-    const thumbUrl = p.thumb || DEFAULT_THUMB_URL;
+    const thumbChoice = getThumbDisplayChoice(p.thumb);
 
     const thumbLink = document.createElement('a');
     thumbLink.className = 'thumb-link';
@@ -2591,7 +2715,7 @@
 
     const thumbDiv = document.createElement('div');
     thumbDiv.className = 'thumb';
-    if (thumbUrl) thumbDiv.style.backgroundImage = `url('${thumbUrl.replace(/'/g,"%27")}')`;
+    setThumbBackgroundUrl(thumbDiv, thumbChoice.displayUrl);
     const dotDiv = document.createElement('div');
     dotDiv.className = 'dot';
     dotDiv.style.background = color;
@@ -2642,9 +2766,10 @@
     row.appendChild(purgeBtn);
     row._sctCache = { thumbDiv, thumbLink, dotDiv, link, statsDiv, toggleDiv };
     row._sctLabelKey = buildPostLabelKey(p);
-    row._sctThumbUrl = thumbUrl;
+    row._sctThumbUrl = thumbChoice.displayUrl;
     row._sctPurgeSnippet = truncateForPurgeCaption(p.caption || p.label || p.pid);
     if (opts && typeof opts.onPurge === 'function') row._sctOnPurge = opts.onPurge;
+    if (thumbChoice.probeUrl) scheduleThumbProbeForRow(row, thumbDiv, thumbChoice.probeUrl);
 
     if (visibleSet && !visibleSet.has(p.pid)) { row.classList.add('hidden'); toggleDiv.textContent = 'Show'; }
     return row;
