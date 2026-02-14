@@ -1667,6 +1667,27 @@
     }
     return metrics?.users?.[userKey] || null;
   }
+  function keyMatchesUserIdentity(metrics, candidateKey, userKey, user){
+    if (!candidateKey || !userKey || !user) return false;
+    if (candidateKey === userKey) return true;
+    const curHandle = normalizeCameoName(user?.handle || (userKey.startsWith('h:') ? userKey.slice(2) : ''));
+    const curId = String(user?.id || (userKey.startsWith('id:') ? userKey.slice(3) : '') || '');
+    if (candidateKey.startsWith('id:')) {
+      const candidateId = String(candidateKey.slice(3) || '');
+      if (candidateId && curId && candidateId === curId) return true;
+    }
+    if (candidateKey.startsWith('h:')) {
+      const candidateHandle = normalizeCameoName(candidateKey.slice(2));
+      if (candidateHandle && curHandle && candidateHandle === curHandle) return true;
+    }
+    const candidateUser = metrics?.users?.[candidateKey];
+    if (!candidateUser) return false;
+    const candidateId = String(candidateUser?.id || (candidateKey.startsWith('id:') ? candidateKey.slice(3) : '') || '');
+    const candidateHandle = normalizeCameoName(candidateUser?.handle || candidateUser?.userHandle || (candidateKey.startsWith('h:') ? candidateKey.slice(2) : ''));
+    if (candidateId && curId && candidateId === curId) return true;
+    if (candidateHandle && curHandle && candidateHandle === curHandle) return true;
+    return false;
+  }
   const DBG_SORT = false; // hide noisy sorting logs by default
 
   // Reconcile posts for the selected user:
@@ -1690,8 +1711,9 @@
         const ownerKey = (p && p.ownerKey) ? String(p.ownerKey) : null;
         const ownerId = (p && p.ownerId) ? String(p.ownerId) : null;
         const ownerHandle = (p && p.ownerHandle) ? String(p.ownerHandle).toLowerCase() : null;
+        const ownerKeyMatchesCurrent = ownerKey ? keyMatchesUserIdentity(metrics, ownerKey, userKey, user) : false;
         let targetKey = null;
-        if (ownerKey && ownerKey !== userKey){
+        if (ownerKey && ownerKey !== userKey && !ownerKeyMatchesCurrent){
           targetKey = ownerKey;
         } else if (ownerId && curId && ownerId !== curId){
           // Explicit id mismatch → move to owner id bucket
@@ -1719,6 +1741,9 @@
             p.ownerKey = userKey;
             if (!p.ownerHandle && curHandle) p.ownerHandle = curHandle;
             if (!p.ownerId && curId) p.ownerId = curId;
+          } else if (ownerKeyMatchesCurrent && ownerKey !== userKey) {
+            // Normalize alias key (id:/h:) to the selected bucket key to avoid flip-flop moves.
+            p.ownerKey = userKey;
           }
           keep[pid] = p; // stay under current user
         }
@@ -1785,7 +1810,7 @@
         const oKey = p.ownerKey ? String(p.ownerKey) : null;
         const oId = p.ownerId ? String(p.ownerId) : null;
         const oHandle = p.ownerHandle ? String(p.ownerHandle).toLowerCase() : null;
-        const matchByKey = oKey && oKey === userKey;
+        const matchByKey = oKey && keyMatchesUserIdentity(metrics, oKey, userKey, user);
         const matchById = oId && curId && oId === curId;
         const matchByHandle = oHandle && curHandle && oHandle === curHandle;
         if (matchByKey || matchById || matchByHandle){
