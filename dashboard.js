@@ -421,6 +421,17 @@
       return false;
     }
   })();
+  const OWNER_PRUNE_STORAGE_KEY = 'SCT_DASHBOARD_ENABLE_OWNER_PRUNE';
+  const OWNER_PRUNE_ENABLED = (function(){
+    try {
+      const raw = localStorage.getItem(OWNER_PRUNE_STORAGE_KEY);
+      if (raw == null) return false;
+      const norm = String(raw).trim().toLowerCase();
+      return norm === '1' || norm === 'true' || norm === 'yes' || norm === 'on';
+    } catch {
+      return false;
+    }
+  })();
   let snapDebugSeq = 0;
   function summarizeUserSnapshots(user){
     const posts = Object.values(user?.posts || {});
@@ -1700,6 +1711,30 @@
     }
     return aliases;
   }
+  function resolveCanonicalUserKey(metrics, userKey, user = null){
+    if (!userKey || !metrics?.users) return null;
+    if (metrics.users[userKey]) return userKey;
+    const resolvedUser = user || resolveUserForKey(metrics, userKey);
+    if (!resolvedUser) return null;
+    for (const [key, candidate] of Object.entries(metrics.users || {})) {
+      if (candidate === resolvedUser) return key;
+    }
+    let best = null;
+    for (const key of Object.keys(metrics.users || {})) {
+      if (key === 'unknown' || isCameoKey(key) || isTopTodayKey(key)) continue;
+      if (!keyMatchesUserIdentity(metrics, key, userKey, resolvedUser)) continue;
+      if (key === userKey) return key;
+      if (!best) { best = key; continue; }
+      const prefPrefix = userKey.startsWith('h:') ? 'h:' : (userKey.startsWith('id:') ? 'id:' : '');
+      const keyPref = prefPrefix && key.startsWith(prefPrefix);
+      const bestPref = prefPrefix && best.startsWith(prefPrefix);
+      if (keyPref && !bestPref) { best = key; continue; }
+      const keyPosts = getUserPostCount(metrics.users[key]);
+      const bestPosts = getUserPostCount(metrics.users[best]);
+      if (keyPosts > bestPosts) best = key;
+    }
+    return best;
+  }
   const DBG_SORT = false; // hide noisy sorting logs by default
 
   // Reconcile posts for the selected user:
@@ -1784,6 +1819,8 @@
       const removed = [];
       const keep = {};
       const keys = Object.keys(user.posts);
+      const now = Date.now();
+      const OLD_POST_THRESHOLD_MS = 24 * 60 * 60 * 1000;
       const hasAnyMetric = (s)=>{
         if (!s) return false;
         const fields = ['uv','views','likes','comments','remix_count'];
@@ -1795,6 +1832,21 @@
         const snaps = Array.isArray(p?.snapshots) ? p.snapshots : [];
         const valid = snaps.length > 0 && snaps.some(hasAnyMetric);
         if (!valid){
+          const refreshedAt = lastRefreshMsForPost(p)
+            || toTs(p?.post_time)
+            || toTs(p?.postTime)
+            || toTs(p?.created_at)
+            || toTs(p?.createdAt)
+            || 0;
+          if (refreshedAt > 0 && (now - refreshedAt) < OLD_POST_THRESHOLD_MS) {
+            keep[pid] = p;
+            continue;
+          }
+          if (!refreshedAt) {
+            // When timestamp data is missing, keep to avoid accidental data loss.
+            keep[pid] = p;
+            continue;
+          }
           removed.push(pid);
         } else {
           keep[pid] = p;
@@ -1810,8 +1862,9 @@
     }
   }
   // Try to reclaim posts from the 'unknown' bucket that clearly belong to the selected user.
-  async function reclaimFromUnknownForUser(metrics, userKey){
+  async function reclaimFromUnknownForUser(metrics, userKey, opts = {}){
     try {
+      const removeFromUnknown = opts.removeFromUnknown === true;
       const user = metrics?.users?.[userKey];
       const unk = metrics?.users?.unknown;
       if (!user || !unk || !unk.posts) return { moved: 0 };
@@ -1832,7 +1885,9 @@
           if (!p.ownerKey) p.ownerKey = userKey;
           if (!p.ownerHandle && curHandle) p.ownerHandle = curHandle;
           if (!p.ownerId && curId) p.ownerId = curId;
-          delete unk.posts[pid];
+          if (removeFromUnknown) {
+            delete unk.posts[pid];
+          }
           moved++;
         }
       }
@@ -1970,6 +2025,15 @@
     }
   }
 
+  function shouldRunPostOwnershipMaintenance(opts = {}){
+    if (!OWNER_PRUNE_ENABLED) return false;
+    const userKey = opts.currentUserKey;
+    if (!userKey || isVirtualUserKey(userKey)) return false;
+    if (opts.isMetricsPartial) return false;
+    if (opts.autoRefresh) return false;
+    return true;
+  }
+
   async function getMetricsUpdatedAt(){
     try {
       const st = await chrome.storage.local.get('metricsUpdatedAt');
@@ -2027,53 +2091,78 @@
     return metrics;
   }
 
-  async function ensureFullSnapshots() {
-    if (snapshotsHydrated && snapshotsHydratedForKey === currentUserKey) {
-      snapLog('ensureFullSnapshots:skip', { reason: 'already_hydrated', currentUserKey });
+  function buildSnapshotHydrationPlan(opts = {}){
+    const allUserKeys = Object.keys(metrics?.users || {});
+    const explicitKeys = Array.isArray(opts.userKeys)
+      ? opts.userKeys.filter((key) => typeof key === 'string' && key)
+      : null;
+    const baseKeys = explicitKeys && explicitKeys.length
+      ? explicitKeys
+      : ((!currentUserKey || !resolveUserForKey(metrics, currentUserKey)) ? allUserKeys : [currentUserKey]);
+    const targetSet = new Set();
+    const canonicalByTarget = new Map();
+    const addTarget = (targetKey, canonicalKey) => {
+      if (!targetKey || typeof targetKey !== 'string') return;
+      if (!targetSet.has(targetKey)) targetSet.add(targetKey);
+      if (canonicalKey && !canonicalByTarget.has(targetKey)) canonicalByTarget.set(targetKey, canonicalKey);
+    };
+    for (const baseKey of baseKeys) {
+      const baseUser = resolveUserForKey(metrics, baseKey);
+      const canonicalKey = resolveCanonicalUserKey(metrics, baseKey, baseUser) || baseKey;
+      const canonicalUser = metrics?.users?.[canonicalKey] || baseUser;
+      addTarget(canonicalKey, canonicalKey);
+      addTarget(baseKey, canonicalKey);
+      if (!canonicalUser) continue;
+      const aliases = findAliasKeysForUser(metrics, canonicalKey, canonicalUser);
+      for (const aliasKey of aliases) addTarget(aliasKey, canonicalKey);
+    }
+    if (!targetSet.size) {
+      for (const key of allUserKeys) addTarget(key, key);
+    }
+    const targetUserKeys = Array.from(targetSet);
+    const scopeKey = `users:${targetUserKeys.slice().sort().join('|')}`;
+    return {
+      allUserKeys,
+      targetUserKeys,
+      canonicalByTarget,
+      scopeKey
+    };
+  }
+
+  async function ensureFullSnapshots(opts = {}) {
+    const plan = buildSnapshotHydrationPlan(opts);
+    if (snapshotsHydrated && snapshotsHydratedForKey === plan.scopeKey) {
+      snapLog('ensureFullSnapshots:skip', { reason: 'already_hydrated', currentUserKey, scopeKey: plan.scopeKey });
       return;
     }
     while (snapshotsHydrationPromise) {
       const promiseToJoin = snapshotsHydrationPromise;
       snapLog('ensureFullSnapshots:join', {
         currentUserKey,
+        scopeKey: plan.scopeKey,
         snapshotsHydrationEpoch
       });
       await promiseToJoin;
-      // If the joined hydration succeeded for this user, we're done
-      if (snapshotsHydrated && snapshotsHydratedForKey === currentUserKey) return;
-      // Safety: if the same promise is still set (shouldn't happen — .finally() clears it),
-      // break to avoid an infinite loop.
+      if (snapshotsHydrated && snapshotsHydratedForKey === plan.scopeKey) return;
       if (snapshotsHydrationPromise === promiseToJoin) break;
-      // Otherwise the hydration was stale (epoch mismatch / different user) — loop to
-      // check if another caller started a new one, or fall through to start fresh
     }
     const runEpoch = snapshotsHydrationEpoch;
-    const allUserKeys = Object.keys(metrics?.users || {});
-    const targetUserKeys = (function(){
-      if (!currentUserKey || !metrics?.users?.[currentUserKey]) {
-        return allUserKeys;
-      }
-      // Only load cold shards for current user + aliases (not all users)
-      const user = metrics.users[currentUserKey];
-      const keys = [currentUserKey, ...findAliasKeysForUser(metrics, currentUserKey, user)];
-      return keys;
-    })();
     snapLog('ensureFullSnapshots:start', {
       currentUserKey,
+      scopeKey: plan.scopeKey,
       runEpoch,
       isMetricsPartial,
-      allUserCount: allUserKeys.length,
-      targetUserCount: targetUserKeys.length,
+      allUserCount: plan.allUserKeys.length,
+      targetUserCount: plan.targetUserKeys.length,
       beforeSummary: summarizeMetricsSnapshots(metrics)
     });
-    const capturedUserKey = currentUserKey;
     snapshotsHydrationPromise = (async () => {
       const mergeStats = { requestedShards: 0, hydratedShards: 0, userCount: 0, postCount: 0, snapshotsAdded: 0, aborted: false };
       try {
-        const shardKeys = targetUserKeys.map((userKey)=> COLD_PREFIX + userKey);
+        const shardKeys = plan.targetUserKeys.map((userKey)=> COLD_PREFIX + userKey);
         const allStorage = shardKeys.length ? await chrome.storage.local.get(shardKeys) : {};
         mergeStats.requestedShards = shardKeys.length;
-        for (const userKey of targetUserKeys) {
+        for (const userKey of plan.targetUserKeys) {
           if (runEpoch !== snapshotsHydrationEpoch) {
             mergeStats.aborted = true;
             break;
@@ -2083,8 +2172,8 @@
           if (!shard || typeof shard !== 'object') continue;
           mergeStats.hydratedShards++;
           const user = metrics.users?.[userKey];
-          const isAlias = userKey !== capturedUserKey;
-          const canonicalUser = isAlias ? metrics.users?.[capturedUserKey] : null;
+          const canonicalKey = plan.canonicalByTarget.get(userKey) || userKey;
+          const canonicalUser = canonicalKey && canonicalKey !== userKey ? metrics.users?.[canonicalKey] : null;
           if (!user?.posts && !canonicalUser?.posts) continue;
           mergeStats.userCount++;
           for (const [postId, coldSnaps] of Object.entries(shard)) {
@@ -2093,12 +2182,10 @@
               break;
             }
             if (!Array.isArray(coldSnaps) || !coldSnaps.length) continue;
-            // For alias cold shards, prefer canonical user's post as merge target
-            const post = (isAlias ? canonicalUser?.posts?.[postId] : null) || user?.posts?.[postId];
+            const post = (canonicalUser?.posts?.[postId]) || user?.posts?.[postId];
             if (!post) continue;
             mergeStats.postCount++;
             if (!Array.isArray(post.snapshots)) post.snapshots = [];
-            // Merge cold snapshots, deduplicating by timestamp
             const existingTs = new Set(post.snapshots.map(s => s.t));
             for (const s of coldSnaps) {
               if (!existingTs.has(s.t)) {
@@ -2107,7 +2194,6 @@
                 mergeStats.snapshotsAdded++;
               }
             }
-            // Sort by timestamp
             post.snapshots.sort((a, b) => (a.t || 0) - (b.t || 0));
           }
           if (mergeStats.aborted) break;
@@ -2118,10 +2204,11 @@
       }
       const epochStable = runEpoch === snapshotsHydrationEpoch;
       snapshotsHydrated = epochStable;
-      snapshotsHydratedForKey = epochStable ? capturedUserKey : null;
+      snapshotsHydratedForKey = epochStable ? plan.scopeKey : null;
       const afterSummary = summarizeMetricsSnapshots(metrics);
       snapLog('ensureFullSnapshots:done', {
         ...mergeStats,
+        scopeKey: plan.scopeKey,
         runEpoch,
         snapshotsHydrationEpoch,
         epochStable,
@@ -6874,7 +6961,8 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         refreshUserUI();
         return;
       }
-      await ensureFullSnapshots();
+      // Guarantee compare charts use full snapshot history for all compared users.
+      await ensureFullSnapshots({ userKeys });
 
       // Update allViewsChart
       try {
@@ -8493,35 +8581,44 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       const perfUI = perfStart('refreshUserUI total');
       try {
         const { preserveEmpty=false, skipRestoreZoom=false, skipPostListRebuild=false, autoRefresh=false, skipCharts=false } = opts;
-        // Merge posts from alias user buckets into canonical user (in-memory only).
-        // After chunkingDoneReplaceUsers, posts may be split across id:/h: keys for the same user.
-        if (!isVirtualUserKey(currentUserKey) && !isMetricsPartial && metrics?.users?.[currentUserKey]) {
-          const canonical = metrics.users[currentUserKey];
-          if (!canonical.posts) canonical.posts = {};
-          const aliases = findAliasKeysForUser(metrics, currentUserKey, canonical);
-          for (const aliasKey of aliases) {
-            const aliasUser = metrics.users[aliasKey];
-            if (!aliasUser) continue;
-            // Merge cameos/followers from alias if canonical lacks them
-            if (Array.isArray(aliasUser.cameos) && aliasUser.cameos.length && !canonical.cameos?.length) {
-              canonical.cameos = [...aliasUser.cameos];
-            }
-            if (Array.isArray(aliasUser.followers) && aliasUser.followers.length && !canonical.followers?.length) {
-              canonical.followers = [...aliasUser.followers];
-            }
-            if (!aliasUser.posts) continue;
-            for (const [pid, post] of Object.entries(aliasUser.posts)) {
-              if (!canonical.posts[pid]) {
-                canonical.posts[pid] = post;
+        let user = resolveUserForKey(metrics, currentUserKey);
+        // Build a non-destructive merged user view across alias buckets.
+        // This avoids post-count drops from mutating/deleting alias buckets during refresh.
+        if (!isVirtualUserKey(currentUserKey) && !isMetricsPartial && user) {
+          const canonicalKey = resolveCanonicalUserKey(metrics, currentUserKey, user) || currentUserKey;
+          const aliases = findAliasKeysForUser(metrics, canonicalKey, user);
+          if (aliases.length) {
+            let mergedPosts = null;
+            let mergedFollowers = Array.isArray(user.followers) ? user.followers : [];
+            let mergedCameos = Array.isArray(user.cameos) ? user.cameos : [];
+            for (const aliasKey of aliases) {
+              const aliasUser = metrics.users?.[aliasKey];
+              if (!aliasUser) continue;
+              if (Array.isArray(aliasUser.followers) && aliasUser.followers.length > mergedFollowers.length) {
+                mergedFollowers = aliasUser.followers;
               }
-              // Always remove from alias to prevent double-counting.
-              // If canonical already had this post, its version is preferred;
-              // cold shards handle full snapshot history separately.
-              delete aliasUser.posts[pid];
+              if (Array.isArray(aliasUser.cameos) && aliasUser.cameos.length > mergedCameos.length) {
+                mergedCameos = aliasUser.cameos;
+              }
+              const aliasPosts = aliasUser.posts || {};
+              for (const [pid, post] of Object.entries(aliasPosts)) {
+                if (Object.prototype.hasOwnProperty.call(user.posts || {}, pid)) continue;
+                if (!mergedPosts) mergedPosts = { ...(user.posts || {}) };
+                if (!Object.prototype.hasOwnProperty.call(mergedPosts, pid)) {
+                  mergedPosts[pid] = post;
+                }
+              }
+            }
+            if (mergedPosts) {
+              user = {
+                ...user,
+                posts: mergedPosts,
+                followers: mergedFollowers,
+                cameos: mergedCameos
+              };
             }
           }
         }
-        const user = resolveUserForKey(metrics, currentUserKey);
         snapLog('refreshUserUI:start', {
           currentUserKey,
           preserveEmpty,
@@ -9087,13 +9184,17 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           });
         }
       }
-      // Integrity check: remove posts incorrectly attributed to this user.
-      // Reconcile ownership (selected user only), then reclaim, then remove empty posts.
-      // Runs AFTER rendering so the ~1s saveMetrics serialisation doesn't block the UI.
-      if (!isVirtualUserKey(currentUserKey) && !isMetricsPartial){
+      // Safety: ownership prune/reclaim can move posts between users and make posts appear to
+      // disappear. Keep refresh path read-only by default. Advanced users can opt in via:
+      // localStorage.setItem('SCT_DASHBOARD_ENABLE_OWNER_PRUNE','1')
+      if (shouldRunPostOwnershipMaintenance({
+        currentUserKey,
+        isMetricsPartial,
+        autoRefresh
+      })) {
         const now = Date.now();
         const lastPruneAt = lastPruneAtByUser.get(currentUserKey) || 0;
-        const shouldPrune = !autoRefresh || (now - lastPruneAt >= PRUNE_THROTTLE_MS);
+        const shouldPrune = now - lastPruneAt >= PRUNE_THROTTLE_MS;
         if (shouldPrune) {
           lastPruneAtByUser.set(currentUserKey, now);
           const perfPrune = perfStart('prune posts');
@@ -9105,6 +9206,13 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
             perfEnd(perfPrune);
           }
         }
+      } else {
+        snapLog('ownershipPrune:disabled', {
+          currentUserKey,
+          autoRefresh,
+          isMetricsPartial,
+          storageKey: OWNER_PRUNE_STORAGE_KEY
+        });
       }
       snapLog('refreshUserUI:done', {
         currentUserKey,
