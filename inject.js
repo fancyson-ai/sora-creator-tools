@@ -549,6 +549,16 @@
       return { handle: null, id: null };
     }
   }
+  const BLOCKED_THUMB_HOSTS = new Set(['ogimg.chatgpt.com']);
+  const isValidCollectorThumbUrl = (value) => {
+    if (typeof value !== 'string' || !/^https?:\/\//.test(value)) return false;
+    try {
+      const host = new URL(value).hostname.toLowerCase();
+      return !BLOCKED_THUMB_HOSTS.has(host);
+    } catch {
+      return false;
+    }
+  };
   const getThumbnail = (item) => {
     try {
       const p = item?.post ?? item;
@@ -557,12 +567,12 @@
       if (atts)
         for (const att of atts) {
           const t = att?.encodings?.thumbnail?.path;
-          if (typeof t === 'string' && /^https?:\/\//.test(t)) {
+          if (isValidCollectorThumbUrl(t)) {
             dlog('thumbs', 'picked', { id, source: 'att.encodings.thumbnail', url: t });
             return t;
           }
         }
-      if (typeof p?.preview_image_url === 'string' && /^https?:\/\//.test(p.preview_image_url)) {
+      if (isValidCollectorThumbUrl(p?.preview_image_url)) {
         dlog('thumbs', 'picked', { id, source: 'preview_image_url', url: p.preview_image_url });
         return p.preview_image_url;
       }
@@ -577,7 +587,7 @@
         ['poster.url', p?.poster?.url],
       ];
       for (const [label, u] of pairs)
-        if (typeof u === 'string' && /^https?:\/\//.test(u)) {
+        if (isValidCollectorThumbUrl(u)) {
           dlog('thumbs', 'picked', { id, source: label, url: u });
           return u;
         }
