@@ -371,6 +371,7 @@
   let usersIndex = null;
   let isMetricsPartial = false;
   let snapshotsHydrated = false;
+  let snapshotsHydratedForKey = null;
   let snapshotsHydrationEpoch = 0;
   let snapshotsHydrationPromise = null;
   let lastSessionCacheAt = 0;
@@ -488,6 +489,7 @@
   function invalidateSnapshotHydration(reason, details = {}){
     const wasHydrated = snapshotsHydrated;
     snapshotsHydrated = false;
+    snapshotsHydratedForKey = null;
     snapshotsHydrationEpoch += 1;
     snapLog('snapshotsHydration:invalidated', {
       reason,
@@ -1688,6 +1690,16 @@
     if (candidateHandle && curHandle && candidateHandle === curHandle) return true;
     return false;
   }
+  function findAliasKeysForUser(metrics, userKey, user) {
+    if (!userKey || !user || !metrics?.users) return [];
+    const aliases = [];
+    for (const key of Object.keys(metrics.users)) {
+      if (key === userKey || key === 'unknown') continue;
+      if (isCameoKey(key) || isTopTodayKey(key)) continue;
+      if (keyMatchesUserIdentity(metrics, key, userKey, user)) aliases.push(key);
+    }
+    return aliases;
+  }
   const DBG_SORT = false; // hide noisy sorting logs by default
 
   // Reconcile posts for the selected user:
@@ -1863,7 +1875,7 @@
     const metricsUpdatedAt = Date.now();
     const affectedUserKeys = opts.userKeys || Object.keys(nextMetrics.users || {});
     const hotMetrics = { ...nextMetrics, users: { ...(nextMetrics?.users || {}) } };
-    const shouldMergeExistingCold = !snapshotsHydrated;
+    const shouldMergeExistingCold = true; // Always merge to prevent overwriting historical snapshots
     snapLog('saveMetrics:start', {
       metricsUpdatedAt,
       affectedUserCount: affectedUserKeys.length,
@@ -2016,24 +2028,35 @@
   }
 
   async function ensureFullSnapshots() {
-    if (snapshotsHydrated) {
+    if (snapshotsHydrated && snapshotsHydratedForKey === currentUserKey) {
       snapLog('ensureFullSnapshots:skip', { reason: 'already_hydrated', currentUserKey });
       return;
     }
-    if (snapshotsHydrationPromise) {
+    while (snapshotsHydrationPromise) {
+      const promiseToJoin = snapshotsHydrationPromise;
       snapLog('ensureFullSnapshots:join', {
         currentUserKey,
         snapshotsHydrationEpoch
       });
-      await snapshotsHydrationPromise;
-      return;
+      await promiseToJoin;
+      // If the joined hydration succeeded for this user, we're done
+      if (snapshotsHydrated && snapshotsHydratedForKey === currentUserKey) return;
+      // Safety: if the same promise is still set (shouldn't happen — .finally() clears it),
+      // break to avoid an infinite loop.
+      if (snapshotsHydrationPromise === promiseToJoin) break;
+      // Otherwise the hydration was stale (epoch mismatch / different user) — loop to
+      // check if another caller started a new one, or fall through to start fresh
     }
     const runEpoch = snapshotsHydrationEpoch;
     const allUserKeys = Object.keys(metrics?.users || {});
     const targetUserKeys = (function(){
-      if (!isMetricsPartial) return allUserKeys;
-      if (currentUserKey && metrics?.users?.[currentUserKey]) return [currentUserKey];
-      return allUserKeys;
+      if (!currentUserKey || !metrics?.users?.[currentUserKey]) {
+        return allUserKeys;
+      }
+      // Only load cold shards for current user + aliases (not all users)
+      const user = metrics.users[currentUserKey];
+      const keys = [currentUserKey, ...findAliasKeysForUser(metrics, currentUserKey, user)];
+      return keys;
     })();
     snapLog('ensureFullSnapshots:start', {
       currentUserKey,
@@ -2043,6 +2066,7 @@
       targetUserCount: targetUserKeys.length,
       beforeSummary: summarizeMetricsSnapshots(metrics)
     });
+    const capturedUserKey = currentUserKey;
     snapshotsHydrationPromise = (async () => {
       const mergeStats = { requestedShards: 0, hydratedShards: 0, userCount: 0, postCount: 0, snapshotsAdded: 0, aborted: false };
       try {
@@ -2059,7 +2083,9 @@
           if (!shard || typeof shard !== 'object') continue;
           mergeStats.hydratedShards++;
           const user = metrics.users?.[userKey];
-          if (!user?.posts) continue;
+          const isAlias = userKey !== capturedUserKey;
+          const canonicalUser = isAlias ? metrics.users?.[capturedUserKey] : null;
+          if (!user?.posts && !canonicalUser?.posts) continue;
           mergeStats.userCount++;
           for (const [postId, coldSnaps] of Object.entries(shard)) {
             if (runEpoch !== snapshotsHydrationEpoch) {
@@ -2067,7 +2093,8 @@
               break;
             }
             if (!Array.isArray(coldSnaps) || !coldSnaps.length) continue;
-            const post = user.posts[postId];
+            // For alias cold shards, prefer canonical user's post as merge target
+            const post = (isAlias ? canonicalUser?.posts?.[postId] : null) || user?.posts?.[postId];
             if (!post) continue;
             mergeStats.postCount++;
             if (!Array.isArray(post.snapshots)) post.snapshots = [];
@@ -2091,14 +2118,24 @@
       }
       const epochStable = runEpoch === snapshotsHydrationEpoch;
       snapshotsHydrated = epochStable;
+      snapshotsHydratedForKey = epochStable ? capturedUserKey : null;
+      const afterSummary = summarizeMetricsSnapshots(metrics);
       snapLog('ensureFullSnapshots:done', {
         ...mergeStats,
         runEpoch,
         snapshotsHydrationEpoch,
         epochStable,
         snapshotsHydrated,
-        afterSummary: summarizeMetricsSnapshots(metrics)
+        afterSummary
       });
+      if (SNAP_DEBUG_ENABLED) {
+        console.warn(
+          '[SCT][snap] Cold shard health:',
+          mergeStats.snapshotsAdded, 'snapshots added from', mergeStats.hydratedShards, 'shards |',
+          afterSummary.postsWithHistory, '/', afterSummary.postCount, 'posts have history |',
+          afterSummary.totalSnapshots, 'total snapshots'
+        );
+      }
     })().finally(() => {
       snapshotsHydrationPromise = null;
     });
@@ -3158,6 +3195,13 @@
   }
 
   function syncPostsListRows(user, orderedPosts, colorFor, visibleSet, opts={}){
+    if (SNAP_DEBUG_ENABLED) {
+      snapLog('syncPostsListRows:called', {
+        userHandle: user?.handle,
+        postCount: orderedPosts?.length,
+        caller: new Error().stack?.split('\n').slice(1, 3).map(s => s.trim()).join(' | ')
+      });
+    }
     const wrap = $('#posts');
     if (!wrap || !user) return false;
     wrap._sctOnHover = typeof opts.onHover === 'function' ? opts.onHover : null;
@@ -8410,6 +8454,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
                   hydrateToken,
                   storedUserCount: Object.keys(storedMetrics.users || {}).length
                 });
+                postHydrationToken++; // Invalidate pending queued refreshes from hydrateCurrentUserPostsFromStorage
                 usersIndex = storedIndex && storedIndex.length ? storedIndex : buildUsersIndexFromMetrics(metrics);
                 isMetricsPartial = false;
                 snapLog('hydrateMetrics:chunkingDone', {
@@ -8448,6 +8493,34 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       const perfUI = perfStart('refreshUserUI total');
       try {
         const { preserveEmpty=false, skipRestoreZoom=false, skipPostListRebuild=false, autoRefresh=false, skipCharts=false } = opts;
+        // Merge posts from alias user buckets into canonical user (in-memory only).
+        // After chunkingDoneReplaceUsers, posts may be split across id:/h: keys for the same user.
+        if (!isVirtualUserKey(currentUserKey) && !isMetricsPartial && metrics?.users?.[currentUserKey]) {
+          const canonical = metrics.users[currentUserKey];
+          if (!canonical.posts) canonical.posts = {};
+          const aliases = findAliasKeysForUser(metrics, currentUserKey, canonical);
+          for (const aliasKey of aliases) {
+            const aliasUser = metrics.users[aliasKey];
+            if (!aliasUser) continue;
+            // Merge cameos/followers from alias if canonical lacks them
+            if (Array.isArray(aliasUser.cameos) && aliasUser.cameos.length && !canonical.cameos?.length) {
+              canonical.cameos = [...aliasUser.cameos];
+            }
+            if (Array.isArray(aliasUser.followers) && aliasUser.followers.length && !canonical.followers?.length) {
+              canonical.followers = [...aliasUser.followers];
+            }
+            if (!aliasUser.posts) continue;
+            for (const [pid, post] of Object.entries(aliasUser.posts)) {
+              if (!canonical.posts[pid]) {
+                canonical.posts[pid] = post;
+              }
+              // Always remove from alias to prevent double-counting.
+              // If canonical already had this post, its version is preferred;
+              // cold shards handle full snapshot history separately.
+              delete aliasUser.posts[pid];
+            }
+          }
+        }
         const user = resolveUserForKey(metrics, currentUserKey);
         snapLog('refreshUserUI:start', {
           currentUserKey,
@@ -8476,24 +8549,6 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           return;
         }
         // No precompute needed for IR; use latest available remix count only for cards
-        // Integrity check: remove posts incorrectly attributed to this user
-        // Reconcile ownership (selected user only), then reclaim, then remove empty posts
-        if (!isVirtualUserKey(currentUserKey) && !isMetricsPartial){
-          const now = Date.now();
-          const lastPruneAt = lastPruneAtByUser.get(currentUserKey) || 0;
-          const shouldPrune = !autoRefresh || (now - lastPruneAt >= PRUNE_THROTTLE_MS);
-          if (shouldPrune) {
-            lastPruneAtByUser.set(currentUserKey, now);
-            const perfPrune = perfStart('prune posts');
-            try {
-              await pruneMismatchedPostsForUser(metrics, currentUserKey, { log: !autoRefresh });
-              await reclaimFromUnknownForUser(metrics, currentUserKey);
-              await pruneEmptyPostsForUser(metrics, currentUserKey);
-            } finally {
-              perfEnd(perfPrune);
-            }
-          }
-        }
         const colorFor = makeColorMap(user);
         const isTopToday = isTopTodayKey(currentUserKey);
         updateMetricsHeader(currentUserKey, user);
@@ -8619,17 +8674,21 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           },
           onPurge: (pid, snippet) => showPostPurgeConfirm(snippet, pid)
         };
-        const perfList = perfStart('render posts list');
-        try {
-          if (skipPostListRebuild && updatePostsListRows(user, colorFor, visibleSet, listOpts)) {
-            // keep existing list to avoid flicker
-          } else {
-            buildPostsList(user, colorFor, visibleSet, listOpts);
+        // When cold shard merge is coming (!skipCharts), defer post list build
+        // to after ensureFullSnapshots to avoid showing hot-storage-only data briefly.
+        if (skipCharts) {
+          const perfList = perfStart('render posts list');
+          try {
+            if (skipPostListRebuild && updatePostsListRows(user, colorFor, visibleSet, listOpts)) {
+              // keep existing list to avoid flicker
+            } else {
+              buildPostsList(user, colorFor, visibleSet, listOpts);
+            }
+          } finally {
+            perfEnd(perfList);
           }
-        } finally {
-          perfEnd(perfList);
+          updateStaleButtonCount(user);
         }
-        updateStaleButtonCount(user);
         if (!skipCharts) {
           snapLog('refreshUserUI:ensureFullSnapshots:before', {
             currentUserKey,
@@ -8642,6 +8701,18 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
             snapshotsHydrated,
             userSummary: summarizeUserSnapshots(user)
           });
+          // Build post list after cold shard merge so data includes full snapshot history
+          const perfList = perfStart('render posts list');
+          try {
+            if (skipPostListRebuild && updatePostsListRows(user, colorFor, visibleSet, listOpts)) {
+              // keep existing list to avoid flicker
+            } else {
+              buildPostsList(user, colorFor, visibleSet, listOpts);
+            }
+          } finally {
+            perfEnd(perfList);
+          }
+          updateStaleButtonCount(user);
           const perfCharts = perfStart('charts + summaries');
           try {
             const useUnique = viewsChartType === 'unique';
@@ -9016,6 +9087,25 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           });
         }
       }
+      // Integrity check: remove posts incorrectly attributed to this user.
+      // Reconcile ownership (selected user only), then reclaim, then remove empty posts.
+      // Runs AFTER rendering so the ~1s saveMetrics serialisation doesn't block the UI.
+      if (!isVirtualUserKey(currentUserKey) && !isMetricsPartial){
+        const now = Date.now();
+        const lastPruneAt = lastPruneAtByUser.get(currentUserKey) || 0;
+        const shouldPrune = !autoRefresh || (now - lastPruneAt >= PRUNE_THROTTLE_MS);
+        if (shouldPrune) {
+          lastPruneAtByUser.set(currentUserKey, now);
+          const perfPrune = perfStart('prune posts');
+          try {
+            await pruneMismatchedPostsForUser(metrics, currentUserKey, { log: !autoRefresh });
+            await reclaimFromUnknownForUser(metrics, currentUserKey);
+            await pruneEmptyPostsForUser(metrics, currentUserKey);
+          } finally {
+            perfEnd(perfPrune);
+          }
+        }
+      }
       snapLog('refreshUserUI:done', {
         currentUserKey,
         snapshotsHydrated,
@@ -9114,6 +9204,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       const useStoredFilter = !!opts.useStoredFilter;
       const keepCurrentFilter = !!opts.keepCurrentFilter;
       postHydrationToken++;
+      invalidateSnapshotHydration('switchUserSelection', { from: currentUserKey, to: nextUserKey });
       setPostsHydrateState(false);
       if (isMetricsPartial && nextUserKey && (isVirtualUserKey(nextUserKey) || !metrics.users?.[nextUserKey])) {
         await refreshData({ skipPostListRebuild: false, skipRestoreZoom: true });
