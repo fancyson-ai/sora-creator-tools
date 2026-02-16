@@ -34,6 +34,14 @@ function extractSaveMetricsFunctionSource() {
   assert.notEqual(end, -1, 'saveMetrics function boundary not found in dashboard.js');
   return src.slice(start, end);
 }
+function extractSnapshotMergeHelpersSource() {
+  const src = fs.readFileSync(DASHBOARD_PATH, 'utf8');
+  const start = src.indexOf("const SNAPSHOT_NUMERIC_FIELDS = ['views', 'uv', 'likes', 'comments', 'remixes', 'remix_count', 'interactions', 'followers', 'count'];");
+  assert.notEqual(start, -1, 'snapshot merge helper start not found in dashboard.js');
+  const end = src.indexOf('\n  // Strict post time lookup: only consider explicit post time fields; everything else sorts last', start);
+  assert.notEqual(end, -1, 'snapshot merge helper boundary not found in dashboard.js');
+  return src.slice(start, end);
+}
 
 function buildHarness(options = {}) {
   const {
@@ -114,6 +122,7 @@ function buildHarness(options = {}) {
   };
 
   const saveMetricsSource = extractSaveMetricsFunctionSource();
+  const snapshotMergeHelpersSource = extractSnapshotMergeHelpersSource();
   const bootstrap = `
     let snapshotsHydrated = globalThis.__snapshotsHydrated;
     let isMetricsPartial = globalThis.__isMetricsPartial;
@@ -127,6 +136,7 @@ function buildHarness(options = {}) {
     const summarizeMetricsSnapshots = globalThis.__summarizeMetricsSnapshots;
     const summarizeColdPayload = globalThis.__summarizeColdPayload;
     const buildUsersIndexFromMetrics = globalThis.__buildUsersIndexFromMetrics;
+    ${snapshotMergeHelpersSource}
     ${saveMetricsSource}
     globalThis.__saveMetrics = saveMetrics;
     globalThis.__readState = () => ({ usersIndex, lastMetricsUpdatedAt });
@@ -152,8 +162,8 @@ test('saveMetrics keeps in-memory snapshots intact while persisting hot metrics 
           p1: {
             url: 'https://sora.chatgpt.com/p/p1',
             snapshots: [
-              { t: 1000, likes: 1 },
-              { t: 2000, likes: 2 },
+              { t: 1700000000000, likes: 1 },
+              { t: 1700000005000, likes: 2 },
             ],
           },
         },
@@ -166,9 +176,9 @@ test('saveMetrics keeps in-memory snapshots intact while persisting hot metrics 
   assert.equal(harness.calls.set.length, 1);
   const payload = harness.calls.set[0];
 
-  assert.deepEqual(metrics.users['h:alice'].posts.p1.snapshots.map((s) => s.t), [1000, 2000]);
-  assert.deepEqual(payload.metrics.users['h:alice'].posts.p1.snapshots.map((s) => s.t), [2000]);
-  assert.deepEqual(payload[`${COLD_PREFIX}h:alice`].p1.map((s) => s.t), [1000, 2000]);
+  assert.deepEqual(metrics.users['h:alice'].posts.p1.snapshots.map((s) => s.t), [1700000000000, 1700000005000]);
+  assert.deepEqual(payload.metrics.users['h:alice'].posts.p1.snapshots.map((s) => s.t), [1700000005000]);
+  assert.deepEqual(payload[`${COLD_PREFIX}h:alice`].p1.map((s) => s.t), [1700000000000, 1700000005000]);
   assert.ok(Number.isFinite(payload.metricsUpdatedAt) && payload.metricsUpdatedAt > 0);
 
   const state = harness.readState();
@@ -183,8 +193,8 @@ test('saveMetrics merges existing cold snapshots before hydration to avoid dropp
     existingCold: {
       [`${COLD_PREFIX}h:alice`]: {
         p1: [
-          { t: 1000, likes: 1 },
-          { t: 1500, likes: 2 },
+          { t: 1700000000000, likes: 1 },
+          { t: 1700000002500, likes: 2 },
         ],
       },
     },
@@ -196,7 +206,7 @@ test('saveMetrics merges existing cold snapshots before hydration to avoid dropp
         handle: 'alice',
         posts: {
           p1: {
-            snapshots: [{ t: 2000, likes: 3 }],
+            snapshots: [{ t: 1700000005000, likes: 3 }],
           },
         },
       },
@@ -210,7 +220,42 @@ test('saveMetrics merges existing cold snapshots before hydration to avoid dropp
   assert.equal(harness.calls.set.length, 1);
 
   const payload = harness.calls.set[0];
-  assert.deepEqual(payload[`${COLD_PREFIX}h:alice`].p1.map((s) => s.t), [1000, 1500, 2000]);
-  assert.deepEqual(payload.metrics.users['h:alice'].posts.p1.snapshots.map((s) => s.t), [2000]);
-  assert.deepEqual(metrics.users['h:alice'].posts.p1.snapshots.map((s) => s.t), [2000]);
+  assert.deepEqual(payload[`${COLD_PREFIX}h:alice`].p1.map((s) => s.t), [1700000000000, 1700000002500, 1700000005000]);
+  assert.deepEqual(payload.metrics.users['h:alice'].posts.p1.snapshots.map((s) => s.t), [1700000005000]);
+  assert.deepEqual(metrics.users['h:alice'].posts.p1.snapshots.map((s) => s.t), [1700000005000]);
+});
+
+test('saveMetrics updates duplicate-timestamp snapshots with newer metric values', async () => {
+  const harness = buildHarness({
+    snapshotsHydrated: false,
+    existingCold: {
+      [`${COLD_PREFIX}h:alice`]: {
+        p1: [
+          { t: 1700000005000, likes: 3, views: 11 },
+        ],
+      },
+    },
+  });
+
+  const metrics = {
+    users: {
+      'h:alice': {
+        handle: 'alice',
+        posts: {
+          p1: {
+            snapshots: [{ t: 1700000005000, likes: 7, views: 25 }],
+          },
+        },
+      },
+    },
+  };
+
+  await harness.saveMetrics(metrics, { userKeys: ['h:alice'] });
+
+  const payload = harness.calls.set[0];
+  const merged = payload[`${COLD_PREFIX}h:alice`].p1;
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].t, 1700000005000);
+  assert.equal(merged[0].likes, 7);
+  assert.equal(merged[0].views, 25);
 });
