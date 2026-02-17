@@ -1911,6 +1911,26 @@
     const duplicateTimestamps = Math.max(0, sourceSnapshotCount - snapshots.length);
     return { snapshots, sourceSnapshotCount, duplicateTimestamps };
   }
+  function mergeTimeSeriesArrays(arrays){
+    if (!arrays.length) return [];
+    if (arrays.length === 1) return arrays[0].map(e => ({ t: e.t, count: e.count }));
+    const all = [];
+    for (const arr of arrays) for (const entry of arr) {
+      if (!entry || typeof entry !== 'object') continue;
+      all.push(entry);
+    }
+    all.sort((a, b) => (a.t || 0) - (b.t || 0));
+    const merged = [];
+    for (const entry of all) {
+      const last = merged[merged.length - 1];
+      if (last && last.t === entry.t) {
+        if (entry.count > last.count) last.count = entry.count;
+      } else {
+        merged.push({ t: entry.t, count: entry.count });
+      }
+    }
+    return merged;
+  }
   function buildMergedIdentityUser(metrics, userKey, user = null){
     const resolvedUser = user || resolveUserForKey(metrics, userKey);
     if (!resolvedUser || isVirtualUserKey(userKey)) {
@@ -1931,19 +1951,19 @@
     const canonicalKey = resolveCanonicalUserKey(metrics, userKey, resolvedUser) || userKey;
     const canonicalUser = metrics?.users?.[canonicalKey] || resolvedUser;
     const aliasKeys = Array.from(new Set([canonicalKey, userKey, ...findAliasKeysForUser(metrics, canonicalKey, canonicalUser)]));
-    let mergedFollowers = Array.isArray(canonicalUser?.followers) ? canonicalUser.followers : [];
-    let mergedCameos = Array.isArray(canonicalUser?.cameos) ? canonicalUser.cameos : [];
+    const allFollowerArrays = [];
+    const allCameoArrays = [];
     const postGroups = new Map();
     let sourcePostCount = 0;
     let sourceSnapshotCount = 0;
     for (const key of aliasKeys) {
       const bucket = metrics?.users?.[key];
       if (!bucket) continue;
-      if (Array.isArray(bucket.followers) && bucket.followers.length > mergedFollowers.length) {
-        mergedFollowers = bucket.followers;
+      if (Array.isArray(bucket.followers) && bucket.followers.length) {
+        allFollowerArrays.push(bucket.followers);
       }
-      if (Array.isArray(bucket.cameos) && bucket.cameos.length > mergedCameos.length) {
-        mergedCameos = bucket.cameos;
+      if (Array.isArray(bucket.cameos) && bucket.cameos.length) {
+        allCameoArrays.push(bucket.cameos);
       }
       for (const [pid, post] of Object.entries(bucket.posts || {})) {
         sourcePostCount++;
@@ -1952,6 +1972,8 @@
         postGroups.get(pid).push(post);
       }
     }
+    const mergedFollowers = mergeTimeSeriesArrays(allFollowerArrays);
+    const mergedCameos = mergeTimeSeriesArrays(allCameoArrays);
     const mergedPosts = {};
     let mergedSnapshotCount = 0;
     let mergedPostsWithMultipleBuckets = 0;

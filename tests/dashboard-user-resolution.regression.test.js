@@ -360,3 +360,57 @@ test('buildMergedIdentityUser unions snapshots across alias buckets for the same
   assert.equal(t2.uv, 11);
   assert.equal(t2.likes, 3);
 });
+
+test('buildMergedIdentityUser merges followers from multiple alias buckets by timestamp', () => {
+  const { buildMergedIdentityUser, setMetrics } = buildResolutionHarness();
+  const metrics = {
+    users: {
+      'id:user-1': {
+        id: 'user-1',
+        handle: 'cosmicskye',
+        posts: { p1: { snapshots: [{ t: 1700000000000, views: 1 }] } },
+        followers: [
+          { t: 1700000010000, count: 50 },
+          { t: 1700000020000, count: 55 },
+        ],
+        cameos: [],
+      },
+      'h:cosmic-skye': {
+        id: 'user-1',
+        handle: 'cosmicskye',
+        posts: {},
+        followers: [
+          { t: 1700000001000, count: 10 },
+          { t: 1700000005000, count: 30 },
+          { t: 1700000010000, count: 48 },
+        ],
+        cameos: [
+          { t: 1700000001000, count: 2 },
+          { t: 1700000005000, count: 5 },
+        ],
+      },
+      'h:cosmicskye': {
+        handle: 'cosmicskye',
+        posts: {},
+        followers: [
+          { t: 1700000030000, count: 60 },
+        ],
+        cameos: [
+          { t: 1700000030000, count: 8 },
+        ],
+      },
+    },
+  };
+  setMetrics(metrics);
+  const merged = buildMergedIdentityUser(metrics, 'id:user-1', metrics.users['id:user-1']);
+  const f = merged.user.followers;
+  assert.ok(Array.isArray(f), 'followers should be an array');
+  assert.equal(f.length, 5, 'should merge 5 unique timestamps from all buckets');
+  assert.deepEqual(Array.from(f.map(e => e.t)), [1700000001000, 1700000005000, 1700000010000, 1700000020000, 1700000030000]);
+  assert.equal(f[2].count, 50, 'duplicate timestamp should keep higher count');
+  assert.equal(f[4].count, 60, 'most recent entry from new handle should be present');
+  const c = merged.user.cameos;
+  assert.ok(Array.isArray(c), 'cameos should be an array');
+  assert.equal(c.length, 3, 'should merge 3 unique cameo timestamps');
+  assert.equal(c[2].count, 8, 'most recent cameo from new handle should be present');
+});
