@@ -1,10 +1,8 @@
-﻿Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
-Upstream-Name: Sora Explore - Unique Views
-Upstream-Contact: William Cruttenden <william@cruttenden.dev>
-Source: https://github.com/williamcruttenden/sora-unique-views
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: sora-creator-tools
+Upstream-Contact: sora-creator-tools contributors
+Source: https://github.com/fancyson-ai/sora-creator-tools
 
 Files: *
-Copyright: 2025 Will (fancyson-ai),
-           Topher (cameoed),
-           Skye (thecosmicskye)
+Copyright: 2025-2026 sora-creator-tools contributors
 License: MIT

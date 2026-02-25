@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025 Will (fancyson-ai), Topher (cameoed), Skye (thecosmicskye)
+ * Copyright (c) 2025-2026 sora-creator-tools contributors
  * Licensed under the MIT License. See the LICENSE file for details.
  *
  * SORA CREATOR TOOLS - Feature Overview:
@@ -105,11 +105,25 @@
   let uvDraftsPrevDocTitle = null;
   let uvDraftsTitleGuardTimer = null;
   const UV_DRAFTS_TITLE_GUARD_MS = 1000;
+  let uvDraftsScriptLoadRequestedAt = 0;
+  const UV_DRAFTS_SCRIPT_LOAD_THROTTLE_MS = 1000;
+
+  function requestUVDraftsScriptLoad(force = false) {
+    const now = Date.now();
+    if (!force && now - uvDraftsScriptLoadRequestedAt < UV_DRAFTS_SCRIPT_LOAD_THROTTLE_MS) return;
+    uvDraftsScriptLoadRequestedAt = now;
+    try {
+      window.postMessage({ __sora_uv__: true, type: 'load_uv_drafts_scripts' }, location.origin);
+    } catch {}
+  }
 
   function ensureUVDraftsPageModule() {
     if (uvDraftsPage) return uvDraftsPage;
     const factory = window.SoraUVDraftsPageModule;
-    if (typeof factory !== 'function') return null;
+    if (typeof factory !== 'function') {
+      if (isUVDrafts()) requestUVDraftsScriptLoad();
+      return null;
+    }
     uvDraftsPage = factory({ defaultFps: SORA_DEFAULT_FPS });
     try {
       uvDraftsPage.setCapturedAuthToken?.(capturedAuthToken);
@@ -144,6 +158,17 @@
   function startScheduledPostsTimer() {
     ensureUVDraftsPageModule()?.startScheduledPostsTimer?.();
   }
+
+  window.addEventListener('message', (ev) => {
+    if (ev?.source !== window) return;
+    const d = ev?.data;
+    if (!d || d.__sora_uv__ !== true || d.type !== 'uv_drafts_scripts_ready') return;
+    uvDraftsScriptLoadRequestedAt = Date.now();
+    if (isUVDrafts()) {
+      ensureUVDraftsPage();
+      startUVDraftsTitleGuard();
+    }
+  });
 
   function setUVDraftsDocumentTitle() {
     try {
@@ -6963,7 +6988,8 @@ async function renderAnalyzeTable(force = false) {
       teardownControlBar();
 
       // Show UV Drafts page
-      ensureUVDraftsPage();
+      const uvDraftsPageEl = ensureUVDraftsPage();
+      if (!uvDraftsPageEl) requestUVDraftsScriptLoad(true);
       // /uv-drafts is an extension virtual route; keep tab title from falling back to 404.
       startUVDraftsTitleGuard();
       return;

@@ -1,7 +1,6 @@
 /* Open full dashboard page when the action icon is clicked */
 chrome.action.onClicked.addListener(() => {
-  const url = chrome.runtime.getURL('dashboard.html');
-  chrome.tabs.create({ url });
+  openOrFocusDashboard(() => {});
 });
 
 /* ─── Metrics module (single owner of cache + storage writes) ─── */
@@ -11,6 +10,10 @@ let flushTimer = null;
 const METRICS_STORAGE_KEY = 'metrics';
 const METRICS_UPDATED_AT_KEY = 'metricsUpdatedAt';
 const METRICS_USERS_INDEX_KEY = 'metricsUsersIndex';
+const TRUSTED_TAB_URL_RE = /^https:\/\/sora\.chatgpt\.com\//i;
+const MAX_MESSAGE_BATCH_ITEMS = 250;
+const MAX_SNAPSHOT_HISTORY_PER_POST = 720;
+const MAX_PROFILE_SERIES_POINTS = 720;
 
 // Debug toggles
 const DEBUG = { storage: false, thumbs: false };
@@ -36,6 +39,178 @@ let coldWriteTimer = null;
 
 let isFlushing = false;
 let needsFlush = false;
+
+function isPlainObject(value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function sanitizeString(value, maxLen = 4096) {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  return trimmed.length > maxLen ? trimmed.slice(0, maxLen) : trimmed;
+}
+
+function sanitizeIdToken(value, maxLen = 128) {
+  const s = sanitizeString(value, maxLen);
+  if (!s) return null;
+  if (!/^[A-Za-z0-9:_-]+$/.test(s)) return null;
+  return s;
+}
+
+function sanitizeNumber(value, min = -Number.MAX_SAFE_INTEGER, max = Number.MAX_SAFE_INTEGER) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  return Math.min(max, Math.max(min, n));
+}
+
+function sanitizeUserId(value) {
+  const numeric = sanitizeNumber(value);
+  if (numeric != null) return numeric;
+  return sanitizeIdToken(value);
+}
+
+function sanitizeCameoUsernames(value) {
+  if (!Array.isArray(value)) return null;
+  const out = [];
+  for (const raw of value) {
+    if (out.length >= 32) break;
+    const username = sanitizeString(raw, 80);
+    if (!username) continue;
+    out.push(username);
+  }
+  return out;
+}
+
+function sanitizeMetricsSnapshot(raw) {
+  if (!isPlainObject(raw)) return null;
+  const snap = {};
+
+  const ts = sanitizeNumber(raw.ts, 0);
+  if (ts != null) snap.ts = ts;
+  const userKey = sanitizeIdToken(raw.userKey);
+  if (userKey) snap.userKey = userKey;
+  const pageUserKey = sanitizeIdToken(raw.pageUserKey);
+  if (pageUserKey) snap.pageUserKey = pageUserKey;
+
+  const userHandle = sanitizeString(raw.userHandle, 80);
+  if (userHandle) snap.userHandle = userHandle;
+  const pageUserHandle = sanitizeString(raw.pageUserHandle, 80);
+  if (pageUserHandle) snap.pageUserHandle = pageUserHandle;
+
+  const userId = sanitizeUserId(raw.userId);
+  if (userId != null) snap.userId = userId;
+
+  const postId = sanitizeIdToken(raw.postId);
+  if (postId) snap.postId = postId;
+  const parentPostId = sanitizeIdToken(raw.parent_post_id);
+  if (parentPostId) snap.parent_post_id = parentPostId;
+  const rootPostId = sanitizeIdToken(raw.root_post_id);
+  if (rootPostId) snap.root_post_id = rootPostId;
+
+  if (typeof raw.created_at === 'string') {
+    const createdAt = sanitizeString(raw.created_at, 64);
+    if (createdAt) snap.created_at = createdAt;
+  } else {
+    const createdAtNum = sanitizeNumber(raw.created_at, 0);
+    if (createdAtNum != null) snap.created_at = createdAtNum;
+  }
+
+  const url = sanitizeString(raw.url, 2048);
+  if (url) snap.url = url;
+  const thumb = sanitizeString(raw.thumb, 2048);
+  if (thumb) snap.thumb = thumb;
+  const caption = sanitizeString(raw.caption, 4096);
+  if (caption) snap.caption = caption;
+
+  const cameoUsernames = sanitizeCameoUsernames(raw.cameo_usernames);
+  if (cameoUsernames) snap.cameo_usernames = cameoUsernames;
+
+  const uv = sanitizeNumber(raw.uv, 0);
+  if (uv != null) snap.uv = uv;
+  const likes = sanitizeNumber(raw.likes, 0);
+  if (likes != null) snap.likes = likes;
+  const views = sanitizeNumber(raw.views, 0);
+  if (views != null) snap.views = views;
+  const comments = sanitizeNumber(raw.comments, 0);
+  if (comments != null) snap.comments = comments;
+  const remixes = sanitizeNumber(raw.remixes, 0);
+  if (remixes != null) snap.remixes = remixes;
+  const remixCount = sanitizeNumber(raw.remix_count, 0);
+  if (remixCount != null) snap.remix_count = remixCount;
+  const followers = sanitizeNumber(raw.followers, 0);
+  if (followers != null) snap.followers = followers;
+  const cameoCount = sanitizeNumber(raw.cameo_count, 0);
+  if (cameoCount != null) snap.cameo_count = cameoCount;
+  const duration = sanitizeNumber(raw.duration, 0, 60 * 60 * 10);
+  if (duration != null) snap.duration = duration;
+  const width = sanitizeNumber(raw.width, 1, 20000);
+  if (width != null) snap.width = width;
+  const height = sanitizeNumber(raw.height, 1, 20000);
+  if (height != null) snap.height = height;
+
+  const hasSignal = !!snap.postId || snap.followers != null || snap.cameo_count != null;
+  return hasSignal ? snap : null;
+}
+
+function sanitizeMetricsBatch(items) {
+  if (!Array.isArray(items)) return [];
+  const out = [];
+  const limit = Math.min(items.length, MAX_MESSAGE_BATCH_ITEMS);
+  for (let i = 0; i < limit; i++) {
+    const snap = sanitizeMetricsSnapshot(items[i]);
+    if (snap) out.push(snap);
+  }
+  return out;
+}
+
+function normalizeRequestScope(scope) {
+  const s = sanitizeString(scope, 16);
+  if (!s) return null;
+  const normalized = s.toLowerCase();
+  if (normalized === 'analyze' || normalized === 'post') return normalized;
+  return null;
+}
+
+function normalizeSnapshotMode(mode) {
+  const s = sanitizeString(mode, 16);
+  return s && s.toLowerCase() === 'all' ? 'all' : 'latest';
+}
+
+function sanitizeMetricsRequest(message) {
+  const scope = normalizeRequestScope(message?.scope);
+  if (!scope) return null;
+  if (scope === 'analyze') {
+    return {
+      scope,
+      windowHours: sanitizeNumber(message?.windowHours, 1, 24) ?? 24,
+      snapshotMode: 'latest',
+      postId: null,
+    };
+  }
+  const postId = sanitizeIdToken(message?.postId);
+  if (!postId) return null;
+  return {
+    scope,
+    postId,
+    windowHours: null,
+    snapshotMode: normalizeSnapshotMode(message?.snapshotMode),
+  };
+}
+
+function isTrustedSender(sender) {
+  if (!sender) return false;
+  const tabUrl = String(sender.tab?.url || '');
+  if (tabUrl) return TRUSTED_TAB_URL_RE.test(tabUrl);
+  if (sender.id && sender.id === chrome.runtime.id) return true;
+  const senderUrl = String(sender.url || '');
+  return senderUrl.startsWith(chrome.runtime.getURL(''));
+}
+
+function trimSeriesInPlace(arr, maxPoints = MAX_PROFILE_SERIES_POINTS) {
+  if (!Array.isArray(arr) || arr.length <= maxPoints) return;
+  arr.splice(0, arr.length - maxPoints);
+}
 
 function normalizeMetrics(raw) {
   if (!raw || typeof raw !== 'object') return { ...DEFAULT_METRICS };
@@ -100,7 +275,7 @@ async function migrateStorageIfNeeded() {
       for (const [postId, post] of Object.entries(user.posts)) {
         if (!Array.isArray(post.snapshots) || post.snapshots.length <= 1) continue;
         // Copy full snapshot history to cold shard
-        shardData[postId] = post.snapshots.slice();
+        shardData[postId] = post.snapshots.slice(-MAX_SNAPSHOT_HISTORY_PER_POST);
         // Trim hot post to latest snapshot only
         post.snapshots = [post.snapshots[post.snapshots.length - 1]];
         hasColdData = true;
@@ -296,7 +471,7 @@ function buildPostMetrics(metrics, postId, snapshotMode) {
 }
 
 function buildMetricsForRequest(metrics, req) {
-  const scope = typeof req?.scope === 'string' ? req.scope.toLowerCase() : 'full';
+  const scope = normalizeRequestScope(req?.scope);
   if (scope === 'analyze') {
     return buildAnalyzeMetrics(metrics, req?.windowHours);
   }
@@ -304,7 +479,7 @@ function buildMetricsForRequest(metrics, req) {
     const snapshotMode = req?.snapshotMode === 'all' ? 'all' : 'latest';
     return buildPostMetrics(metrics, req?.postId, snapshotMode);
   }
-  return metrics;
+  return { users: {} };
 }
 
 function scheduleFlush() {
@@ -348,11 +523,10 @@ async function flush() {
       const { metrics } = await getMetricsState();
       dlog('storage', 'flush begin', { count: items.length });
       let dirty = false;
+      const touchedPosts = new Set();
       for (const snap of items) {
         const userKey = snap.userKey || snap.pageUserKey || 'unknown';
-        let isNewUser = false;
         if (!metrics.users[userKey]) {
-          isNewUser = true;
           dirty = true;
         }
         const userEntry = metrics.users[userKey] || (metrics.users[userKey] = { handle: snap.userHandle || snap.pageUserHandle || null, id: snap.userId || null, posts: {}, followers: [], cameos: [] });
@@ -360,12 +534,11 @@ async function flush() {
         if (!Array.isArray(userEntry.followers)) userEntry.followers = [];
         if (snap.postId) {
           postIdToUserKey.set(snap.postId, userKey);
-          let isNewPost = false;
           if (!userEntry.posts[snap.postId]) {
-            isNewPost = true;
             dirty = true;
           }
           const post = userEntry.posts[snap.postId] || (userEntry.posts[snap.postId] = { url: snap.url || null, thumb: snap.thumb || null, snapshots: [] });
+          touchedPosts.add(post);
           // Persist owner attribution on the post to allow dashboard integrity checks
           if (!post.ownerKey && (snap.userKey || snap.pageUserKey)) { post.ownerKey = snap.userKey || snap.pageUserKey; dirty = true; }
           if (!post.ownerHandle && (snap.userHandle || snap.pageUserHandle)) { post.ownerHandle = snap.userHandle || snap.pageUserHandle; dirty = true; }
@@ -473,8 +646,9 @@ async function flush() {
             const lastF = arr[arr.length - 1];
             if (!lastF || lastF.count !== fCount) {
               arr.push({ t, count: fCount });
+              trimSeriesInPlace(arr);
               dirty = true;
-              try { console.debug('[SoraMetrics] followers persisted', { userKey, count: fCount, t }); } catch {}
+              if (DEBUG.storage) dlog('storage', 'followers persisted', { userKey, count: fCount, t });
             }
           }
         }
@@ -488,8 +662,9 @@ async function flush() {
             const lastC = arr[arr.length - 1];
             if (!lastC || lastC.count !== cCount) {
               arr.push({ t, count: cCount });
+              trimSeriesInPlace(arr);
               dirty = true;
-              try { console.debug('[SoraMetrics] cameos persisted', { userKey, count: cCount, t }); } catch {}
+              if (DEBUG.storage) dlog('storage', 'cameos persisted', { userKey, count: cCount, t });
             }
           }
         }
@@ -499,12 +674,10 @@ async function flush() {
         return;
       }
       try {
-        // Trim hot metrics to latest-snapshot-only before writing
-        for (const user of Object.values(metrics.users || {})) {
-          for (const post of Object.values(user?.posts || {})) {
-            if (Array.isArray(post.snapshots) && post.snapshots.length > 1) {
-              post.snapshots = [post.snapshots[post.snapshots.length - 1]];
-            }
+        // Trim only the touched hot posts to latest-snapshot-only before writing.
+        for (const post of touchedPosts) {
+          if (Array.isArray(post?.snapshots) && post.snapshots.length > 1) {
+            post.snapshots = [post.snapshots[post.snapshots.length - 1]];
           }
         }
 
@@ -600,6 +773,9 @@ async function flushCold() {
             existingShard[postId].push(s);
           }
         }
+        if (existingShard[postId].length > MAX_SNAPSHOT_HISTORY_PER_POST) {
+          existingShard[postId] = existingShard[postId].slice(-MAX_SNAPSHOT_HISTORY_PER_POST);
+        }
       }
       writePayload[shardKey] = existingShard;
       coldSnapshotBuffer.delete(userKey);
@@ -620,18 +796,39 @@ async function flushCold() {
 
 /* ─── Message handlers ─── */
 
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.action === 'open_dashboard') {
-    const url = chrome.runtime.getURL('dashboard.html');
+function openOrFocusDashboard(sendResponse) {
+  const url = chrome.runtime.getURL('dashboard.html');
+  chrome.tabs.query({ url: `${url}*` }, (tabs) => {
+    const existing = Array.isArray(tabs) ? tabs[0] : null;
+    if (existing?.id != null) {
+      chrome.tabs.update(existing.id, { active: true }, () => {
+        sendResponse({ success: true, tabId: existing.id, reused: true });
+      });
+      return;
+    }
     chrome.tabs.create({ url }, (tab) => {
-      sendResponse({ success: true, tabId: tab.id });
+      sendResponse({ success: true, tabId: tab?.id ?? null, reused: false });
     });
+  });
+}
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (!isPlainObject(message) || typeof message.action !== 'string') return false;
+  if (!isTrustedSender(sender)) {
+    if (message.action === 'metrics_request') {
+      sendResponse({ metrics: { users: {} }, metricsUpdatedAt: 0 });
+    }
+    return false;
+  }
+
+  if (message.action === 'open_dashboard') {
+    openOrFocusDashboard(sendResponse);
     return true; // Keep message channel open for async response
   }
 
   if (message.action === 'metrics_batch') {
-    const items = message.items;
-    if (Array.isArray(items)) {
+    const items = sanitizeMetricsBatch(message.items);
+    if (items.length) {
       for (const it of items) PENDING.push(it);
       scheduleFlush();
     }
@@ -639,10 +836,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.action === 'metrics_request') {
+    const request = sanitizeMetricsRequest(message);
+    if (!request) {
+      sendResponse({ metrics: { users: {} }, metricsUpdatedAt: 0 });
+      return false;
+    }
     (async () => {
       try {
         const { metrics } = await getMetricsState();
-        const responseMetrics = buildMetricsForRequest(metrics, message);
+        const responseMetrics = buildMetricsForRequest(metrics, request);
         sendResponse({ metrics: responseMetrics, metricsUpdatedAt: metricsCacheUpdatedAt });
       } catch {
         sendResponse({ metrics: { users: {} }, metricsUpdatedAt: 0 });
@@ -650,6 +852,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     })();
     return true; // async response
   }
+  return false;
 });
 
 /* ─── Storage change listener (catches external writes like dashboard purge) ─── */

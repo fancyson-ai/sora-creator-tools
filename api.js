@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025 Will (fancyson-ai), Topher (cameoed), Skye (thecosmicskye)
+ * Copyright (c) 2025-2026 sora-creator-tools contributors
  * Licensed under the MIT License. See the LICENSE file for details.
  */
 
