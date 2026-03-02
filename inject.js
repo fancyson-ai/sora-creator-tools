@@ -47,6 +47,7 @@
   const DRAFTS_RE = /\/(backend\/project_[a-z]+\/)?profile\/drafts($|\/|\?)/i;
   const CHARACTERS_RE = /\/(backend\/project_[a-z]+\/)?profile\/[^/]+\/characters($|\?)/i;
   const NF_CREATE_RE = /\/backend\/nf\/create/i;
+  const NF_BULK_CREATE_RE = /\/backend\/nf\/bulk_create/i;
   const NF_PENDING_V2_RE = /\/backend\/nf\/pending\/v2/i;
   const POST_DETAIL_RE = /\/(backend\/project_[a-z]+\/)?posts?\/[^/]+(\/(tree|children|ancestors|remix_posts|remixes))?(\?|$)/i;
 
@@ -121,7 +122,9 @@
     if (uvDraftsPage) return uvDraftsPage;
     const factory = window.SoraUVDraftsPageModule;
     if (typeof factory !== 'function') {
-      if (isUVDrafts()) requestUVDraftsScriptLoad();
+      if (isUVDrafts() || isDrafts() || String(location.search || '').includes('remix')) {
+        requestUVDraftsScriptLoad();
+      }
       return null;
     }
     uvDraftsPage = factory({ defaultFps: SORA_DEFAULT_FPS });
@@ -167,6 +170,9 @@
     if (isUVDrafts()) {
       ensureUVDraftsPage();
       startUVDraftsTitleGuard();
+    }
+    if (isDrafts() || String(location.search || '').includes('remix')) {
+      checkPendingComposePrompt();
     }
   });
 
@@ -222,12 +228,335 @@
     ensureUVDraftsPageModule()?.clearPendingCreateOverrides?.();
   }
 
+  function loadPendingCreateQueue() {
+    return ensureUVDraftsPageModule()?.loadPendingCreateQueue?.() || null;
+  }
+
+  function peekPendingCreateQueuePrompt() {
+    const out = ensureUVDraftsPageModule()?.peekPendingCreateQueuePrompt?.();
+    if (!out || typeof out !== 'object') {
+      return { prompt: '', remaining: 0, hasPrompt: false };
+    }
+    return out;
+  }
+
+  function advancePendingCreateQueuePrompt() {
+    const out = ensureUVDraftsPageModule()?.advancePendingCreateQueuePrompt?.();
+    if (!out || typeof out !== 'object') {
+      return { prompt: '', consumed: false, remaining: 0 };
+    }
+    return out;
+  }
+
+  function consumePendingCreateQueuePrompt() {
+    const out = ensureUVDraftsPageModule()?.consumePendingCreateQueuePrompt?.();
+    if (!out || typeof out !== 'object') {
+      return { prompt: '', consumed: false, remaining: 0 };
+    }
+    return out;
+  }
+
+  function loadPendingCreateBatchState() {
+    return ensureUVDraftsPageModule()?.loadPendingCreateBatchState?.() || {
+      status: 'idle',
+      awaitingRequest: false,
+      progress: { submitted: 0, total: 0 },
+      settings: null,
+      lastError: '',
+    };
+  }
+
+  function savePendingCreateBatchState(state) {
+    return ensureUVDraftsPageModule()?.savePendingCreateBatchState?.(state) || state;
+  }
+
+  function clearPendingCreateBatchState() {
+    return ensureUVDraftsPageModule()?.clearPendingCreateBatchState?.() || null;
+  }
+
   function applyComposerOverridesToCreateBody(bodyString, overrides) {
     const moduleApi = ensureUVDraftsPageModule();
     if (moduleApi?.applyComposerOverridesToCreateBody) {
       return moduleApi.applyComposerOverridesToCreateBody(bodyString, overrides);
     }
     return bodyString;
+  }
+
+  const UV_MODEL_TO_NATIVE_MODEL_ID = Object.freeze({
+    sora2: 'sy_8',
+    sora2pro: 'sy_ore',
+  });
+  const UV_RESOLUTION_TO_NATIVE_SIZE = Object.freeze({
+    standard: 'small',
+    high: 'large',
+  });
+  const UV_ALLOWED_ORIENTATION = new Set(['portrait', 'landscape', 'square']);
+
+  function normalizeCreateOverrideValues(overrides) {
+    if (!overrides || typeof overrides !== 'object') return null;
+    const out = {};
+    const takeTrimmed = (key, targetKey = key, lower = false) => {
+      const value = overrides[key];
+      if (typeof value !== 'string') return;
+      const trimmed = value.trim();
+      if (!trimmed) return;
+      out[targetKey] = lower ? trimmed.toLowerCase() : trimmed;
+    };
+
+    takeTrimmed('prompt');
+    takeTrimmed('model', 'modelAlias', true);
+    takeTrimmed('orientation', 'orientation', true);
+    takeTrimmed('resolution', 'resolution', true);
+    takeTrimmed('style');
+    takeTrimmed('mode', 'mode', true);
+
+    const seedRaw = overrides.seed;
+    if (typeof seedRaw === 'string' || Number.isFinite(Number(seedRaw))) {
+      const seed = String(seedRaw).replace(/[^\d]/g, '').slice(0, 10);
+      if (seed) out.seed = seed;
+    }
+
+    const durationSeconds = Number(overrides.durationSeconds);
+    if (Number.isFinite(durationSeconds) && durationSeconds > 0) {
+      out.durationSeconds = Math.floor(durationSeconds);
+    }
+
+    const nFrames = Number(overrides.nFrames);
+    if (Number.isFinite(nFrames) && nFrames > 0) {
+      out.nFrames = Math.floor(nFrames);
+    } else if (Number.isFinite(out.durationSeconds) && out.durationSeconds > 0) {
+      out.nFrames = Math.floor(out.durationSeconds * SORA_DEFAULT_FPS);
+    }
+
+    const gensCount = Number(overrides.gensCount);
+    if (Number.isFinite(gensCount) && gensCount > 0) {
+      out.gensCount = Math.max(1, Math.floor(gensCount));
+    }
+
+    if (!Object.keys(out).length) return null;
+    if (out.orientation && !UV_ALLOWED_ORIENTATION.has(out.orientation)) {
+      delete out.orientation;
+    }
+    return out;
+  }
+
+  function resolveNativeModelId(modelAlias) {
+    const alias = String(modelAlias || '').trim().toLowerCase();
+    if (!alias) return '';
+    if (/^sy_[a-z0-9]+$/i.test(alias)) return alias;
+    return UV_MODEL_TO_NATIVE_MODEL_ID[alias] || '';
+  }
+
+  function resolveNativeSize(resolution) {
+    const normalized = String(resolution || '').trim().toLowerCase();
+    if (!normalized) return '';
+    return UV_RESOLUTION_TO_NATIVE_SIZE[normalized] || '';
+  }
+
+  function applyCreateOverridesPreservingNativeShape(bodyString, overrides, options = {}) {
+    if (typeof bodyString !== 'string') return bodyString;
+    const normalized = normalizeCreateOverrideValues(overrides);
+    if (!normalized) return bodyString;
+    const isBulkRequest = options && options.isBulkRequest === true;
+
+    const addHintOnce = (basePrompt, label, value) => {
+      const base = String(basePrompt || '').trim();
+      const hint = `${label}: ${String(value || '').trim()}`;
+      if (!base || !hint.trim()) return base;
+      return base.includes(hint) ? base : `${base}\n\n${hint}`;
+    };
+
+    const applyToObject = (obj, allowFallbackPrompt) => {
+      if (!obj || typeof obj !== 'object') return false;
+      let changed = false;
+      const hasOwn = (target, key) => Object.prototype.hasOwnProperty.call(target, key);
+      const hasOwnRoot = (key) => hasOwn(obj, key);
+      const cfg = obj.creation_config && typeof obj.creation_config === 'object'
+        ? obj.creation_config
+        : null;
+
+      let styleApplied = false;
+      let seedApplied = false;
+
+      const nativeModel = resolveNativeModelId(normalized.modelAlias);
+      if (nativeModel) {
+        if (hasOwnRoot('model') || obj.model != null) {
+          if (obj.model !== nativeModel) {
+            obj.model = nativeModel;
+            changed = true;
+          }
+        }
+        if (cfg && (hasOwn(cfg, 'model') || hasOwnRoot('model'))) {
+          if (cfg.model !== nativeModel) {
+            cfg.model = nativeModel;
+            changed = true;
+          }
+        }
+      }
+
+      if (normalized.orientation) {
+        if (hasOwnRoot('orientation') || obj.orientation != null) {
+          if (obj.orientation !== normalized.orientation) {
+            obj.orientation = normalized.orientation;
+            changed = true;
+          }
+        }
+        if (cfg && hasOwn(cfg, 'orientation') && cfg.orientation !== normalized.orientation) {
+          cfg.orientation = normalized.orientation;
+          changed = true;
+        }
+      }
+
+      if (normalized.mode) {
+        if (hasOwnRoot('mode') || obj.mode != null) {
+          if (obj.mode !== normalized.mode) {
+            obj.mode = normalized.mode;
+            changed = true;
+          }
+        }
+      }
+
+      if (normalized.resolution) {
+        const nativeSize = resolveNativeSize(normalized.resolution);
+        if (nativeSize && (hasOwnRoot('size') || obj.size != null)) {
+          if (obj.size !== nativeSize) {
+            obj.size = nativeSize;
+            changed = true;
+          }
+        }
+        if (hasOwnRoot('resolution') && obj.resolution !== normalized.resolution) {
+          obj.resolution = normalized.resolution;
+          changed = true;
+        }
+        if (cfg && (hasOwn(cfg, 'resolution') || cfg.resolution != null) && cfg.resolution !== normalized.resolution) {
+          cfg.resolution = normalized.resolution;
+          changed = true;
+        }
+      }
+
+      if (Number.isFinite(normalized.nFrames) && normalized.nFrames > 0) {
+        if (hasOwnRoot('n_frames') || obj.n_frames != null) {
+          if (obj.n_frames !== normalized.nFrames) {
+            obj.n_frames = normalized.nFrames;
+            changed = true;
+          }
+        }
+        if (hasOwnRoot('duration_seconds') && obj.duration_seconds !== Math.floor(normalized.nFrames / SORA_DEFAULT_FPS)) {
+          obj.duration_seconds = Math.floor(normalized.nFrames / SORA_DEFAULT_FPS);
+          changed = true;
+        }
+        if (cfg && (hasOwn(cfg, 'n_frames') || cfg.n_frames != null) && cfg.n_frames !== normalized.nFrames) {
+          cfg.n_frames = normalized.nFrames;
+          changed = true;
+        }
+        if (cfg && hasOwn(cfg, 'duration_seconds')) {
+          const durationSeconds = Math.floor(normalized.nFrames / SORA_DEFAULT_FPS);
+          if (cfg.duration_seconds !== durationSeconds) {
+            cfg.duration_seconds = durationSeconds;
+            changed = true;
+          }
+        }
+      }
+
+      if (Number.isFinite(normalized.gensCount) && normalized.gensCount > 0) {
+        const desired = normalized.gensCount;
+        const shouldSetSamples = isBulkRequest || desired > 1 || hasOwnRoot('nsamples') || obj.nsamples != null;
+        if (shouldSetSamples && obj.nsamples !== desired) {
+          obj.nsamples = desired;
+          changed = true;
+        }
+      }
+
+      if (normalized.style) {
+        if (hasOwnRoot('style')) {
+          if (obj.style !== normalized.style) {
+            obj.style = normalized.style;
+            changed = true;
+          }
+          styleApplied = true;
+        }
+        if (cfg) {
+          if (cfg.style !== normalized.style) {
+            cfg.style = normalized.style;
+            changed = true;
+          }
+          styleApplied = true;
+        }
+      }
+
+      if (normalized.seed) {
+        if (hasOwnRoot('seed')) {
+          if (obj.seed !== normalized.seed) {
+            obj.seed = normalized.seed;
+            changed = true;
+          }
+          seedApplied = true;
+        }
+        if (hasOwnRoot('metadata')) {
+          const metadata = obj.metadata && typeof obj.metadata === 'object'
+            ? obj.metadata
+            : {};
+          if (obj.metadata !== metadata) {
+            obj.metadata = metadata;
+            changed = true;
+          }
+          if (metadata.seed !== Number(normalized.seed)) {
+            metadata.seed = Number(normalized.seed);
+            changed = true;
+          }
+          seedApplied = true;
+        }
+        if (cfg) {
+          if (cfg.seed !== normalized.seed) {
+            cfg.seed = normalized.seed;
+            changed = true;
+          }
+          seedApplied = true;
+        }
+      }
+
+      let finalPrompt = normalized.prompt
+        ? normalized.prompt
+        : (typeof obj.prompt === 'string' ? obj.prompt.trim() : '');
+      if (!styleApplied && normalized.style) {
+        finalPrompt = addHintOnce(finalPrompt, 'Style', normalized.style);
+      }
+      if (!seedApplied && normalized.seed) {
+        finalPrompt = addHintOnce(finalPrompt, 'Seed', normalized.seed);
+      }
+
+      if (finalPrompt) {
+        if (hasOwnRoot('prompt') || allowFallbackPrompt) {
+          if (obj.prompt !== finalPrompt) {
+            obj.prompt = finalPrompt;
+            changed = true;
+          }
+        }
+        if (cfg && hasOwn(cfg, 'prompt') && cfg.prompt !== finalPrompt) {
+          cfg.prompt = finalPrompt;
+          changed = true;
+        }
+      }
+
+      return changed;
+    };
+
+    try {
+      const parsed = JSON.parse(bodyString);
+      let changed = applyToObject(parsed, true);
+      if (typeof parsed.body === 'string') {
+        try {
+          const nested = JSON.parse(parsed.body);
+          if (applyToObject(nested, false)) {
+            parsed.body = JSON.stringify(nested);
+            changed = true;
+          }
+        } catch {}
+      }
+      return changed ? JSON.stringify(parsed) : bodyString;
+    } catch {
+      return bodyString;
+    }
   }
 
   // == UI State ==
@@ -294,6 +623,86 @@
   // Track route to detect same-tab navigation
   const routeKey = () => `${location.pathname}${location.search}`;
   let lastRouteKey = routeKey();
+  let batchAutomationTimerId = null;
+  const BATCH_AUTOMATION_INTERVAL_MS = 900;
+  const BATCH_ACTIVE_SLOTS_DEFAULT = 5;
+  const BATCH_SLOT_OBSERVER_STALE_MS = 30 * 1000;
+  const BATCH_SLOT_CAPACITY_BACKOFF_MS = 5000;
+  const BATCH_SLOT_CAPACITY_BACKOFF_MIN_MS = 30 * 1000;
+  const BATCH_SLOT_CAPACITY_BACKOFF_MAX_MS = 30000;
+  const BATCH_SLOT_REFRESH_POLL_MS = 2000;
+  const BATCH_SLOT_REFRESH_ENDPOINT = '/backend/nf/pending/v2';
+  const BATCH_DURATION_EMA_ALPHA = 0.25;
+  const BATCH_DURATION_DEFAULT_MS = 75 * 1000;
+  const BATCH_DURATION_STATS_MAX_SAMPLES = 400;
+  const BATCH_DURATION_MIN_SAMPLE_MS = 5000;
+  const BATCH_DURATION_MAX_SAMPLE_MS = 10 * 60 * 1000;
+  const BATCH_DURATION_TRACK_TTL_MS = BATCH_DURATION_MAX_SAMPLE_MS * 2;
+  const BATCH_DURATION_TRACK_MAX_ITEMS = 600;
+  const BATCH_DURATION_PROFILE_ANY = 'any|any';
+  const BATCH_SLOT_OBSERVER_MAX_LIMIT = 100;
+  const BATCH_RETRY_PUSHBACK_OPTIONS_SEC = Object.freeze([30, 60, 90, 120, 300]);
+  const BATCH_SLOT_HEADER_RE = /(limit|slot|concurr|generation|pending|active|max)/i;
+  const BATCH_SLOT_CAPACITY_ERROR_RE = /(limit|slot|concurr|too many|capacity|active generation|pending generation|max active|max pending|queue full|retry later)/i;
+  const BATCH_SLOT_TRANSIENT_400_RE = /(didn.t look right|hmmm|try again later|please try again)/i;
+  const BATCH_ACTIVE_COUNT_PATH_RE = /(active|pending|running|in_?progress|queue).*(count|total|size)|(?:count|total|size).*(active|pending|running|in_?progress|queue)/i;
+  const BATCH_ACTIVE_PENDING_STATUSES = new Set([
+    'pending',
+    'queued',
+    'queueing',
+    'enqueued',
+    'running',
+    'processing',
+    'in_progress',
+    'in-progress',
+    'starting',
+    'submitted',
+    'waiting',
+    'retrying',
+    'active',
+  ]);
+  const BATCH_LIMIT_EXACT_KEYS = new Set([
+    'max_active_generations',
+    'active_generations_limit',
+    'max_pending_generations',
+    'pending_generations_limit',
+    'max_concurrent_generations',
+    'concurrent_generations_limit',
+    'max_generation_slots',
+    'generation_slot_limit',
+    'slot_limit',
+    'slots_limit',
+    'max_slots',
+    'max_active_slots',
+    'active_slot_limit',
+    'concurrency_limit',
+  ]);
+  const BATCH_ACTIVE_COUNT_EXACT_KEYS = new Set([
+    'active_generations_count',
+    'pending_generations_count',
+    'running_generations_count',
+    'queued_generations_count',
+    'active_count',
+    'pending_count',
+    'running_count',
+    'queued_count',
+    'in_progress_count',
+    'inprogress_count',
+  ]);
+  const pendingBatchSlotObserver = {
+    observedActive: 0,
+    observedLimit: null,
+    updatedAt: 0,
+    optimisticActive: 0,
+    optimisticUpdatedAt: 0,
+    backoffUntilMs: 0,
+    manualBackoffUntilMs: 0,
+    source: '',
+  };
+  let pendingBatchSlotRefreshInFlight = false;
+  let pendingBatchSlotRefreshLastAt = 0;
+  const pendingBatchGenerationFirstSeen = new Map(); // id -> { firstSeenAt, lastSeenAt, profileKey }
+  const pendingBatchDurationStatsByProfile = new Map(); // profileKey -> { avgMs, samples, updatedAt }
 
   // == Utils ==
   const fmt = (n) =>
@@ -1488,6 +1897,911 @@
 
     // Start attempting after a short delay for page render
     setTimeout(() => attemptFill(), 300);
+  }
+
+  function navigateToUVDraftsRoute() {
+    if (uvDraftsPrevDocTitle == null && typeof document.title === 'string' && document.title.trim()) {
+      uvDraftsPrevDocTitle = document.title;
+    }
+    history.pushState({}, '', '/uv-drafts');
+    onRouteChange();
+  }
+
+  function getDraftsQueueUiSummary() {
+    const queue = loadPendingCreateQueue() || {};
+    const total = Math.max(0, toFiniteInt(queue.total, 0));
+    const remaining = Math.max(0, toFiniteInt(queue.remaining, 0));
+    const index = Math.max(0, toFiniteInt(queue.index, 0));
+    const nextNumber = total > 0 ? Math.min(total, Math.max(1, index + 1)) : 0;
+    if (total <= 0) {
+      return {
+        title: 'Queue: empty',
+        detail: 'Load prompts from UV Drafts to prepare batch creation.',
+        canResume: false,
+        canPushRetryBack: false,
+        retryCountdownSec: 0,
+      };
+    }
+
+    const batch = loadPendingCreateBatchState() || {};
+    const status = String(batch.status || 'idle').trim().toLowerCase();
+    const submitted = Math.max(0, toFiniteInt(batch?.progress?.submitted, 0));
+    const progressTotal = Math.max(submitted, toFiniteInt(batch?.progress?.total, 0));
+    const genPerPrompt = Math.max(1, toFiniteInt(batch?.settings?.gensCount, 1));
+    const slotAvailability = getPendingBatchSlotAvailability(batch);
+    const retryCountdownSec = Math.max(
+      0,
+      Math.ceil(Math.max(0, toFiniteInt(slotAvailability?.backoffUntilMs, 0) - Date.now()) / 1000)
+    );
+    const title = `Queue: ${remaining}/${total} remaining`;
+    let detail = `Batch not started. Next prompt #${nextNumber}.`;
+
+    if (status === 'armed' || status === 'running') {
+      const totalLabel = Math.max(progressTotal, total);
+      detail = `Batch ${status}: ${submitted}/${totalLabel} submitted (${genPerPrompt} gen/prompt). Next #${nextNumber}.`;
+      if (status === 'running' && batch.lastError) {
+        detail += ` ${truncateInline(batch.lastError, 90)}`;
+      }
+      if (retryCountdownSec > 0) {
+        detail += ` Next retry in ${retryCountdownSec}s.`;
+      }
+    } else if (status === 'paused_error') {
+      const totalLabel = Math.max(progressTotal, total);
+      const reason = batch.lastError ? ` Error: ${truncateInline(batch.lastError, 80)}.` : '';
+      detail = `Batch paused: ${submitted}/${totalLabel} submitted.${reason} Next #${nextNumber}. Click Resume Queue to continue.`;
+    } else if (status === 'completed') {
+      const totalLabel = Math.max(progressTotal, submitted);
+      detail = `Batch completed: ${submitted}/${totalLabel} submitted.`;
+    }
+
+    return {
+      title,
+      detail,
+      canResume: status === 'paused_error' && remaining > 0,
+      canPushRetryBack: (status === 'armed' || status === 'running') && remaining > 0,
+      retryCountdownSec,
+    };
+  }
+
+  function pushBackPendingBatchRetrySeconds(delaySeconds) {
+    const seconds = toFiniteInt(delaySeconds, 0);
+    if (seconds <= 0) return 0;
+    const batch = loadPendingCreateBatchState() || {};
+    const status = String(batch.status || '').trim().toLowerCase();
+    if (!(status === 'armed' || status === 'running')) return 0;
+    const queue = loadPendingCreateQueue() || {};
+    const remaining = Math.max(0, toFiniteInt(queue.remaining, 0));
+    if (remaining <= 0) return 0;
+    const now = Date.now();
+    const currentUntil = Math.max(
+      now,
+      toFiniteInt(pendingBatchSlotObserver.backoffUntilMs, 0),
+      toFiniteInt(pendingBatchSlotObserver.manualBackoffUntilMs, 0)
+    );
+    const nextUntil = currentUntil + seconds * 1000;
+    pendingBatchSlotObserver.manualBackoffUntilMs = nextUntil;
+    const retryCountdownSec = Math.max(1, Math.ceil((nextUntil - now) / 1000));
+    savePendingCreateBatchState({
+      ...batch,
+      lastError: `Retry postponed by user. Next retry in ${retryCountdownSec}s.`,
+    });
+    return retryCountdownSec;
+  }
+
+  function resumePausedBatchQueueFromDrafts() {
+    const queue = loadPendingCreateQueue() || {};
+    const remaining = Math.max(0, toFiniteInt(queue.remaining, 0));
+    if (remaining <= 0) return false;
+
+    const batch = loadPendingCreateBatchState() || {};
+    const status = String(batch.status || '').trim().toLowerCase();
+    if (status !== 'paused_error') return false;
+
+    const submitted = Math.max(0, toFiniteInt(batch?.progress?.submitted, 0));
+    const total = Math.max(
+      submitted,
+      toFiniteInt(batch?.progress?.total, 0),
+      submitted + remaining
+    );
+    pendingBatchSlotObserver.backoffUntilMs = 0;
+    pendingBatchSlotObserver.manualBackoffUntilMs = 0;
+
+    savePendingCreateBatchState({
+      ...batch,
+      status: 'running',
+      awaitingRequest: false,
+      startedAt: toFiniteInt(batch?.startedAt, 0) || Date.now(),
+      completedAt: 0,
+      progress: { submitted, total },
+      lastError: '',
+    });
+
+    setTimeout(tickPendingCreateBatchAutomation, 0);
+    return true;
+  }
+
+  function isPendingBatchStatus(status) {
+    const normalized = String(status || '').trim().toLowerCase();
+    return normalized === 'armed' || normalized === 'running';
+  }
+
+  function setNativeComposePrompt(promptText) {
+    const text = typeof promptText === 'string' ? promptText.trim() : '';
+    if (!text) return null;
+    const textarea = document.querySelector('textarea[placeholder="Describe your video..."]');
+    if (!textarea) return null;
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
+    if (!setter) return null;
+    setter.call(textarea, text);
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    textarea.dispatchEvent(new Event('change', { bubbles: true }));
+    return textarea;
+  }
+
+  function findNativeCreateButton() {
+    const textarea = document.querySelector('textarea[placeholder="Describe your video..."]');
+    const scopes = [];
+    if (textarea) {
+      scopes.push(textarea.closest('form'));
+      scopes.push(textarea.closest('[role="dialog"]'));
+      scopes.push(textarea.parentElement);
+    }
+    scopes.push(document);
+
+    for (const scope of scopes) {
+      if (!scope || typeof scope.querySelectorAll !== 'function') continue;
+      const buttons = Array.from(scope.querySelectorAll('button'))
+        .filter((btn) => !btn.disabled && btn.offsetParent !== null);
+      const exact = buttons.find((btn) => /^create$/i.test(String(btn.textContent || '').trim()));
+      if (exact) return exact;
+      const fuzzy = buttons.find((btn) => /create/i.test(String(btn.textContent || '')));
+      if (fuzzy) return fuzzy;
+    }
+    return null;
+  }
+
+  function toFiniteInt(value, fallback = 0) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return Math.floor(Number(fallback) || 0);
+    return Math.floor(n);
+  }
+
+  function normalizeBatchObserverKey(value) {
+    return String(value || '')
+      .trim()
+      .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+      .replace(/[^a-zA-Z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '')
+      .toLowerCase();
+  }
+
+  function clampBatchObservedLimit(value) {
+    const n = toFiniteInt(value, 0);
+    if (n <= 0) return null;
+    return Math.min(BATCH_SLOT_OBSERVER_MAX_LIMIT, n);
+  }
+
+  function clampBatchObservedActive(value) {
+    const n = toFiniteInt(value, 0);
+    if (n <= 0) return 0;
+    return Math.min(n, BATCH_SLOT_OBSERVER_MAX_LIMIT * 4);
+  }
+
+  function normalizeBatchPendingStatus(status) {
+    const raw = String(status || '').trim().toLowerCase();
+    return raw;
+  }
+
+  function isActiveBatchPendingStatus(status) {
+    return BATCH_ACTIVE_PENDING_STATUSES.has(normalizeBatchPendingStatus(status));
+  }
+
+  function getBatchSubmissionSlotCost(batchState) {
+    const gensCount = Number(batchState?.settings?.gensCount);
+    if (!Number.isFinite(gensCount) || gensCount <= 0) return 1;
+    return Math.max(1, Math.floor(gensCount));
+  }
+
+  function normalizeBatchDurationModel(value) {
+    const raw = String(value || '').trim().toLowerCase();
+    if (!raw) return 'any';
+    const compact = raw.replace(/[^a-z0-9]+/g, '');
+    if (compact === 'sora2pro' || compact === 'syore' || compact.includes('sora2pro')) return 'sora2pro';
+    if (compact === 'sora2' || compact === 'sy8' || compact.includes('sora2')) return 'sora2';
+    if (/^sy[a-z0-9]+$/.test(compact)) return compact;
+    return compact || 'any';
+  }
+
+  function normalizeBatchDurationResolution(resolutionValue, sizeValue, widthValue, heightValue) {
+    const resolutionRaw = String(resolutionValue || '').trim().toLowerCase();
+    const sizeRaw = String(sizeValue || '').trim().toLowerCase();
+    const resolutionCompact = resolutionRaw.replace(/[^a-z0-9]+/g, '');
+    const sizeCompact = sizeRaw.replace(/[^a-z0-9]+/g, '');
+
+    if (
+      resolutionCompact === 'high' ||
+      resolutionCompact === 'large' ||
+      resolutionCompact === 'hd' ||
+      resolutionCompact.includes('high')
+    ) {
+      return 'high';
+    }
+    if (
+      resolutionCompact === 'standard' ||
+      resolutionCompact === 'small' ||
+      resolutionCompact === 'sd' ||
+      resolutionCompact.includes('standard')
+    ) {
+      return 'standard';
+    }
+
+    if (sizeCompact === 'large' || sizeCompact === 'high' || sizeCompact === 'hd') return 'high';
+    if (sizeCompact === 'small' || sizeCompact === 'standard' || sizeCompact === 'sd') return 'standard';
+
+    const width = Number(widthValue);
+    const height = Number(heightValue);
+    const maxSide = Math.max(width, height);
+    if (Number.isFinite(maxSide) && maxSide > 0) {
+      return maxSide >= 1080 ? 'high' : 'standard';
+    }
+    return 'any';
+  }
+
+  function parseBatchDurationProfileKey(profileKey) {
+    const raw = String(profileKey || '').trim().toLowerCase();
+    if (!raw || !raw.includes('|')) {
+      return { model: 'any', resolution: 'any' };
+    }
+    const [modelRaw, resolutionRaw] = raw.split('|', 2);
+    return {
+      model: normalizeBatchDurationModel(modelRaw),
+      resolution: normalizeBatchDurationResolution(resolutionRaw),
+    };
+  }
+
+  function buildBatchDurationProfileKey(modelValue, resolutionValue) {
+    const model = normalizeBatchDurationModel(modelValue);
+    const resolution = normalizeBatchDurationResolution(resolutionValue);
+    return `${model}|${resolution}`;
+  }
+
+  function normalizePendingBatchGenerationId(value) {
+    if (value == null) return '';
+    const id = String(value).trim();
+    if (!id) return '';
+    return id;
+  }
+
+  function resolvePendingBatchProfileKey(task, generation = null) {
+    const taskCfg = task?.creation_config && typeof task.creation_config === 'object' ? task.creation_config : null;
+    const genCfg =
+      generation?.creation_config && typeof generation.creation_config === 'object'
+        ? generation.creation_config
+        : null;
+    const model = normalizeBatchDurationModel(
+      generation?.model ||
+      genCfg?.model ||
+      task?.model ||
+      taskCfg?.model ||
+      ''
+    );
+    const resolution = normalizeBatchDurationResolution(
+      generation?.resolution ||
+      genCfg?.resolution ||
+      task?.resolution ||
+      taskCfg?.resolution ||
+      '',
+      generation?.size ||
+      genCfg?.size ||
+      task?.size ||
+      taskCfg?.size ||
+      '',
+      generation?.width || genCfg?.width || task?.width || taskCfg?.width,
+      generation?.height || genCfg?.height || task?.height || taskCfg?.height
+    );
+    return `${model}|${resolution}`;
+  }
+
+  function collectActivePendingGenerationEntries(payload) {
+    const items = extractPendingTaskItems(payload);
+    if (!Array.isArray(items) || items.length === 0) return [];
+    const out = [];
+    const hasGenerationTasks = items.some((item) => !!item && typeof item === 'object' && Array.isArray(item.generations));
+
+    if (hasGenerationTasks) {
+      for (let taskIndex = 0; taskIndex < items.length; taskIndex += 1) {
+        const task = items[taskIndex];
+        if (!task || typeof task !== 'object') continue;
+        const taskStatus = normalizeBatchPendingStatus(task.status);
+        const taskId = normalizePendingBatchGenerationId(task.id || task.task_id || task.uuid);
+        const taskProfileKey = resolvePendingBatchProfileKey(task, null);
+        const generations = Array.isArray(task.generations) ? task.generations : [];
+        if (generations.length === 0) {
+          if (!isActiveBatchPendingStatus(taskStatus) || !taskId) continue;
+          out.push({ id: `task:${taskId}`, profileKey: taskProfileKey });
+          continue;
+        }
+        for (let genIndex = 0; genIndex < generations.length; genIndex += 1) {
+          const generation = generations[genIndex];
+          if (!generation || typeof generation !== 'object') continue;
+          const genStatus = normalizeBatchPendingStatus(generation.status);
+          if (!(isActiveBatchPendingStatus(genStatus) || (!genStatus && isActiveBatchPendingStatus(taskStatus)))) {
+            continue;
+          }
+          const generationId = normalizePendingBatchGenerationId(
+            generation.id ||
+            generation.generation_id ||
+            generation.draft_id ||
+            generation.video_id ||
+            generation.uuid ||
+            generation.task_generation_id
+          );
+          const fallbackId = taskId ? `${taskId}:gen:${genIndex}` : '';
+          const trackingId = generationId || fallbackId;
+          if (!trackingId) continue;
+          out.push({
+            id: trackingId,
+            profileKey: resolvePendingBatchProfileKey(task, generation),
+          });
+        }
+      }
+      return out;
+    }
+
+    for (let index = 0; index < items.length; index += 1) {
+      const item = items[index];
+      if (!item || typeof item !== 'object') continue;
+      if (!isActiveBatchPendingStatus(item.status)) continue;
+      const id = normalizePendingBatchGenerationId(item.id || item.generation_id || item.draft_id || item.uuid);
+      if (!id) continue;
+      out.push({ id, profileKey: resolvePendingBatchProfileKey(item, null) });
+    }
+    return out;
+  }
+
+  function updatePendingBatchDurationStat(profileKey, sampleMs, now) {
+    const key = String(profileKey || BATCH_DURATION_PROFILE_ANY);
+    const prev = pendingBatchDurationStatsByProfile.get(key);
+    const sample = Math.round(sampleMs);
+    if (prev && Number.isFinite(prev.avgMs) && prev.avgMs > 0) {
+      const avgMs = Math.round(prev.avgMs + BATCH_DURATION_EMA_ALPHA * (sample - prev.avgMs));
+      const samples = Math.min(BATCH_DURATION_STATS_MAX_SAMPLES, Math.max(1, toFiniteInt(prev.samples, 1) + 1));
+      pendingBatchDurationStatsByProfile.set(key, {
+        avgMs,
+        samples,
+        updatedAt: now,
+      });
+      return;
+    }
+    pendingBatchDurationStatsByProfile.set(key, {
+      avgMs: sample,
+      samples: 1,
+      updatedAt: now,
+    });
+  }
+
+  function recordPendingBatchDurationSample(profileKey, durationMs, now = Date.now()) {
+    if (!Number.isFinite(durationMs)) return;
+    const sample = Math.round(durationMs);
+    if (sample < BATCH_DURATION_MIN_SAMPLE_MS || sample > BATCH_DURATION_MAX_SAMPLE_MS) return;
+    const parsed = parseBatchDurationProfileKey(profileKey);
+    const keys = new Set([
+      `${parsed.model}|${parsed.resolution}`,
+      `${parsed.model}|any`,
+      `any|${parsed.resolution}`,
+      BATCH_DURATION_PROFILE_ANY,
+    ]);
+    for (const key of keys) {
+      updatePendingBatchDurationStat(key, sample, now);
+    }
+  }
+
+  function prunePendingBatchGenerationTracking(now = Date.now()) {
+    const staleBefore = now - BATCH_DURATION_TRACK_TTL_MS;
+    for (const [id, tracked] of pendingBatchGenerationFirstSeen.entries()) {
+      const lastSeenAt = toFiniteInt(tracked?.lastSeenAt, 0);
+      if (lastSeenAt > 0 && lastSeenAt < staleBefore) {
+        pendingBatchGenerationFirstSeen.delete(id);
+      }
+    }
+    if (pendingBatchGenerationFirstSeen.size <= BATCH_DURATION_TRACK_MAX_ITEMS) return;
+    const rows = Array.from(pendingBatchGenerationFirstSeen.entries())
+      .sort((a, b) => toFiniteInt(a[1]?.lastSeenAt, 0) - toFiniteInt(b[1]?.lastSeenAt, 0));
+    const overflow = pendingBatchGenerationFirstSeen.size - BATCH_DURATION_TRACK_MAX_ITEMS;
+    for (let i = 0; i < overflow; i += 1) {
+      pendingBatchGenerationFirstSeen.delete(rows[i][0]);
+    }
+  }
+
+  function updatePendingBatchDurationLearningFromPayload(payload, now = Date.now()) {
+    const activeEntries = collectActivePendingGenerationEntries(payload);
+    const inferredActive = clampBatchObservedActive(countActivePendingFromPayload(payload));
+    if (activeEntries.length === 0 && inferredActive > 0) {
+      prunePendingBatchGenerationTracking(now);
+      return;
+    }
+    const activeIds = new Set();
+    for (const entry of activeEntries) {
+      const id = normalizePendingBatchGenerationId(entry?.id);
+      if (!id || activeIds.has(id)) continue;
+      activeIds.add(id);
+      const profileKey = String(entry?.profileKey || BATCH_DURATION_PROFILE_ANY);
+      const tracked = pendingBatchGenerationFirstSeen.get(id);
+      if (tracked) {
+        tracked.lastSeenAt = now;
+        if (
+          (!tracked.profileKey || tracked.profileKey === BATCH_DURATION_PROFILE_ANY) &&
+          profileKey !== BATCH_DURATION_PROFILE_ANY
+        ) {
+          tracked.profileKey = profileKey;
+        }
+      } else {
+        pendingBatchGenerationFirstSeen.set(id, {
+          firstSeenAt: now,
+          lastSeenAt: now,
+          profileKey,
+        });
+      }
+    }
+
+    for (const [id, tracked] of pendingBatchGenerationFirstSeen.entries()) {
+      if (activeIds.has(id)) continue;
+      const firstSeenAt = toFiniteInt(tracked?.firstSeenAt, 0);
+      if (firstSeenAt > 0) {
+        const durationMs = Math.max(0, now - firstSeenAt);
+        recordPendingBatchDurationSample(tracked?.profileKey, durationMs, now);
+      }
+      pendingBatchGenerationFirstSeen.delete(id);
+    }
+    prunePendingBatchGenerationTracking(now);
+  }
+
+  function getPendingBatchDefaultDurationMs(profileKey) {
+    const parsed = parseBatchDurationProfileKey(profileKey);
+    if (parsed.model === 'sora2pro' && parsed.resolution === 'high') return 150 * 1000;
+    if (parsed.model === 'sora2pro') return 110 * 1000;
+    if (parsed.model === 'sora2' && parsed.resolution === 'high') return 95 * 1000;
+    if (parsed.model === 'sora2') return 70 * 1000;
+    if (parsed.resolution === 'high') return 100 * 1000;
+    return BATCH_DURATION_DEFAULT_MS;
+  }
+
+  function getPendingBatchDurationEstimateMs(batchState) {
+    const model = normalizeBatchDurationModel(
+      batchState?.settings?.model || batchState?.settings?.modelAlias || ''
+    );
+    const resolution = normalizeBatchDurationResolution(
+      batchState?.settings?.resolution || '',
+      batchState?.settings?.size || ''
+    );
+    const profileKey = buildBatchDurationProfileKey(model, resolution);
+    const parsed = parseBatchDurationProfileKey(profileKey);
+    const keys = [
+      `${parsed.model}|${parsed.resolution}`,
+      `${parsed.model}|any`,
+      `any|${parsed.resolution}`,
+      BATCH_DURATION_PROFILE_ANY,
+    ];
+    for (const key of keys) {
+      const stat = pendingBatchDurationStatsByProfile.get(key);
+      const avgMs = Number(stat?.avgMs);
+      if (Number.isFinite(avgMs) && avgMs > 0) {
+        return Math.max(BATCH_DURATION_MIN_SAMPLE_MS, Math.min(BATCH_DURATION_MAX_SAMPLE_MS, Math.round(avgMs)));
+      }
+    }
+    return getPendingBatchDefaultDurationMs(profileKey);
+  }
+
+  function computePendingBatchCapacityBackoffMs(batchState, availability = null) {
+    const slotAvailability = availability || getPendingBatchSlotAvailability(batchState);
+    const slotLimit = Math.max(1, toFiniteInt(slotAvailability?.limit, BATCH_ACTIVE_SLOTS_DEFAULT));
+    const slotCost = Math.max(1, getBatchSubmissionSlotCost(batchState));
+    const estimatedDurationMs = getPendingBatchDurationEstimateMs(batchState);
+    const estimatedTimeToFreeSlotMs = estimatedDurationMs / slotLimit;
+    const scaled = estimatedTimeToFreeSlotMs * slotCost;
+    const backoffMs = Number.isFinite(scaled) && scaled > 0 ? scaled : BATCH_SLOT_CAPACITY_BACKOFF_MS;
+    return Math.max(
+      BATCH_SLOT_CAPACITY_BACKOFF_MIN_MS,
+      Math.min(BATCH_SLOT_CAPACITY_BACKOFF_MAX_MS, Math.round(backoffMs))
+    );
+  }
+
+  function extractPendingTaskItems(payload) {
+    if (Array.isArray(payload)) return payload;
+    if (!payload || typeof payload !== 'object') return [];
+    if (Array.isArray(payload.items)) return payload.items;
+    if (Array.isArray(payload.tasks)) return payload.tasks;
+    if (payload.data && typeof payload.data === 'object') {
+      if (Array.isArray(payload.data.items)) return payload.data.items;
+      if (Array.isArray(payload.data.tasks)) return payload.data.tasks;
+    }
+    return [];
+  }
+
+  function countActivePendingFromPayload(payload) {
+    const items = extractPendingTaskItems(payload);
+    if (!Array.isArray(items) || items.length === 0) return 0;
+    const hasGenerationTasks = items.some((item) => !!item && typeof item === 'object' && Array.isArray(item.generations));
+    let active = 0;
+
+    if (hasGenerationTasks) {
+      for (const task of items) {
+        if (!task || typeof task !== 'object') continue;
+        const taskStatus = normalizeBatchPendingStatus(task.status);
+        const generations = Array.isArray(task.generations) ? task.generations : [];
+        if (generations.length === 0) {
+          if (isActiveBatchPendingStatus(taskStatus)) active += 1;
+          continue;
+        }
+        let taskActive = 0;
+        for (const generation of generations) {
+          if (!generation || typeof generation !== 'object') continue;
+          const genStatus = normalizeBatchPendingStatus(generation.status);
+          if (isActiveBatchPendingStatus(genStatus) || (!genStatus && isActiveBatchPendingStatus(taskStatus))) {
+            taskActive += 1;
+          }
+        }
+        active += taskActive;
+      }
+      return clampBatchObservedActive(active);
+    }
+
+    for (const item of items) {
+      if (!item || typeof item !== 'object') continue;
+      if (isActiveBatchPendingStatus(item.status)) active += 1;
+    }
+    return clampBatchObservedActive(active);
+  }
+
+  function forEachNumericField(root, visitor, maxDepth = 5, maxNodes = 500) {
+    const stack = [{ value: root, path: '', key: '', depth: 0 }];
+    let visited = 0;
+    while (stack.length > 0 && visited < maxNodes) {
+      const { value, path, key, depth } = stack.pop();
+      visited += 1;
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        visitor(value, path, key);
+        continue;
+      }
+      if (!value || typeof value !== 'object') continue;
+      if (depth >= maxDepth) continue;
+      if (Array.isArray(value)) {
+        const cap = Math.min(value.length, 40);
+        for (let i = cap - 1; i >= 0; i -= 1) {
+          const childPath = path ? `${path}[${i}]` : `[${i}]`;
+          stack.push({ value: value[i], path: childPath, key: key || '', depth: depth + 1 });
+        }
+        continue;
+      }
+      const entries = Object.entries(value);
+      const cap = Math.min(entries.length, 80);
+      for (let i = cap - 1; i >= 0; i -= 1) {
+        const [childKey, childVal] = entries[i];
+        const childPath = path ? `${path}.${childKey}` : childKey;
+        stack.push({ value: childVal, path: childPath, key: String(childKey || '').toLowerCase(), depth: depth + 1 });
+      }
+    }
+  }
+
+  function inferBatchSlotLimitFromPayload(payload) {
+    if (!payload || typeof payload !== 'object') return null;
+    let best = null;
+    forEachNumericField(payload, (value, path, key) => {
+      const candidate = clampBatchObservedLimit(value);
+      if (!candidate) return;
+      const keyText = normalizeBatchObserverKey(key);
+      if (!BATCH_LIMIT_EXACT_KEYS.has(keyText)) return;
+      const pathText = String(path || '').toLowerCase();
+      const score = 100 - Math.min(pathText.length, 80);
+      if (!best || score > best.score || (score === best.score && candidate < best.value)) {
+        best = { value: candidate, score };
+      }
+    });
+    return best ? best.value : null;
+  }
+
+  function inferActiveCountFromPayload(payload) {
+    const statusDerived = countActivePendingFromPayload(payload);
+    if (!payload || typeof payload !== 'object') return statusDerived;
+    let best = null;
+    forEachNumericField(payload, (value, path, key) => {
+      const candidate = clampBatchObservedActive(value);
+      if (!Number.isFinite(candidate) || candidate < 0) return;
+      const keyText = normalizeBatchObserverKey(key);
+      const pathText = String(path || '').toLowerCase();
+      if (!BATCH_ACTIVE_COUNT_PATH_RE.test(pathText) && !BATCH_ACTIVE_COUNT_EXACT_KEYS.has(keyText)) return;
+
+      let score = 0;
+      if (BATCH_ACTIVE_COUNT_EXACT_KEYS.has(keyText)) score += 7;
+      if (BATCH_ACTIVE_COUNT_PATH_RE.test(pathText)) score += 3;
+      if (/(active|running|in_?progress|pending|queue)/.test(keyText)) score += 2;
+      if (/(count|total|size)/.test(keyText)) score += 2;
+      if (score <= 0) return;
+
+      if (!best || score > best.score || (score === best.score && candidate > best.value)) {
+        best = { value: candidate, score };
+      }
+    });
+
+    if (!best) return statusDerived;
+    return Math.max(statusDerived, best.value);
+  }
+
+  function inferBatchSlotLimitFromHeaders(headersLike) {
+    if (!headersLike) return null;
+    let best = null;
+    const tryCandidate = (key, value) => {
+      const keyRaw = String(key || '').trim().toLowerCase();
+      if (!keyRaw || !BATCH_SLOT_HEADER_RE.test(keyRaw)) return;
+      const keyText = normalizeBatchObserverKey(keyRaw);
+      const hasStrongSlotSignal =
+        BATCH_LIMIT_EXACT_KEYS.has(keyText) ||
+        /(?:limit|max|quota).*(?:slot|concurr|active|pending)|(?:slot|concurr|active|pending).*(?:limit|max|quota)/.test(keyRaw);
+      if (!hasStrongSlotSignal) return;
+      const valueText = String(value || '');
+      const nums = valueText.match(/\d+/g) || [];
+      for (const rawNum of nums) {
+        const candidate = clampBatchObservedLimit(rawNum);
+        if (!candidate) continue;
+        let score = 0;
+        if (BATCH_LIMIT_EXACT_KEYS.has(keyText)) score += 7;
+        if (/(limit|max|quota|concurr|slot)/.test(keyText)) score += 3;
+        if (/(generation|pending|active)/.test(keyText)) score += 2;
+        if (score <= 0) continue;
+        if (!best || score > best.score || (score === best.score && candidate < best.value)) {
+          best = { value: candidate, score };
+        }
+      }
+    };
+
+    try {
+      if (typeof headersLike.forEach === 'function') {
+        headersLike.forEach((value, key) => tryCandidate(key, value));
+      } else if (typeof headersLike === 'string') {
+        const lines = headersLike.split(/\r?\n/);
+        for (const line of lines) {
+          const sep = line.indexOf(':');
+          if (sep <= 0) continue;
+          tryCandidate(line.slice(0, sep), line.slice(sep + 1));
+        }
+      } else if (typeof headersLike === 'object') {
+        for (const [key, value] of Object.entries(headersLike)) {
+          tryCandidate(key, value);
+        }
+      }
+    } catch {}
+
+    return best ? best.value : null;
+  }
+
+  function pruneBatchOptimisticActive(now = Date.now()) {
+    if (!pendingBatchSlotObserver.optimisticActive) return;
+    const sinceUpdate = now - toFiniteInt(pendingBatchSlotObserver.optimisticUpdatedAt, 0);
+    if (sinceUpdate <= BATCH_SLOT_OBSERVER_STALE_MS) return;
+    pendingBatchSlotObserver.optimisticActive = 0;
+    pendingBatchSlotObserver.optimisticUpdatedAt = 0;
+  }
+
+  function updatePendingBatchSlotObserverFromPayload(payload, observerMeta = null) {
+    const now = Date.now();
+    updatePendingBatchDurationLearningFromPayload(payload, now);
+    const prevObserved = clampBatchObservedActive(pendingBatchSlotObserver.observedActive);
+    const observedActive = clampBatchObservedActive(inferActiveCountFromPayload(payload));
+    let observedLimit = clampBatchObservedLimit(observerMeta && observerMeta.limitHint);
+    if (!observedLimit) {
+      observedLimit = inferBatchSlotLimitFromPayload(payload);
+    }
+
+    let optimisticActive = clampBatchObservedActive(pendingBatchSlotObserver.optimisticActive);
+    const absorbed = Math.max(0, observedActive - prevObserved);
+    if (absorbed > 0) {
+      optimisticActive = Math.max(0, optimisticActive - absorbed);
+    }
+
+    pendingBatchSlotObserver.observedActive = observedActive;
+    if (observedLimit) {
+      pendingBatchSlotObserver.observedLimit = observedLimit;
+    }
+    pendingBatchSlotObserver.updatedAt = now;
+    pendingBatchSlotObserver.optimisticActive = optimisticActive;
+    if (pendingBatchSlotObserver.backoffUntilMs && pendingBatchSlotObserver.backoffUntilMs <= now) {
+      pendingBatchSlotObserver.backoffUntilMs = 0;
+    }
+    if (observerMeta && observerMeta.source) {
+      pendingBatchSlotObserver.source = observerMeta.source;
+    }
+
+    pruneBatchOptimisticActive(now);
+  }
+
+  function getPendingBatchSlotAvailability(batchState) {
+    const now = Date.now();
+    pruneBatchOptimisticActive(now);
+    const observedLimit = clampBatchObservedLimit(pendingBatchSlotObserver.observedLimit);
+    const settingsLimit = clampBatchObservedLimit(
+      batchState?.settings?.maxActiveGenerations ||
+      batchState?.settings?.activeGenerationLimit ||
+      batchState?.settings?.concurrencyLimit
+    );
+    const limit = observedLimit || settingsLimit || BATCH_ACTIVE_SLOTS_DEFAULT;
+    const observerFresh = (now - toFiniteInt(pendingBatchSlotObserver.updatedAt, 0)) <= BATCH_SLOT_OBSERVER_STALE_MS;
+    const observedActive = observerFresh ? clampBatchObservedActive(pendingBatchSlotObserver.observedActive) : 0;
+    const optimisticActive = clampBatchObservedActive(pendingBatchSlotObserver.optimisticActive);
+    const active = clampBatchObservedActive(observedActive + optimisticActive);
+    let autoBackoffUntilMs = Math.max(0, toFiniteInt(pendingBatchSlotObserver.backoffUntilMs, 0));
+    if (autoBackoffUntilMs && autoBackoffUntilMs <= now) {
+      autoBackoffUntilMs = 0;
+      pendingBatchSlotObserver.backoffUntilMs = 0;
+    }
+    let manualBackoffUntilMs = Math.max(0, toFiniteInt(pendingBatchSlotObserver.manualBackoffUntilMs, 0));
+    if (manualBackoffUntilMs && manualBackoffUntilMs <= now) {
+      manualBackoffUntilMs = 0;
+      pendingBatchSlotObserver.manualBackoffUntilMs = 0;
+    }
+    const backoffUntilMs = Math.max(autoBackoffUntilMs, manualBackoffUntilMs);
+    return {
+      limit,
+      active,
+      available: Math.max(0, limit - active),
+      backoffUntilMs,
+    };
+  }
+
+  function notePendingBatchCreateAccepted(batchState) {
+    const slots = getBatchSubmissionSlotCost(batchState);
+    if (!slots) return;
+    const now = Date.now();
+    pruneBatchOptimisticActive(now);
+    pendingBatchSlotObserver.optimisticActive = clampBatchObservedActive(
+      pendingBatchSlotObserver.optimisticActive + slots
+    );
+    pendingBatchSlotObserver.optimisticUpdatedAt = now;
+    pendingBatchSlotObserver.backoffUntilMs = 0;
+    pendingBatchSlotObserver.manualBackoffUntilMs = 0;
+  }
+
+  function notePendingBatchCapacityBackoff(batchState) {
+    const availability = getPendingBatchSlotAvailability(batchState);
+    const now = Date.now();
+    pendingBatchSlotObserver.optimisticActive = clampBatchObservedActive(
+      Math.max(pendingBatchSlotObserver.optimisticActive, availability.limit)
+    );
+    pendingBatchSlotObserver.optimisticUpdatedAt = now;
+    const backoffMs = computePendingBatchCapacityBackoffMs(batchState, availability);
+    const autoBackoffUntilMs = now + backoffMs;
+    pendingBatchSlotObserver.backoffUntilMs = autoBackoffUntilMs;
+    const effectiveBackoffUntilMs = Math.max(
+      autoBackoffUntilMs,
+      toFiniteInt(pendingBatchSlotObserver.manualBackoffUntilMs, 0)
+    );
+    return Math.max(0, effectiveBackoffUntilMs - now);
+  }
+
+  function refreshPendingBatchSlotObserver(reason = 'tick') {
+    try {
+      if (!isDrafts()) return;
+      const now = Date.now();
+      if (pendingBatchSlotRefreshInFlight) return;
+      if (now - pendingBatchSlotRefreshLastAt < BATCH_SLOT_REFRESH_POLL_MS) return;
+      pendingBatchSlotRefreshInFlight = true;
+      pendingBatchSlotRefreshLastAt = now;
+      fetch(`${location.origin}${BATCH_SLOT_REFRESH_ENDPOINT}`)
+        .catch(() => {})
+        .finally(() => {
+          pendingBatchSlotRefreshInFlight = false;
+        });
+      dlog('drafts', 'queued pending/v2 refresh', { reason });
+    } catch {}
+  }
+
+  async function classifyPendingBatchCreateFailure(res, batchState = null) {
+    const status = Number(res?.status || 0);
+    let message = `HTTP ${status || 0}`;
+    let payloadText = '';
+
+    try {
+      const clone = typeof res?.clone === 'function' ? res.clone() : null;
+      if (clone) {
+        const contentType = String(clone.headers?.get?.('content-type') || '').toLowerCase();
+        if (contentType.includes('application/json') || contentType.includes('+json')) {
+          const data = await clone.json().catch(() => null);
+          if (data && typeof data === 'object') {
+            const rawMessage = data?.error?.message || data?.message || data?.detail || data?.reason || data?.error_code || data?.code;
+            if (rawMessage) payloadText = String(rawMessage);
+            else payloadText = JSON.stringify(data);
+          }
+        } else {
+          payloadText = String(await clone.text().catch(() => ''));
+        }
+      }
+    } catch {}
+
+    payloadText = truncateInline(payloadText, 140);
+    if (payloadText) message = `${message} ${payloadText}`;
+    const haystack = `${status} ${payloadText}`.toLowerCase();
+    const availability = getPendingBatchSlotAvailability(batchState || {});
+    const activeAtOrNearLimit = availability.active >= Math.max(1, availability.limit - 1);
+    const likelyTransient400 = status === 400 && (BATCH_SLOT_TRANSIENT_400_RE.test(haystack) || activeAtOrNearLimit);
+    const isCapacity =
+      status === 429 ||
+      status === 503 ||
+      ((status === 400 || status === 409) && (BATCH_SLOT_CAPACITY_ERROR_RE.test(haystack) || likelyTransient400));
+
+    return { status, isCapacity, message: message.trim() };
+  }
+
+  function tickPendingCreateBatchAutomation() {
+    if (!isDrafts()) return;
+    const batch = loadPendingCreateBatchState();
+    if (!isPendingBatchStatus(batch?.status)) return;
+    if (batch.awaitingRequest === true) return;
+
+    const queue = loadPendingCreateQueue() || {};
+    const remaining = Number(queue.remaining || 0);
+    if (remaining <= 0) {
+      pendingBatchSlotObserver.backoffUntilMs = 0;
+      pendingBatchSlotObserver.manualBackoffUntilMs = 0;
+      clearPendingCreateBatchState();
+      return;
+    }
+
+    const peek = peekPendingCreateQueuePrompt();
+    const prompt = typeof peek?.prompt === 'string' ? peek.prompt.trim() : '';
+    if (!prompt) {
+      pendingBatchSlotObserver.backoffUntilMs = 0;
+      pendingBatchSlotObserver.manualBackoffUntilMs = 0;
+      clearPendingCreateBatchState();
+      return;
+    }
+    const slotCost = getBatchSubmissionSlotCost(batch);
+    const slotAvailability = getPendingBatchSlotAvailability(batch);
+    const observerAgeMs = Date.now() - toFiniteInt(pendingBatchSlotObserver.updatedAt, 0);
+    if (observerAgeMs >= BATCH_SLOT_REFRESH_POLL_MS || slotAvailability.available < slotCost || slotAvailability.backoffUntilMs > Date.now()) {
+      refreshPendingBatchSlotObserver('automation_tick');
+    }
+    if (slotAvailability.backoffUntilMs > Date.now()) return;
+    if (slotAvailability.available < slotCost) return;
+
+    const textarea = setNativeComposePrompt(prompt);
+    if (!textarea) return;
+    const createBtn = findNativeCreateButton();
+    if (!createBtn) return;
+
+    try {
+      createBtn.click();
+    } catch {
+      return;
+    }
+
+    const submitted = Number(batch?.progress?.submitted || 0);
+    const total = Math.max(
+      Number(batch?.progress?.total || 0),
+      submitted + Math.max(remaining, 0)
+    );
+    savePendingCreateBatchState({
+      ...batch,
+      status: 'running',
+      awaitingRequest: true,
+      startedAt: Number(batch?.startedAt || 0) || Date.now(),
+      progress: {
+        submitted,
+        total,
+      },
+      lastError: '',
+    });
+  }
+
+  function startPendingCreateBatchAutomation() {
+    if (batchAutomationTimerId) return;
+    refreshPendingBatchSlotObserver('automation_start');
+    batchAutomationTimerId = setInterval(tickPendingCreateBatchAutomation, BATCH_AUTOMATION_INTERVAL_MS);
+  }
+
+  function stopPendingCreateBatchAutomation() {
+    if (!batchAutomationTimerId) return;
+    clearInterval(batchAutomationTimerId);
+    batchAutomationTimerId = null;
+    pendingBatchSlotRefreshInFlight = false;
   }
 
   function createPill(parent, text, tooltipText, tooltipEnabled = true) {
@@ -2982,6 +4296,154 @@
 
     bar.appendChild(buttonRow);
 
+    // Drafts queue panel (only visible on /drafts).
+    const draftsQueuePanel = document.createElement('div');
+    draftsQueuePanel.className = 'sora-uv-drafts-queue-panel';
+    Object.assign(draftsQueuePanel.style, {
+      display: 'none',
+      flexDirection: 'column',
+      width: '100%',
+      maxWidth: '360px',
+      gap: '8px',
+      padding: '10px',
+      borderRadius: '14px',
+      border: '1px solid rgba(255, 255, 255, 0.16)',
+      background: 'rgba(37, 37, 37, 0.55)',
+      backdropFilter: 'blur(22px) saturate(2)',
+      WebkitBackdropFilter: 'blur(22px) saturate(2)',
+    });
+
+    const draftsActionRow = document.createElement('div');
+    Object.assign(draftsActionRow.style, {
+      display: 'flex',
+      gap: '8px',
+      alignItems: 'center',
+      justifyContent: 'stretch',
+      width: '100%',
+    });
+
+    const openUVDraftsBtn = document.createElement('button');
+    makePill(openUVDraftsBtn, 'Open UV Drafts');
+    openUVDraftsBtn.classList.add('sora-uv-open-uv-drafts-btn');
+    Object.assign(openUVDraftsBtn.style, {
+      flex: '1',
+      justifyContent: 'center',
+    });
+    openUVDraftsBtn.onclick = () => {
+      navigateToUVDraftsRoute();
+    };
+
+    const resumeQueueBtn = document.createElement('button');
+    makePill(resumeQueueBtn, 'Resume Queue');
+    resumeQueueBtn.classList.add('sora-uv-resume-queue-btn');
+    Object.assign(resumeQueueBtn.style, {
+      display: 'none',
+      flex: '1',
+      justifyContent: 'center',
+    });
+    resumeQueueBtn.onclick = () => {
+      resumePausedBatchQueueFromDrafts();
+      if (typeof bar.updateDraftsQueueUi === 'function') bar.updateDraftsQueueUi();
+    };
+
+    draftsActionRow.appendChild(openUVDraftsBtn);
+    draftsActionRow.appendChild(resumeQueueBtn);
+    draftsQueuePanel.appendChild(draftsActionRow);
+
+    const draftsQueueTitle = document.createElement('div');
+    draftsQueueTitle.className = 'sora-uv-drafts-queue-title';
+    Object.assign(draftsQueueTitle.style, {
+      fontSize: '12px',
+      fontWeight: '700',
+      color: 'rgba(255, 255, 255, 0.96)',
+      lineHeight: '1.25',
+      letterSpacing: '0.01em',
+    });
+    draftsQueuePanel.appendChild(draftsQueueTitle);
+
+    const draftsQueueDetail = document.createElement('div');
+    draftsQueueDetail.className = 'sora-uv-drafts-queue-detail';
+    Object.assign(draftsQueueDetail.style, {
+      fontSize: '11px',
+      fontWeight: '500',
+      color: 'rgba(255, 255, 255, 0.78)',
+      lineHeight: '1.35',
+    });
+    draftsQueuePanel.appendChild(draftsQueueDetail);
+
+    const draftsRetryPanel = document.createElement('div');
+    draftsRetryPanel.className = 'sora-uv-drafts-retry-panel';
+    Object.assign(draftsRetryPanel.style, {
+      display: 'none',
+      flexDirection: 'column',
+      gap: '6px',
+      paddingTop: '4px',
+      borderTop: '1px solid rgba(255, 255, 255, 0.12)',
+    });
+
+    const draftsRetryCountdown = document.createElement('div');
+    draftsRetryCountdown.className = 'sora-uv-drafts-retry-countdown';
+    Object.assign(draftsRetryCountdown.style, {
+      fontSize: '11px',
+      fontWeight: '600',
+      color: 'rgba(255, 255, 255, 0.9)',
+      lineHeight: '1.25',
+    });
+    draftsRetryPanel.appendChild(draftsRetryCountdown);
+
+    const draftsRetryButtonsRow = document.createElement('div');
+    Object.assign(draftsRetryButtonsRow.style, {
+      display: 'flex',
+      flexWrap: 'wrap',
+      gap: '6px',
+      alignItems: 'center',
+    });
+    const draftsRetryDelayButtons = [];
+    for (const seconds of BATCH_RETRY_PUSHBACK_OPTIONS_SEC) {
+      const btn = document.createElement('button');
+      makePill(btn, `+${seconds}s`);
+      btn.classList.add('sora-uv-retry-delay-btn');
+      Object.assign(btn.style, {
+        fontSize: '11px',
+        padding: '4px 10px',
+        lineHeight: '1.1',
+      });
+      btn.onclick = () => {
+        pushBackPendingBatchRetrySeconds(seconds);
+        if (typeof bar.updateDraftsQueueUi === 'function') bar.updateDraftsQueueUi();
+      };
+      draftsRetryDelayButtons.push(btn);
+      draftsRetryButtonsRow.appendChild(btn);
+    }
+    draftsRetryPanel.appendChild(draftsRetryButtonsRow);
+    draftsQueuePanel.appendChild(draftsRetryPanel);
+
+    bar.appendChild(draftsQueuePanel);
+
+    bar.updateDraftsQueueUi = () => {
+      const onDrafts = isDrafts();
+      draftsQueuePanel.style.display = onDrafts ? 'flex' : 'none';
+      if (!onDrafts) return;
+      const summary = getDraftsQueueUiSummary();
+      draftsQueueTitle.textContent = summary.title;
+      draftsQueueDetail.textContent = summary.detail;
+      resumeQueueBtn.style.display = summary.canResume ? 'flex' : 'none';
+      resumeQueueBtn.disabled = !summary.canResume;
+      draftsRetryPanel.style.display = summary.canPushRetryBack ? 'flex' : 'none';
+      draftsRetryCountdown.textContent = `Next retry in ${summary.retryCountdownSec}s`;
+      for (const retryBtn of draftsRetryDelayButtons) {
+        retryBtn.disabled = !summary.canPushRetryBack;
+      }
+      openUVDraftsBtn.style.flex = summary.canResume ? '1' : '1 1 100%';
+    };
+    bar._draftsQueueUiIntervalId = setInterval(() => {
+      if (controlBar !== bar) return;
+      try {
+        bar.updateDraftsQueueUi();
+      } catch {}
+    }, 1000);
+    bar.updateDraftsQueueUi();
+
     // Gather controls
     const gatherControlsWrapper = document.createElement('div');
     gatherControlsWrapper.className = 'sora-uv-gather-controls-wrapper';
@@ -3242,6 +4704,9 @@
   function teardownControlBar() {
     const bar = controlBar;
     if (!bar) return;
+    try {
+      if (bar._draftsQueueUiIntervalId) clearInterval(bar._draftsQueueUiIntervalId);
+    } catch {}
     try {
       if (bar._handleScroll) window.removeEventListener('scroll', bar._handleScroll);
     } catch {}
@@ -5189,43 +6654,144 @@ async function renderAnalyzeTable(force = false) {
         }
       } catch {}
 
-      // Intercept /backend/nf/create to inject composer overrides + model override
+      // Intercept create endpoints to inject composer/batch overrides.
+      let modifiedInput = input;
       let modifiedInit = init;
+      let pendingBatchRequest = null;
       try {
         const url = typeof input === 'string' ? input : input?.url || '';
-        if (NF_CREATE_RE.test(url) && init?.body && !init?.__sctDirect) {
-          let body = init.body;
+        if ((NF_CREATE_RE.test(url) || NF_BULK_CREATE_RE.test(url)) && !init?.__sctDirect) {
+          const isBulkCreateRequest = NF_BULK_CREATE_RE.test(url);
+          const onNativeDraftsRoute = /^\/drafts(?:\/|$)/i.test(String(location.pathname || ''));
+          const batchState = loadPendingCreateBatchState();
+          const batchActive = onNativeDraftsRoute && isPendingBatchStatus(batchState?.status);
+          const queuePeek = batchActive ? peekPendingCreateQueuePrompt() : null;
+          const queuePrompt =
+            batchActive && typeof queuePeek?.prompt === 'string'
+              ? queuePeek.prompt.trim()
+              : '';
+
+          if (batchActive) {
+            pendingBatchRequest = {
+              active: true,
+              prompt: queuePrompt,
+              batchState,
+            };
+          }
+
+          let body = init?.body;
+          if (body == null && input instanceof Request) {
+            try {
+              body = await input.clone().text();
+            } catch {}
+          }
           if (typeof body === 'string') {
             try {
               let nextBody = body;
-              const pendingOverrides = loadPendingCreateOverrides();
-              if (pendingOverrides) {
-                nextBody = applyComposerOverridesToCreateBody(nextBody, pendingOverrides);
+              let requestOverrides = null;
+
+              if (batchActive) {
+                const batchSettings = batchState?.settings && typeof batchState.settings === 'object'
+                  ? batchState.settings
+                  : null;
+                requestOverrides = {
+                  ...(batchSettings || {}),
+                  prompt: queuePrompt || null,
+                };
+              } else {
+                const pendingOverrides = loadPendingCreateOverrides();
+                if (pendingOverrides) {
+                  requestOverrides = pendingOverrides;
+                  clearPendingCreateOverrides();
+                }
               }
 
-              const activeModelOverride = getActiveModelOverride();
-              if (activeModelOverride) {
-                const parsed = JSON.parse(nextBody);
-                parsed.model = activeModelOverride;
-                nextBody = JSON.stringify(parsed);
+              if (requestOverrides) {
+                nextBody = applyCreateOverridesPreservingNativeShape(nextBody, requestOverrides, {
+                  isBulkRequest: isBulkCreateRequest,
+                });
               }
 
               if (nextBody !== body) {
-                modifiedInit = { ...init, body: nextBody };
-              }
-
-              if (pendingOverrides) {
-                clearPendingCreateOverrides();
+                if (input instanceof Request) {
+                  modifiedInput = new Request(input, { ...(init || {}), body: nextBody });
+                  modifiedInit = undefined;
+                } else {
+                  modifiedInit = { ...(init || {}), body: nextBody };
+                }
               }
             } catch {}
           }
         }
       } catch {}
 
-      const res = await origFetch.call(this, input, modifiedInit);
+      let res;
       try {
+        res = await origFetch.call(this, modifiedInput, modifiedInit);
+      } catch (err) {
+        if (pendingBatchRequest?.active) {
+          const prev = pendingBatchRequest.batchState || loadPendingCreateBatchState();
+          savePendingCreateBatchState({
+            ...prev,
+            status: 'paused_error',
+            awaitingRequest: false,
+            lastError: String(err?.message || 'Network request failed'),
+          });
+        }
+        throw err;
+      }
+      try {
+        const url = typeof modifiedInput === 'string' ? modifiedInput : modifiedInput?.url || '';
+
+        if (pendingBatchRequest?.active) {
+          const prev = pendingBatchRequest.batchState || loadPendingCreateBatchState();
+          if (res.ok) {
+            notePendingBatchCreateAccepted(prev);
+            const advanced = advancePendingCreateQueuePrompt();
+            const submitted = Number(prev?.progress?.submitted || 0) + 1;
+            const total = Math.max(Number(prev?.progress?.total || 0), submitted);
+            if (Number(advanced?.remaining || 0) <= 0) {
+              savePendingCreateBatchState({
+                ...prev,
+                status: 'completed',
+                awaitingRequest: false,
+                completedAt: Date.now(),
+                progress: { submitted, total },
+                lastError: '',
+              });
+            } else {
+              savePendingCreateBatchState({
+                ...prev,
+                status: 'running',
+                awaitingRequest: false,
+                progress: { submitted, total },
+                lastError: '',
+              });
+            }
+          } else {
+            const failure = await classifyPendingBatchCreateFailure(res, prev);
+            if (failure.isCapacity) {
+              const backoffMs = notePendingBatchCapacityBackoff(prev);
+              const retrySeconds = Math.max(1, Math.ceil(Math.max(0, Number(backoffMs) || 0) / 1000));
+              savePendingCreateBatchState({
+                ...prev,
+                status: 'running',
+                awaitingRequest: false,
+                lastError: `Waiting for generation slots (${failure.message}). Retry in ~${retrySeconds}s.`,
+              });
+              refreshPendingBatchSlotObserver('capacity_failure');
+            } else {
+              savePendingCreateBatchState({
+                ...prev,
+                status: 'paused_error',
+                awaitingRequest: false,
+                lastError: failure.message || `HTTP ${res.status}`,
+              });
+            }
+          }
+        }
+
         if (isDraftDetail()) return res;
-        const url = typeof input === 'string' ? input : input?.url || '';
 
         // Intercept /backend/nf/create to capture task_id -> source draft mapping for draft remixes
         if (NF_CREATE_RE.test(url) && !init?.__sctDirect) {
@@ -5246,7 +6812,10 @@ async function renderAnalyzeTable(force = false) {
         // Pending tasks (v2): used by Sora to show running gens; parse to hydrate prompts/drafts.
         if (NF_PENDING_V2_RE.test(url)) {
           if (!res.ok) scheduleDraftsBackupFetch('pending_v2_not_ok');
-          res.clone().json().then(processPendingV2Json).catch(() => {
+          const limitHint = inferBatchSlotLimitFromHeaders(res?.headers);
+          res.clone().json().then((payload) => {
+            processPendingV2Json(payload, { source: 'fetch', limitHint });
+          }).catch(() => {
             scheduleDraftsBackupFetch('pending_v2_parse_failed');
           });
           return res;
@@ -5330,7 +6899,12 @@ async function renderAnalyzeTable(force = false) {
               if (NF_PENDING_V2_RE.test(url)) {
                 if (this.status && this.status >= 400) scheduleDraftsBackupFetch('pending_v2_xhr_not_ok');
                 try {
-                  processPendingV2Json(JSON.parse(this.responseText));
+                  processPendingV2Json(JSON.parse(this.responseText), {
+                    source: 'xhr',
+                    limitHint: inferBatchSlotLimitFromHeaders(
+                      typeof this.getAllResponseHeaders === 'function' ? this.getAllResponseHeaders() : ''
+                    ),
+                  });
                 } catch {
                   scheduleDraftsBackupFetch('pending_v2_xhr_parse_failed');
                 }
@@ -5987,7 +7561,8 @@ async function renderAnalyzeTable(force = false) {
     return Array.isArray(items) ? items : [];
   }
 
-  function processPendingV2Json(json) {
+  function processPendingV2Json(json, observerMeta = null) {
+    updatePendingBatchSlotObserverFromPayload(json, observerMeta);
     const gens = extractDraftItemsFromPayload(json);
     if (!Array.isArray(gens) || gens.length === 0) return;
 
@@ -6961,6 +8536,7 @@ async function renderAnalyzeTable(force = false) {
 
     // Bookmarks button only on Drafts page
     if (bookmarksBtn) bookmarksBtn.style.display = isDrafts() ? '' : 'none';
+    if (typeof bar.updateDraftsQueueUi === 'function') bar.updateDraftsQueueUi();
 
     if (typeof bar.updateFilterLabel === 'function') bar.updateFilterLabel();
   }
@@ -6986,6 +8562,7 @@ async function renderAnalyzeTable(force = false) {
 
       // Hide control bar on UV Drafts
       teardownControlBar();
+      stopPendingCreateBatchAutomation();
 
       // Show UV Drafts page
       const uvDraftsPageEl = ensureUVDraftsPage();
@@ -7000,7 +8577,14 @@ async function renderAnalyzeTable(force = false) {
     }
 
     if (isDrafts() || String(location.search || '').includes('remix')) {
+      requestUVDraftsScriptLoad();
       checkPendingComposePrompt();
+    }
+    if (isDrafts()) {
+      startPendingCreateBatchAutomation();
+      setTimeout(tickPendingCreateBatchAutomation, 0);
+    } else {
+      stopPendingCreateBatchAutomation();
     }
 
     if (isDraftDetail()) {
@@ -7353,12 +8937,7 @@ async function renderAnalyzeTable(force = false) {
     e.preventDefault();
     e.stopPropagation();
 
-    // Navigate to UV Drafts page
-    if (uvDraftsPrevDocTitle == null && typeof document.title === 'string' && document.title.trim()) {
-      uvDraftsPrevDocTitle = document.title;
-    }
-    history.pushState({}, '', '/creatortools');
-    onRouteChange();
+    navigateToUVDraftsRoute();
   }, true);
 
   // Global click delegation for the dashboard button
@@ -7451,6 +9030,9 @@ async function renderAnalyzeTable(force = false) {
 
     // Check for pending redo prompt (from remix navigation)
     checkPendingRedoPrompt();
+    if (isDrafts() || String(location.search || '').includes('remix')) {
+      requestUVDraftsScriptLoad();
+    }
     checkPendingComposePrompt();
 
     // If this tab had Gather running pre-refresh, resume it AND start a fresh timer.
