@@ -2790,13 +2790,13 @@
         <span>Prompt</span>
         <textarea data-uvd-compose-prompt="1" placeholder="Describe your video..."></textarea>
       </label>
-      <div class="uvd-field-grid uvd-field-grid-3">
-        <label class="uvd-field">
-          <span>Model</span>
-          <select data-uvd-compose-model="1">
-            ${modelOptionsHtml}
-          </select>
-        </label>
+      <label class="uvd-field">
+        <span>Model</span>
+        <select data-uvd-compose-model="1">
+          ${modelOptionsHtml}
+        </select>
+      </label>
+      <div class="uvd-field-grid">
         <label class="uvd-field">
           <span>Duration</span>
           <select data-uvd-compose-duration="1">
@@ -3514,8 +3514,30 @@
       });
 
       const warningIcon = document.createElement('div');
-      warningIcon.textContent = isPendingDraft ? '⏳' : (isProcessingError ? '⚙️' : '⚠️');
-      warningIcon.style.fontSize = '48px';
+      if (isPendingDraft) {
+        // Circular progress ring matching Sora's in-progress style
+        const pctVal = Number(draft.progress_pct);
+        const pctNorm = Number.isFinite(pctVal) && pctVal > 0 ? Math.min(pctVal, 100) : 0;
+        const indeterminate = pctNorm === 0;
+        const radius = 22;
+        const circumference = 2 * Math.PI * radius;
+        const offset = indeterminate
+          ? circumference * 0.75 // show a 25% arc for indeterminate spin
+          : circumference - (pctNorm / 100) * circumference;
+        warningIcon.dataset.pendingRing = '1';
+        const spinStyle = indeterminate ? 'animation:uvd-ring-spin 1.4s linear infinite;transform-origin:28px 28px;' : '';
+        warningIcon.innerHTML = `<svg width="56" height="56" viewBox="0 0 56 56">
+          <circle cx="28" cy="28" r="${radius}" fill="none" stroke="rgba(255,255,255,0.1)" stroke-width="3"/>
+          <circle cx="28" cy="28" r="${radius}" fill="none" stroke="#89b6ff" stroke-width="3"
+            stroke-linecap="round" stroke-dasharray="${circumference}" stroke-dashoffset="${offset}"
+            transform="rotate(-90 28 28)" style="transition:stroke-dashoffset 0.6s ease;${spinStyle}"/>
+          <text x="28" y="28" dy="0.35em" text-anchor="middle"
+            fill="#89b6ff" font-size="13" font-weight="600" font-family="system-ui,sans-serif">${pctNorm > 0 ? Math.round(pctNorm) + '%' : ''}</text>
+        </svg>`;
+      } else {
+        warningIcon.textContent = isProcessingError ? '⚙️' : '⚠️';
+        warningIcon.style.fontSize = '48px';
+      }
       warningIcon.style.marginBottom = '12px';
       violationPlaceholder.appendChild(warningIcon);
 
@@ -3523,9 +3545,7 @@
       if (isPendingDraft) {
         violationLabel.dataset.pendingStatus = '1';
         const status = String(draft.pending_status || draft.pending_task_status || 'generating').replace(/_/g, ' ');
-        const pct = Number(draft.progress_pct);
-        const pctStr = Number.isFinite(pct) && pct > 0 ? ` · ${Math.round(pct)}%` : '';
-        violationLabel.textContent = status.charAt(0).toUpperCase() + status.slice(1) + pctStr;
+        violationLabel.textContent = status.charAt(0).toUpperCase() + status.slice(1);
       } else {
         violationLabel.textContent = isProcessingError
           ? 'Processing Error'
@@ -4288,19 +4308,41 @@
     appendCardsToGrid(uvDraftsRenderedCount, end);
   }
 
-  // Update only the status/progress text on pending cards without rebuilding the grid.
+  // Update only the status/progress text and ring on pending cards without rebuilding the grid.
   function updatePendingCardsInPlace(pendingDrafts) {
     if (!uvDraftsGridEl) return;
     for (const draft of pendingDrafts) {
       if (!draft?.id) continue;
       const card = uvDraftsGridEl.querySelector(`[data-draft-id="${CSS.escape(String(draft.id))}"]`);
       if (!card) continue;
-      const label = card.querySelector('[data-pending-status]');
-      if (!label) continue;
-      const status = String(draft.pending_status || draft.pending_task_status || 'generating').replace(/_/g, ' ');
       const pct = Number(draft.progress_pct);
-      const pctStr = Number.isFinite(pct) && pct > 0 ? ` · ${Math.round(pct)}%` : '';
-      label.textContent = status.charAt(0).toUpperCase() + status.slice(1) + pctStr;
+      const pctNorm = Number.isFinite(pct) && pct > 0 ? Math.min(pct, 100) : 0;
+
+      // Update status label
+      const label = card.querySelector('[data-pending-status]');
+      if (label) {
+        const status = String(draft.pending_status || draft.pending_task_status || 'generating').replace(/_/g, ' ');
+        label.textContent = status.charAt(0).toUpperCase() + status.slice(1);
+      }
+
+      // Update progress ring
+      const ring = card.querySelector('[data-pending-ring]');
+      if (ring) {
+        const indeterminate = pctNorm === 0;
+        const radius = 22;
+        const circumference = 2 * Math.PI * radius;
+        const offset = indeterminate
+          ? circumference * 0.75
+          : circumference - (pctNorm / 100) * circumference;
+        const progressCircle = ring.querySelector('circle:nth-child(2)');
+        if (progressCircle) {
+          progressCircle.setAttribute('stroke-dashoffset', String(offset));
+          progressCircle.style.animation = indeterminate ? 'uvd-ring-spin 1.4s linear infinite' : 'none';
+          progressCircle.style.transformOrigin = indeterminate ? '28px 28px' : '';
+        }
+        const textEl = ring.querySelector('text');
+        if (textEl) textEl.textContent = pctNorm > 0 ? Math.round(pctNorm) + '%' : '';
+      }
     }
   }
 
@@ -4735,6 +4777,7 @@
     // Add custom scrollbar styles
     const style = document.createElement('style');
     style.textContent = `
+      @keyframes uvd-ring-spin { to { transform: rotate(360deg); } }
       .sora-uv-drafts-page {
         --uvd-border: var(--token-border-light, rgba(255,255,255,0.12));
         --uvd-border-strong: var(--token-border-medium, rgba(255,255,255,0.2));

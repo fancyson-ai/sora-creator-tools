@@ -382,7 +382,7 @@
 
   const isFilterHiddenPage = () => {
     const p = location.pathname;
-    return p.startsWith('/storyboard') || p.startsWith('/drafts') || p.startsWith('/d/') || p.startsWith('/p/');
+    return p.startsWith('/storyboard') || p.startsWith('/drafts') || p.startsWith('/d/') || p.startsWith('/p/') || p.startsWith('/e/');
   };
 
   const isDrafts = () => location.pathname.startsWith('/drafts');
