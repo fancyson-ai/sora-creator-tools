@@ -635,6 +635,7 @@
             hadUpdates = true;
           }
           uvDraftsData = mergedData;
+          uvDraftsAwaitingMoreResults = false;
 
           pageNum++;
           if (onProgress) onProgress(uvDraftsData.length, pageNum);
@@ -683,6 +684,7 @@
               });
               for (const incoming of incomingById2.values()) mergedData2.push(incoming);
               uvDraftsData = mergedData2;
+              uvDraftsAwaitingMoreResults = false;
               if (uvDraftsPageEl && uvDraftsPageEl.style.display !== 'none') renderUVDraftsSyncUpdate();
               updateUVDraftsStats();
             }
@@ -974,6 +976,7 @@
   let uvDraftsRenderedCount = 0;
   let uvDraftsFilteredCache = []; // Cache filtered results to avoid re-filtering on scroll
   let uvDraftsScrollHandler = null;
+  let uvDraftsAwaitingMoreResults = false; // First page was empty, but pagination indicates more results may arrive
   let uvDraftsJustSeenIds = new Set(); // Drafts marked seen this session (stay visible until refresh/filter change)
   let uvDraftsInitRunId = 0;
   let uvDraftsWorkspaceModalEl = null;
@@ -4350,12 +4353,31 @@
   //   renderUVDraftsSyncUpdate() — append-only (background sync pages, never touches existing cards)
   //   renderMoreUVDrafts()     — append-only (infinite scroll)
 
+  function showUVDraftsLoadingIndicator(message = 'Loading...') {
+    if (!uvDraftsLoadingEl) return;
+    uvDraftsLoadingEl.style.display = 'flex';
+    uvDraftsLoadingEl.textContent = message;
+  }
+
+  function hideUVDraftsLoadingIndicator() {
+    if (!uvDraftsLoadingEl) return;
+    uvDraftsLoadingEl.style.display = 'none';
+  }
+
+  function clearUVDraftsEmptyState() {
+    if (!uvDraftsGridEl) return;
+    const empty = uvDraftsGridEl.querySelector('.uvd-empty-state');
+    if (empty) empty.remove();
+  }
+
   // Append cards from uvDraftsFilteredCache[start..end) to the grid.
   // Never touches existing DOM — just creates and appends new cards.
   function appendCardsToGrid(start, end) {
     if (!uvDraftsGridEl || start >= end) return;
     const loadMore = uvDraftsGridEl.querySelector('.uv-drafts-load-more');
     if (loadMore) loadMore.remove();
+    clearUVDraftsEmptyState();
+    hideUVDraftsLoadingIndicator();
     const fragment = document.createDocumentFragment();
     for (let i = start; i < end; i++) {
       fragment.appendChild(createUVDraftCard(uvDraftsFilteredCache[i]));
@@ -4428,6 +4450,11 @@
     if (uvDraftsFilteredCache.length === 0) {
       uvDraftsGridEl.innerHTML = '';
       uvDraftsRenderedCount = 0;
+      if (uvDraftsAwaitingMoreResults) {
+        showUVDraftsLoadingIndicator('Syncing drafts...');
+        return;
+      }
+      hideUVDraftsLoadingIndicator();
       const empty = document.createElement('div');
       empty.className = 'uvd-empty-state';
       empty.textContent = uvDraftsSearchQuery ? 'No drafts match your search' : 'No drafts found';
@@ -4547,6 +4574,7 @@
   async function initUVDraftsPage(fullSync = false) {
     const runId = ++uvDraftsInitRunId;
     const isStaleRun = () => runId !== uvDraftsInitRunId;
+    uvDraftsAwaitingMoreResults = false;
 
     // Only show loading indicator if there's no cached data already rendered
     if (uvDraftsLoadingEl && (!uvDraftsGridEl || uvDraftsGridEl.children.length === 0)) {
@@ -4627,6 +4655,7 @@
       if (isStaleRun()) return;
 
       const hadCachedData = uvDraftsData.length > 0;
+      uvDraftsAwaitingMoreResults = !hadCachedData && firstBatch.items.length === 0 && !!firstBatch.cursor;
 
       if (firstBatch.items.length > 0) {
         // Get existing data for merging
@@ -4657,10 +4686,6 @@
         updateUVDraftsStats();
       }
 
-      // Even when the first batch is empty, leave loading state and show empty view.
-      if (uvDraftsLoadingEl) {
-        uvDraftsLoadingEl.style.display = 'none';
-      }
       if (uvDraftsData.length === 0) {
         renderUVDraftsGrid();
         updateUVDraftsStats();
@@ -4689,10 +4714,16 @@
             console.error('[UV Drafts] Background sync failed:', syncErr);
           })
           .finally(() => {
-          if (isStaleRun()) return;
-          setUVDraftsSyncUiState({ syncing: false, processed: uvDraftsData.length, page: 0 });
-        });
+            if (isStaleRun()) return;
+            uvDraftsAwaitingMoreResults = false;
+            setUVDraftsSyncUiState({ syncing: false, processed: uvDraftsData.length, page: 0 });
+            if (uvDraftsData.length === 0) {
+              renderUVDraftsGrid();
+              updateUVDraftsStats();
+            }
+          });
       } else {
+        uvDraftsAwaitingMoreResults = false;
         if (doFullSync) {
           await archiveUnsyncedDraftsAfterFullSync(fullSyncIds, runId);
           if (isStaleRun()) return;
@@ -4701,6 +4732,7 @@
       }
     } catch (err) {
       console.error('[UV Drafts] Quick fetch failed, falling back to full sync:', err);
+      uvDraftsAwaitingMoreResults = false;
       // Fall back to full sync
       try {
         setUVDraftsSyncUiState({ syncing: true, processed: uvDraftsData.length, page: 1 });
