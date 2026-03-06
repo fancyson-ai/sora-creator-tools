@@ -15,6 +15,8 @@
   const MAX_HANDLE_LEN = 80;
   const MAX_REQUEST_ID_LEN = 80;
   const MAX_CAMEO_USERNAMES = 32;
+  const MAX_HARVEST_BATCH_ITEMS = 250;
+  const MAX_HARVEST_CAST_NAMES = 32;
 
   function sanitizeString(value, maxLen = MAX_STR_LEN) {
     if (typeof value !== 'string') return null;
@@ -132,6 +134,153 @@
     const limit = Math.min(items.length, MAX_METRICS_BATCH_ITEMS);
     for (let i = 0; i < limit; i++) {
       const item = sanitizeMetricsItem(items[i]);
+      if (item) out.push(item);
+    }
+    return out;
+  }
+
+  function normalizeHarvestKind(value) {
+    const kind = sanitizeString(value, 16);
+    if (!kind) return null;
+    const n = kind.toLowerCase();
+    if (n === 'published' || n === 'draft' || n === 'unknown') return n;
+    return null;
+  }
+
+  function normalizeHarvestContext(value) {
+    const context = sanitizeString(value, 16);
+    if (!context) return null;
+    const n = context.toLowerCase();
+    if (n === 'top' || n === 'profile' || n === 'drafts') return n;
+    return null;
+  }
+
+  function normalizeHarvestSource(value) {
+    const source = sanitizeString(value, 16);
+    if (!source) return null;
+    const n = source.toLowerCase();
+    if (n === 'api' || n === 'dom') return n;
+    return null;
+  }
+
+  function sanitizeStringArray(value, maxItems = MAX_HARVEST_CAST_NAMES, maxLen = MAX_HANDLE_LEN) {
+    if (!Array.isArray(value)) return null;
+    const out = [];
+    for (const raw of value) {
+      if (out.length >= maxItems) break;
+      const next = sanitizeString(raw, maxLen);
+      if (!next) continue;
+      out.push(next);
+    }
+    return out.length ? out : null;
+  }
+
+  function sanitizeHarvestItem(raw) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+    const item = {};
+
+    const id = sanitizeIdToken(raw.id);
+    if (!id) return null;
+    item.id = id;
+
+    const kind = normalizeHarvestKind(raw.kind);
+    if (!kind) return null;
+    item.kind = kind;
+
+    const context = normalizeHarvestContext(raw.context);
+    if (context) item.context = context;
+
+    const source = normalizeHarvestSource(raw.source);
+    if (source) item.source = source;
+
+    const userHandle = sanitizeString(raw.user_handle, MAX_HANDLE_LEN);
+    if (userHandle) item.user_handle = userHandle;
+    const userId = sanitizeUserId(raw.user_id);
+    if (userId != null) item.user_id = userId;
+
+    const detailUrl = sanitizeString(raw.detail_url, MAX_URL_LEN);
+    if (detailUrl) item.detail_url = detailUrl;
+
+    const prompt = sanitizeString(raw.prompt, MAX_STR_LEN);
+    if (prompt) item.prompt = prompt;
+    const promptSource = sanitizeString(raw.prompt_source, 32);
+    if (promptSource) item.prompt_source = promptSource;
+    const title = sanitizeString(raw.title, 512);
+    if (title) item.title = title;
+    const generationType = sanitizeString(raw.generation_type, 64);
+    if (generationType) item.generation_type = generationType;
+    const generationId = sanitizeIdToken(raw.generation_id, MAX_ID_LEN);
+    if (generationId) item.generation_id = generationId;
+
+    const width = sanitizeNumber(raw.width, 1, 20000);
+    if (width != null) item.width = width;
+    const height = sanitizeNumber(raw.height, 1, 20000);
+    if (height != null) item.height = height;
+    const duration = sanitizeNumber(raw.duration_s, 0, 60 * 60 * 10);
+    if (duration != null) item.duration_s = duration;
+
+    const createdAt = raw.created_at;
+    if (typeof createdAt === 'string' || Number.isFinite(Number(createdAt))) {
+      item.created_at = typeof createdAt === 'string'
+        ? sanitizeString(createdAt, 64)
+        : Number(createdAt);
+    }
+    const postedAt = raw.posted_at;
+    if (typeof postedAt === 'string' || Number.isFinite(Number(postedAt))) {
+      item.posted_at = typeof postedAt === 'string'
+        ? sanitizeString(postedAt, 64)
+        : Number(postedAt);
+    }
+    const updatedAt = raw.updated_at;
+    if (typeof updatedAt === 'string' || Number.isFinite(Number(updatedAt))) {
+      item.updated_at = typeof updatedAt === 'string'
+        ? sanitizeString(updatedAt, 64)
+        : Number(updatedAt);
+    }
+
+    const viewCount = sanitizeNumber(raw.view_count, 0);
+    if (viewCount != null) item.view_count = viewCount;
+    const uniqueViewCount = sanitizeNumber(raw.unique_view_count, 0);
+    if (uniqueViewCount != null) item.unique_view_count = uniqueViewCount;
+    const likeCount = sanitizeNumber(raw.like_count, 0);
+    if (likeCount != null) item.like_count = likeCount;
+    const dislikeCount = sanitizeNumber(raw.dislike_count, 0);
+    if (dislikeCount != null) item.dislike_count = dislikeCount;
+    const replyCount = sanitizeNumber(raw.reply_count, 0);
+    if (replyCount != null) item.reply_count = replyCount;
+    const recursiveReplyCount = sanitizeNumber(raw.recursive_reply_count, 0);
+    if (recursiveReplyCount != null) item.recursive_reply_count = recursiveReplyCount;
+    const remixCount = sanitizeNumber(raw.remix_count, 0);
+    if (remixCount != null) item.remix_count = remixCount;
+
+    const postPermalink = sanitizeString(raw.post_permalink, MAX_URL_LEN);
+    if (postPermalink) item.post_permalink = postPermalink;
+    const postVisibility = sanitizeString(raw.post_visibility, 32);
+    if (postVisibility) item.post_visibility = postVisibility;
+
+    const castCount = sanitizeNumber(raw.cast_count, 0, MAX_HARVEST_CAST_NAMES);
+    if (castCount != null) item.cast_count = castCount;
+    const castNames = sanitizeStringArray(raw.cast_names, MAX_HARVEST_CAST_NAMES, MAX_HANDLE_LEN);
+    if (castNames) item.cast_names = castNames;
+    const cameos = sanitizeStringArray(raw.cameos, MAX_HARVEST_CAST_NAMES, MAX_HANDLE_LEN);
+    if (cameos) item.cameos = cameos;
+
+    const firstSeenTs = sanitizeNumber(raw.first_seen_ts, 0);
+    if (firstSeenTs != null) item.first_seen_ts = firstSeenTs;
+    const lastSeenTs = sanitizeNumber(raw.last_seen_ts, 0);
+    if (lastSeenTs != null) item.last_seen_ts = lastSeenTs;
+    const runId = sanitizeIdToken(raw.last_harvest_run_id, MAX_ID_LEN);
+    if (runId) item.last_harvest_run_id = runId;
+
+    return item;
+  }
+
+  function sanitizeHarvestBatch(items) {
+    if (!Array.isArray(items)) return [];
+    const out = [];
+    const limit = Math.min(items.length, MAX_HARVEST_BATCH_ITEMS);
+    for (let i = 0; i < limit; i++) {
+      const item = sanitizeHarvestItem(items[i]);
       if (item) out.push(item);
     }
     return out;
@@ -369,5 +518,17 @@
     } catch {
       postMetricsResponse(req);
     }
+  });
+
+  // Relay harvest batches from inject.js to background service worker (fire-and-forget).
+  window.addEventListener('message', function(ev) {
+    if (ev?.source !== window) return;
+    const d = ev?.data;
+    if (!d || d.__sora_uv__ !== true || d.type !== 'harvest_batch' || !Array.isArray(d.items)) return;
+    const items = sanitizeHarvestBatch(d.items);
+    if (!items.length) return;
+    try {
+      chrome.runtime.sendMessage({ action: 'harvest_batch', items });
+    } catch {}
   });
 })();

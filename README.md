@@ -22,7 +22,7 @@ Unofficial community extension. Not affiliated with, endorsed by, or sponsored b
 - Adds post overlays on Explore/Profile/Post pages (views, unique viewers, interaction metrics, remix metrics, duration).
 - Adds feed controls including filtering, Gather mode, and Analyze mode on Top feed.
 - Captures metrics snapshots locally while you browse.
-- Provides a full dashboard (`dashboard.html`) with charts, compare mode, post filters, import/export, and data purge tools.
+- Provides a full dashboard (`dashboard.html`) with mode switching (`Metrics` / `Harvest`), charts, compare mode, Harvest table tooling, import/export, and data purge tools.
 - Adds a dedicated `/uv-drafts` page with:
   - Draft caching and progressive sync
   - Pending task polling
@@ -41,6 +41,22 @@ Unofficial community extension. Not affiliated with, endorsed by, or sponsored b
 - **Best Posting Time Cue**: Marks cards posted near recurring high-performing windows based on gathered history.
 - **Quick Feed Filters**: One-click age filters (`<3h` ... `<21h`) plus a **No Remixes** filter.
 
+### Video Overlay
+
+- Adds remix awareness directly in overlays on Explore cards, profile cards, and post/draft detail pages.
+- For remix items, overlays show an icon-only **remix indicator pill** as the first badge.
+- Remix pill click behavior:
+  - Source post: `/p/<id>` via "Watch parent/seed video" tooltip.
+  - Source draft: `/d/<id>` via "Watch seed video" tooltip.
+  - Missing/unknown source: pill is shown disabled with "Parent/seed video unavailable".
+- All overlay pills (where available) are:
+  - `👀 X` unique views (with "Total Views" and "Views Per Person" in tooltip)
+  - `X% IR` interaction ratio (likes + comments relative to unique views)
+  - `X% RR` remixes relative to likes
+  - Age/heat token (`⏳` style age or hotness emoji + age string)
+  - Duration (eg `10s`) with inferred model tooltip (`10s Sora 2 video` / `10s Sora 2 Pro video`)
+  - Loading placeholder (`Loading...`) while post-detail metrics are being gathered
+
 ### Gather Mode
 
 - Available on Top feed and profile pages.
@@ -54,9 +70,19 @@ Unofficial community extension. Not affiliated with, endorsed by, or sponsored b
 - Fast initial data burst plus ongoing refresh so the table stays current while browsing.
 - Works with gathered local history to provide richer top-feed insights over time.
 
+### Harvest Mode (API-first)
+
+- Manual **Harvest** mode runs on Top feed, Profile pages, and Drafts pages.
+- Harvest starts with API pagination and automatically falls back to bounded DOM scrolling when API template capture/paging is unavailable.
+- Top/Profile harvest keeps existing metrics collection active while also storing dedicated harvest records.
+- Drafts harvest captures draft metadata/prompt details into a dedicated on-device harvest dataset.
+
 ### Dashboard Mode (Extension Icon)
 
 - Opens `dashboard.html` in its own tab (reused/focused if already open).
+- Mode toggle:
+  - **Metrics**: classic profile analytics, charts, compare, and post filters.
+  - **Harvest**: unified Harvest dataset browser (Top/Profile/Drafts) with filters, pagination, row detail, and prompt inspection.
 - Type-ahead profile picker with quick post visibility controls (show/hide all, top/bottom slices, stale, date windows).
 - Per-profile metric cards for views, unique viewers, likes, replies, recursive remixes, engagements, cast-in, and followers.
 - Multi-chart analytics for:
@@ -67,7 +93,9 @@ Unofficial community extension. Not affiliated with, endorsed by, or sponsored b
   - Compare-mode aggregate charts across selected creators
 - Linear + stacked chart modes with adjustable time windows.
 - Compare mode with multi-user pills and aggregate totals.
-- CSV import/export and data cleanup actions from the dashboard data menu.
+- Data menu exports:
+  - Metrics: CSV import/export and cleanup tools.
+  - Harvest: CSV and JSONL exports for **all records** or **current filtered view**.
 
 ### UV Drafts (`/uv-drafts`)
 
@@ -92,6 +120,7 @@ Unofficial community extension. Not affiliated with, endorsed by, or sponsored b
 2. It normalizes and batches metrics, then posts them to `content.js`.
 3. `content.js` relays batches to `background.js`.
 4. `background.js` is the single writer for metrics state in `chrome.storage.local`.
+5. Harvest batches (`harvest_batch`) are sanitized and merged in `background.js`, then persisted to IndexedDB with metadata in `chrome.storage.local`.
 5. Dashboard requests metrics through content/background message bridges, and hydrates deeper history from cold snapshot shards when needed.
 
 Cross-context bridge notes:
@@ -106,6 +135,10 @@ Cross-context bridge notes:
   - Hot key: latest-per-post metrics in `metrics`
   - Cold keys: historical snapshots by user under `snapshots_<userKey>`
 - Includes migration logic (`metricsStorageVersion`) for older monolithic storage.
+- Harvest storage:
+  - Records persisted in IndexedDB (`SCT_HARVEST_DB_V1`).
+  - Metadata in `chrome.storage.local`: `harvestRecordsV1`, `harvestUpdatedAt`, `harvestStorageVersion`.
+  - Published harvest records preserve `user_handle` and `user_id` when captured, with dashboard fallback to metrics owner resolution for legacy rows.
 
 ## Privacy
 

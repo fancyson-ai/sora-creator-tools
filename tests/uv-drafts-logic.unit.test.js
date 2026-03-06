@@ -15,11 +15,19 @@ const {
   matchesDraftSearchFilters,
   draftMatchesSearchQuery,
   applyCreateBodyOverrides,
+  parsePromptJsonl,
+  normalizePromptQueueState,
+  peekCurrentPrompt,
+  advancePromptQueue,
+  setPromptQueueSelection,
+  removePromptAtIndex,
+  consumeNextPrompt,
   modeRequiresComposerSource,
   getGensCountMax,
   clampGensCount,
   isDraftPubliclyPosted,
   getDraftPostUrl,
+  getDraftRemixSource,
   canTrimDraft,
   getDraftTrimUrl,
   looksLikePendingV2Task,
@@ -30,6 +38,7 @@ const {
   GENS_COUNT_MIN,
   GENS_COUNT_MAX_DEFAULT,
   GENS_COUNT_MAX_ULTRA,
+  DEFAULT_PROMPT_QUEUE_MAX,
 } = require('../uv-drafts-logic.js');
 
 test('getDraftPreviewText uses prompt first and truncates correctly', () => {
@@ -223,6 +232,8 @@ test('applyCreateBodyOverrides applies overrides to root and nested body payload
   const next = applyCreateBodyOverrides(source, {
     prompt: 'new prompt',
     model: 'sora2',
+    durationSeconds: 15,
+    nFrames: 450,
     orientation: 'landscape',
     size: 'high',
     style_id: 'cinematic',
@@ -240,16 +251,154 @@ test('applyCreateBodyOverrides applies overrides to root and nested body payload
   assert.equal(parsed.creation_config.size, 'high');
   assert.equal(parsed.creation_config.style_id, 'cinematic');
   assert.equal(parsed.creation_config.seed, '1234');
+  assert.equal(parsed.creation_config.duration_seconds, 15);
+  assert.equal(parsed.creation_config.n_frames, 450);
+  assert.equal(parsed.duration_seconds, 15);
+  assert.equal(parsed.n_frames, 450);
 
   assert.equal(inner.prompt, 'new prompt');
   assert.equal(inner.model, 'sora2');
   assert.equal(inner.creation_config.prompt, 'new prompt');
   assert.equal(inner.creation_config.orientation, 'landscape');
+  assert.equal(inner.creation_config.duration_seconds, 15);
+  assert.equal(inner.creation_config.n_frames, 450);
 });
 
 test('applyCreateBodyOverrides returns original payload when JSON is invalid', () => {
   const source = 'not-json';
   assert.equal(applyCreateBodyOverrides(source, { prompt: 'x' }), source);
+});
+
+test('parsePromptJsonl accepts strict prompt-only JSONL lines and reports invalid rows', () => {
+  const input = [
+    '{"prompt":"  first prompt  "}',
+    '{"prompt":""}',
+    '{"prompt":"second prompt","model":"sora2"}',
+    '{"foo":"bar"}',
+    'not json',
+  ].join('\n');
+
+  const out = parsePromptJsonl(input, { maxPrompts: 20 });
+  assert.equal(out.maxPrompts, 20);
+  assert.deepEqual(out.prompts, ['first prompt', 'second prompt']);
+  assert.equal(out.acceptedCount, 2);
+  assert.equal(out.invalidCount, 3);
+  assert.equal(out.truncatedCount, 0);
+  assert.equal(out.nonEmptyLines, 5);
+  assert.deepEqual(out.errors.map((entry) => entry.line), [2, 4, 5]);
+});
+
+test('parsePromptJsonl enforces default prompt cap of 20', () => {
+  const lines = [];
+  for (let i = 1; i <= 24; i += 1) {
+    lines.push(JSON.stringify({ prompt: `p${i}` }));
+  }
+  const out = parsePromptJsonl(lines.join('\n'));
+  assert.equal(DEFAULT_PROMPT_QUEUE_MAX, 20);
+  assert.equal(out.acceptedCount, 20);
+  assert.equal(out.truncatedCount, 4);
+  assert.deepEqual(out.prompts.slice(0, 3), ['p1', 'p2', 'p3']);
+  assert.equal(out.prompts[out.prompts.length - 1], 'p20');
+});
+
+test('normalizePromptQueueState sanitizes prompts and clamps index', () => {
+  const out = normalizePromptQueueState({
+    prompts: ['  a  ', '', 'b', null],
+    index: 5,
+    selectedIndex: -3,
+    createdAt: 123,
+  });
+
+  assert.deepEqual(out.prompts, ['a', 'b']);
+  assert.equal(out.total, 2);
+  assert.equal(out.index, 2);
+  assert.equal(out.selectedIndex, 0);
+  assert.equal(out.remaining, 0);
+  assert.equal(out.exhausted, true);
+});
+
+test('setPromptQueueSelection clamps selectedIndex to queue bounds', () => {
+  const queue = normalizePromptQueueState({
+    prompts: ['p1', 'p2', 'p3'],
+    index: 1,
+    selectedIndex: 1,
+    createdAt: 5,
+  });
+  const low = setPromptQueueSelection(queue, -10);
+  assert.equal(low.selectedIndex, 0);
+  assert.equal(low.index, 1);
+
+  const high = setPromptQueueSelection(queue, 99);
+  assert.equal(high.selectedIndex, 2);
+  assert.equal(high.index, 1);
+});
+
+test('peekCurrentPrompt returns current prompt without advancing queue index', () => {
+  const queue = normalizePromptQueueState({
+    prompts: ['first', 'second'],
+    index: 0,
+    selectedIndex: 1,
+    createdAt: 10,
+  });
+  const peek = peekCurrentPrompt(queue);
+  assert.equal(peek.prompt, 'first');
+  assert.equal(peek.index, 0);
+  assert.equal(peek.queue.index, 0);
+  assert.equal(peek.remaining, 2);
+  assert.equal(queue.index, 0);
+});
+
+test('advancePromptQueue only advances submission cursor and preserves selectedIndex', () => {
+  const queue = normalizePromptQueueState({
+    prompts: ['first', 'second', 'third'],
+    index: 0,
+    selectedIndex: 2,
+    createdAt: 10,
+  });
+  const next = advancePromptQueue(queue);
+  assert.equal(next.prompt, 'first');
+  assert.equal(next.consumed, true);
+  assert.equal(next.queue.index, 1);
+  assert.equal(next.queue.selectedIndex, 2);
+  assert.equal(next.remaining, 2);
+});
+
+test('removePromptAtIndex adjusts selection and submission index safely', () => {
+  const queue = normalizePromptQueueState({
+    prompts: ['p1', 'p2', 'p3', 'p4'],
+    index: 2,
+    selectedIndex: 2,
+    createdAt: 9,
+  });
+  const removedBeforeCurrent = removePromptAtIndex(queue, 1);
+  assert.deepEqual(removedBeforeCurrent.prompts, ['p1', 'p3', 'p4']);
+  assert.equal(removedBeforeCurrent.index, 1);
+  assert.equal(removedBeforeCurrent.selectedIndex, 1);
+
+  const removedSelected = removePromptAtIndex(removedBeforeCurrent, 1);
+  assert.deepEqual(removedSelected.prompts, ['p1', 'p4']);
+  assert.equal(removedSelected.index, 1);
+  assert.equal(removedSelected.selectedIndex, 1);
+});
+
+test('consumeNextPrompt advances queue index and preserves order', () => {
+  const queue = normalizePromptQueueState({ prompts: ['one', 'two'], index: 0, createdAt: 111 });
+  const first = consumeNextPrompt(queue);
+  assert.equal(first.prompt, 'one');
+  assert.equal(first.consumed, true);
+  assert.equal(first.queue.index, 1);
+  assert.equal(first.remaining, 1);
+
+  const second = consumeNextPrompt(first.queue);
+  assert.equal(second.prompt, 'two');
+  assert.equal(second.consumed, true);
+  assert.equal(second.queue.index, 2);
+  assert.equal(second.remaining, 0);
+
+  const third = consumeNextPrompt(second.queue);
+  assert.equal(third.prompt, '');
+  assert.equal(third.consumed, false);
+  assert.equal(third.remaining, 0);
 });
 
 test('modeRequiresComposerSource enforces source gating only for remix/extend', () => {
@@ -286,6 +435,75 @@ test('getDraftPostUrl prefers permalink and falls back to post id', () => {
     getDraftPostUrl({ post_id: 'xyz987' }),
     'https://sora.chatgpt.com/p/xyz987'
   );
+});
+
+test('getDraftRemixSource resolves nested post target candidates', () => {
+  const out = getDraftRemixSource({
+    creation_config: {
+      remix_target_post: { post: { id: 's_nested123' } },
+    },
+  });
+  assert.deepEqual(out, {
+    isRemix: true,
+    sourceType: 'post',
+    sourceId: 's_nested123',
+    sourcePostId: 's_nested123',
+    sourceDraftId: '',
+  });
+});
+
+test('getDraftRemixSource resolves draft target candidates', () => {
+  const out = getDraftRemixSource({
+    creation_config: {
+      remix_target_draft: { id: 'draft_src_1' },
+    },
+  });
+  assert.deepEqual(out, {
+    isRemix: true,
+    sourceType: 'draft',
+    sourceId: 'draft_src_1',
+    sourcePostId: '',
+    sourceDraftId: 'draft_src_1',
+  });
+});
+
+test('getDraftRemixSource prioritizes post source over draft source', () => {
+  const out = getDraftRemixSource({
+    remix_target_post_id: 's_post_first',
+    remix_target_draft_id: 'draft_second',
+  });
+  assert.equal(out.isRemix, true);
+  assert.equal(out.sourceType, 'post');
+  assert.equal(out.sourcePostId, 's_post_first');
+  assert.equal(out.sourceDraftId, '');
+});
+
+test('getDraftRemixSource returns non-remix shape for regular draft', () => {
+  const out = getDraftRemixSource({
+    id: 'draft_plain',
+    creation_config: { mode: 'compose' },
+  });
+  assert.deepEqual(out, {
+    isRemix: false,
+    sourceType: '',
+    sourceId: '',
+    sourcePostId: '',
+    sourceDraftId: '',
+  });
+});
+
+test('getDraftRemixSource ignores malformed source ids', () => {
+  const out = getDraftRemixSource({
+    remix_target_post_id: 'abc123',
+    remix_target_draft_id: 'bad id with spaces',
+  });
+  assert.deepEqual(out, {
+    isRemix: false,
+    sourceType: '',
+    sourceId: '',
+    sourcePostId: '',
+    sourceDraftId: '',
+  });
 });
 
 test('canTrimDraft and getDraftTrimUrl support storyboard and draft fallback', () => {

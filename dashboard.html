@@ -54,6 +54,10 @@
           <button class="theme-swatch" type="button" data-theme="darkGray" style="--swatch: #8d949c;" aria-label="Dark gray theme" title="Dark Gray"></button>
         </div>
       </div>
+      <div id="dashboardModeToggle" class="toggle-group toggle-group--sm dashboard-mode-toggle" role="tablist" aria-label="Dashboard mode">
+        <button id="dashboardModeMetrics" class="toggle-pill toggle-pill--sm active" type="button" aria-pressed="true">Metrics</button>
+        <button id="dashboardModeHarvest" class="toggle-pill toggle-pill--sm" type="button" aria-pressed="false">Harvest</button>
+      </div>
       <a class="action-link" href="https://chromewebstore.google.com/detail/sora-creator-tools-%E2%80%93-sora/nijonhldjpdanckbnkjgifghnkekmljk/reviews" target="_blank" rel="noopener noreferrer" title="Open Chrome Web Store reviews">Review</a>
       <a class="action-link" href="https://github.com/fancyson-ai/sora-creator-tools" target="_blank" rel="noopener noreferrer" title="Open GitHub repo">GitHub</a>
       <button id="purgeMenu" title="Open data menu">Data Menu</button>
@@ -62,7 +66,7 @@
   </header>
 
   <main class="layout">
-    <aside class="sidebar">
+    <aside id="metricsSidebar" class="sidebar">
       <div class="sidebar-scroll">
         <h3>Select Profile</h3>
         <div class="user-select-bar">
@@ -93,7 +97,7 @@
         <span class="sidebar-resizer-grip"></span>
       </div>
     </aside>
-    <section class="content">
+    <section id="metricsContent" class="content">
       <div id="bestTimeToPostSection">
         <div class="best-time-header">
           <div>
@@ -437,6 +441,158 @@
 
       <div class="help"><strong>Tips:</strong> Drag to zoom • Hover to focus series • Click point to open post • Double-click to reset zoom • Toggle visibility in sidebar • Run Gather mode on Profile or Top feeds to collect data!</div>
     </section>
+
+    <aside id="harvestSidebar" class="sidebar harvest-pane is-hidden">
+      <div class="sidebar-scroll">
+        <h3>Harvest Filters</h3>
+        <div class="harvest-filter-group">
+          <label class="harvest-filter-label" for="harvestSearch">Search</label>
+          <input id="harvestSearch" type="search" placeholder="Search id, prompt, owner, generation..." autocomplete="off" />
+        </div>
+        <div class="harvest-filter-group">
+          <label class="harvest-filter-label" for="harvestKindFilter">Kind</label>
+          <select id="harvestKindFilter">
+            <option value="all">All kinds</option>
+            <option value="published">Published</option>
+            <option value="draft">Drafts</option>
+            <option value="unknown">Unknown</option>
+          </select>
+        </div>
+        <div class="harvest-filter-group">
+          <label class="harvest-filter-label" for="harvestContextFilter">Context</label>
+          <select id="harvestContextFilter">
+            <option value="all">All contexts</option>
+            <option value="top">Top</option>
+            <option value="profile">Profile</option>
+            <option value="drafts">Drafts</option>
+          </select>
+        </div>
+        <div class="harvest-filter-group">
+          <label class="harvest-filter-label" for="harvestSourceFilter">Source</label>
+          <select id="harvestSourceFilter">
+            <option value="all">All sources</option>
+            <option value="api">API</option>
+            <option value="dom">DOM</option>
+          </select>
+        </div>
+        <div class="harvest-filter-group">
+          <label class="harvest-filter-label" for="harvestPromptFilter">Prompt</label>
+          <select id="harvestPromptFilter">
+            <option value="all">All prompt states</option>
+            <option value="with_prompt">With prompt</option>
+            <option value="without_prompt">Without prompt</option>
+          </select>
+        </div>
+        <div class="harvest-filter-group">
+          <label class="harvest-filter-label" for="harvestSortBy">Sort by</label>
+          <select id="harvestSortBy">
+            <option value="last_seen_ts:desc">Last seen (newest)</option>
+            <option value="created_at_ts:desc">Created (newest)</option>
+            <option value="posted_at_ts:desc">Posted (newest)</option>
+            <option value="like_count:desc">Likes (high to low)</option>
+            <option value="view_count:desc">Views (high to low)</option>
+          </select>
+        </div>
+        <div class="harvest-filter-actions">
+          <button id="harvestRefreshBtn" type="button">Refresh Harvest</button>
+          <button id="harvestResetFiltersBtn" type="button">Reset Filters</button>
+        </div>
+        <p id="harvestSidebarMeta" class="section-note">Harvest records are loaded from on-device IndexedDB.</p>
+      </div>
+    </aside>
+
+    <section id="harvestContent" class="content harvest-pane is-hidden">
+      <h3 class="section-title section-title-first">Harvest Records</h3>
+      <p id="harvestSummaryNote" class="section-note">Unified records captured by Harvest mode across Top, Profile, and Drafts.</p>
+      <div class="metric-grid harvest-metric-grid">
+        <div class="metric-card">
+          <span id="harvestTotalRecords" class="value">0</span>
+          <span class="label">Total Records</span>
+        </div>
+        <div class="metric-card">
+          <span id="harvestPublishedCount" class="value">0</span>
+          <span class="label">Published</span>
+        </div>
+        <div class="metric-card">
+          <span id="harvestDraftCount" class="value">0</span>
+          <span class="label">Drafts</span>
+        </div>
+        <div class="metric-card">
+          <span id="harvestPromptCoverage" class="value">0%</span>
+          <span class="label">Prompt Coverage</span>
+        </div>
+        <div class="metric-card">
+          <span id="harvestApiCoverage" class="value">0%</span>
+          <span class="label">API Coverage</span>
+        </div>
+        <div class="metric-card">
+          <span id="harvestUpdatedAt" class="value">-</span>
+          <span class="label">Last Updated</span>
+        </div>
+      </div>
+      <div class="metric-grid harvest-metric-grid harvest-context-grid">
+        <div class="metric-card">
+          <span id="harvestTopCount" class="value">0</span>
+          <span class="label">Top</span>
+        </div>
+        <div class="metric-card">
+          <span id="harvestProfileCount" class="value">0</span>
+          <span class="label">Profile</span>
+        </div>
+        <div class="metric-card">
+          <span id="harvestDraftsContextCount" class="value">0</span>
+          <span class="label">Drafts Context</span>
+        </div>
+        <div class="metric-card">
+          <span id="harvestFilteredCount" class="value">0</span>
+          <span class="label">Filtered Rows</span>
+        </div>
+      </div>
+      <div class="harvest-table-wrap">
+        <table class="harvest-table">
+          <thead>
+            <tr>
+              <th>Kind</th>
+              <th>Context</th>
+              <th>Source</th>
+              <th>Owner</th>
+              <th>Title / Prompt</th>
+              <th>Resolution</th>
+              <th>Duration</th>
+              <th>Created</th>
+              <th>Views</th>
+              <th>Likes</th>
+              <th>Replies</th>
+              <th>Remixes</th>
+              <th>Last Seen</th>
+            </tr>
+          </thead>
+          <tbody id="harvestTableBody"></tbody>
+        </table>
+        <div id="harvestEmptyState" class="harvest-empty-state is-hidden">No Harvest records match the current filters.</div>
+      </div>
+      <div class="harvest-pagination">
+        <button id="harvestPrevPage" type="button">Prev</button>
+        <span id="harvestPageLabel">Page 1 / 1</span>
+        <button id="harvestNextPage" type="button">Next</button>
+      </div>
+      <div class="harvest-detail-panel">
+        <h4 class="chart-title">Record Detail</h4>
+        <div class="harvest-detail-grid">
+          <div class="harvest-detail-item"><span class="harvest-detail-label">Record Key</span><span id="harvestDetailRecordKey" class="harvest-detail-value">-</span></div>
+          <div class="harvest-detail-item"><span class="harvest-detail-label">Permalink</span><a id="harvestDetailPermalink" class="best-time-link" href="#" target="_blank" rel="noopener noreferrer">-</a></div>
+          <div class="harvest-detail-item"><span class="harvest-detail-label">Detail Endpoint</span><a id="harvestDetailEndpoint" class="best-time-link" href="#" target="_blank" rel="noopener noreferrer">-</a></div>
+          <div class="harvest-detail-item"><span class="harvest-detail-label">Generation ID</span><span id="harvestDetailGenerationId" class="harvest-detail-value">-</span></div>
+          <div class="harvest-detail-item"><span class="harvest-detail-label">Cast Names</span><span id="harvestDetailCastNames" class="harvest-detail-value">-</span></div>
+          <div class="harvest-detail-item"><span class="harvest-detail-label">Run ID</span><span id="harvestDetailRunId" class="harvest-detail-value">-</span></div>
+        </div>
+        <div class="harvest-prompt-head">
+          <span class="harvest-detail-label">Prompt</span>
+          <button id="harvestCopyPrompt" type="button">Copy Prompt</button>
+        </div>
+        <pre id="harvestDetailPrompt" class="harvest-detail-prompt">Select a row to inspect prompt and metadata.</pre>
+      </div>
+    </section>
   </main>
 
   <!-- Purge Menu Modal -->
@@ -453,6 +609,12 @@
           <div class="purge-actions purge-actions-manage">
             <button id="purgeExport" class="purge-export-btn">Export Data</button>
             <button id="purgeImport" class="purge-export-btn">Import Data</button>
+          </div>
+          <div class="purge-actions purge-actions-manage">
+            <button id="purgeHarvestExportCsvAll" class="purge-export-btn">Export Harvest CSV (All)</button>
+            <button id="purgeHarvestExportCsvFiltered" class="purge-export-btn">Export Harvest CSV (Filtered)</button>
+            <button id="purgeHarvestExportJsonlAll" class="purge-export-btn">Export Harvest JSONL (All)</button>
+            <button id="purgeHarvestExportJsonlFiltered" class="purge-export-btn">Export Harvest JSONL (Filtered)</button>
           </div>
           <div class="purge-storage-size">
             <span id="purgeStorageSize">Sora Creator Tools uses 0.00MB of storage.</span>

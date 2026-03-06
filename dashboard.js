@@ -347,6 +347,13 @@
   const BEST_TIME_PREFS_KEY = 'SCT_DASHBOARD_BEST_TIME_PREFS_V1';
   const VIEWS_TYPE_STORAGE_KEY = 'SCT_DASHBOARD_VIEWS_TYPE_V1';
   const CHART_MODE_STORAGE_KEY = 'SCT_DASHBOARD_CHART_MODE_V1';
+  const DASHBOARD_MODE_STORAGE_KEY = 'SCT_DASHBOARD_MODE_V1';
+  const HARVEST_STORAGE_META_KEY = 'harvestRecordsV1';
+  const HARVEST_UPDATED_AT_KEY = 'harvestUpdatedAt';
+  const HARVEST_DB_NAME = 'SCT_HARVEST_DB_V1';
+  const HARVEST_DB_VERSION = 1;
+  const HARVEST_STORE = 'records';
+  const HARVEST_TABLE_PAGE_SIZE = 100;
   const STACKED_WINDOW_STORAGE_KEYS = {
     interaction: 'SCT_DASHBOARD_STACKED_WINDOW_INTERACTION_V1',
     views: 'SCT_DASHBOARD_STACKED_WINDOW_VIEWS_V1',
@@ -381,6 +388,14 @@
   let nextAutoRefreshAt = 0;
   let autoRefreshCountdownTimer = null;
   let autoRefreshNoChangeSkipStreak = 0;
+  let dashboardMode = 'metrics';
+  let harvestDbPromise = null;
+  let harvestRecords = [];
+  let harvestFilteredRecords = [];
+  let harvestCurrentPage = 1;
+  let harvestLastUpdatedAt = 0;
+  let harvestSelectedRecordKey = null;
+  let harvestLoading = false;
   const lastObservedSnapshotMaxByUserKey = new Map();
   let cameoSuggestionCache = { updatedAt: -1, userCount: -1, list: [] };
   let cameoUserCache = { updatedAt: -1, users: new Map() };
@@ -1536,6 +1551,740 @@
     }
     return 0;
   }
+
+  function normalizeDashboardMode(value) {
+    const mode = String(value || '').trim().toLowerCase();
+    return mode === 'harvest' ? 'harvest' : 'metrics';
+  }
+
+  function loadDashboardModeLocal() {
+    try {
+      return normalizeDashboardMode(localStorage.getItem(DASHBOARD_MODE_STORAGE_KEY));
+    } catch {
+      return 'metrics';
+    }
+  }
+
+  function persistDashboardMode(mode) {
+    const normalized = normalizeDashboardMode(mode);
+    try { localStorage.setItem(DASHBOARD_MODE_STORAGE_KEY, normalized); } catch {}
+    try { chrome.storage.local.set({ [DASHBOARD_MODE_STORAGE_KEY]: normalized }); } catch {}
+  }
+
+  function setDashboardModeButtons(mode) {
+    const normalized = normalizeDashboardMode(mode);
+    const metricsBtn = $('#dashboardModeMetrics');
+    const harvestBtn = $('#dashboardModeHarvest');
+    if (metricsBtn) {
+      const active = normalized === 'metrics';
+      metricsBtn.classList.toggle('active', active);
+      metricsBtn.setAttribute('aria-pressed', active ? 'true' : 'false');
+    }
+    if (harvestBtn) {
+      const active = normalized === 'harvest';
+      harvestBtn.classList.toggle('active', active);
+      harvestBtn.setAttribute('aria-pressed', active ? 'true' : 'false');
+    }
+  }
+
+  function applyDashboardModeUI(mode) {
+    const normalized = normalizeDashboardMode(mode);
+    const metricsSidebar = $('#metricsSidebar');
+    const metricsContent = $('#metricsContent');
+    const harvestSidebar = $('#harvestSidebar');
+    const harvestContent = $('#harvestContent');
+    if (metricsSidebar) metricsSidebar.classList.toggle('is-hidden', normalized !== 'metrics');
+    if (metricsContent) metricsContent.classList.toggle('is-hidden', normalized !== 'metrics');
+    if (harvestSidebar) harvestSidebar.classList.toggle('is-hidden', normalized !== 'harvest');
+    if (harvestContent) harvestContent.classList.toggle('is-hidden', normalized !== 'harvest');
+    setDashboardModeButtons(normalized);
+  }
+
+  function openHarvestDB() {
+    if (harvestDbPromise) return harvestDbPromise;
+    harvestDbPromise = new Promise((resolve, reject) => {
+      try {
+        const request = indexedDB.open(HARVEST_DB_NAME, HARVEST_DB_VERSION);
+        request.onerror = () => reject(request.error || new Error('Failed to open Harvest DB'));
+        request.onsuccess = () => resolve(request.result);
+        request.onupgradeneeded = () => {
+          const db = request.result;
+          if (!db.objectStoreNames.contains(HARVEST_STORE)) {
+            db.createObjectStore(HARVEST_STORE, { keyPath: 'recordKey' });
+          }
+        };
+      } catch (err) {
+        reject(err);
+      }
+    });
+    return harvestDbPromise;
+  }
+
+  async function loadHarvestRecordsFromIndexedDb() {
+    if (typeof indexedDB === 'undefined') return [];
+    const db = await openHarvestDB();
+    return new Promise((resolve, reject) => {
+      const out = [];
+      const tx = db.transaction(HARVEST_STORE, 'readonly');
+      const store = tx.objectStore(HARVEST_STORE);
+      const req = store.openCursor();
+      req.onsuccess = (event) => {
+        const cursor = event?.target?.result;
+        if (!cursor) return;
+        out.push(cursor.value);
+        cursor.continue();
+      };
+      req.onerror = () => reject(req.error || new Error('Failed to read Harvest records'));
+      tx.oncomplete = () => resolve(out);
+      tx.onerror = () => reject(tx.error || new Error('Harvest read transaction failed'));
+    });
+  }
+
+  function normalizeHarvestKind(kind) {
+    const value = String(kind || '').trim().toLowerCase();
+    if (value === 'draft' || value === 'published' || value === 'unknown') return value;
+    return 'unknown';
+  }
+
+  function normalizeHarvestContext(context) {
+    const value = String(context || '').trim().toLowerCase();
+    if (value === 'top' || value === 'profile' || value === 'drafts') return value;
+    return '';
+  }
+
+  function normalizeHarvestSource(source) {
+    const value = String(source || '').trim().toLowerCase();
+    if (value === 'api' || value === 'dom') return value;
+    return '';
+  }
+
+  function numberOrNull(value) {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function joinHarvestList(values) {
+    if (!Array.isArray(values)) return '';
+    const out = [];
+    for (const raw of values) {
+      if (typeof raw !== 'string') continue;
+      const trimmed = raw.trim();
+      if (!trimmed) continue;
+      out.push(trimmed);
+    }
+    return out.join('|');
+  }
+
+  function normalizeHarvestRecordForDashboard(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    const id = typeof raw.id === 'string' ? raw.id.trim() : '';
+    if (!id) return null;
+    const kind = normalizeHarvestKind(raw.kind);
+    const recordKey = typeof raw.recordKey === 'string' && raw.recordKey.trim() ? raw.recordKey.trim() : `${kind}:${id}`;
+    const context = normalizeHarvestContext(raw.context);
+    const source = normalizeHarvestSource(raw.source);
+    const prompt = typeof raw.prompt === 'string' ? raw.prompt.trim() : '';
+    const title = typeof raw.title === 'string' ? raw.title.trim() : '';
+    const ownerHandle = typeof raw.user_handle === 'string' ? raw.user_handle.trim() : '';
+    const ownerId = raw.user_id == null ? '' : String(raw.user_id).trim();
+    const castNames = Array.isArray(raw.cast_names) ? raw.cast_names.filter((v) => typeof v === 'string' && v.trim()).map((v) => v.trim()) : [];
+    const cameos = Array.isArray(raw.cameos) ? raw.cameos.filter((v) => typeof v === 'string' && v.trim()).map((v) => v.trim()) : [];
+    const createdAtTs = toTs(raw.created_at);
+    const postedAtTs = toTs(raw.posted_at);
+    const updatedAtTs = toTs(raw.updated_at);
+    const firstSeenTs = toTs(raw.first_seen_ts);
+    const lastSeenTs = toTs(raw.last_seen_ts);
+    const searchText = [
+      id,
+      kind,
+      context,
+      source,
+      ownerHandle,
+      ownerId,
+      title,
+      prompt,
+      String(raw.generation_id || ''),
+    ].join(' ').toLowerCase();
+    return {
+      ...raw,
+      id,
+      kind,
+      context,
+      source,
+      recordKey,
+      prompt,
+      title,
+      user_handle: ownerHandle,
+      user_id: ownerId,
+      cast_names: castNames,
+      cameos,
+      width: numberOrNull(raw.width),
+      height: numberOrNull(raw.height),
+      duration_s: numberOrNull(raw.duration_s),
+      view_count: numberOrNull(raw.view_count),
+      unique_view_count: numberOrNull(raw.unique_view_count),
+      like_count: numberOrNull(raw.like_count),
+      dislike_count: numberOrNull(raw.dislike_count),
+      reply_count: numberOrNull(raw.reply_count),
+      recursive_reply_count: numberOrNull(raw.recursive_reply_count),
+      remix_count: numberOrNull(raw.remix_count),
+      cast_count: numberOrNull(raw.cast_count),
+      created_at_ts: createdAtTs,
+      posted_at_ts: postedAtTs,
+      updated_at_ts: updatedAtTs,
+      first_seen_ts: firstSeenTs,
+      last_seen_ts: lastSeenTs,
+      created_at_raw: raw.created_at ?? '',
+      posted_at_raw: raw.posted_at ?? '',
+      updated_at_raw: raw.updated_at ?? '',
+      search_text: searchText,
+    };
+  }
+
+  function buildHarvestOwnerFallbackMap(metricsState) {
+    const out = new Map();
+    const users = metricsState?.users || {};
+    for (const [userKey, user] of Object.entries(users)) {
+      const userHandle = typeof user?.handle === 'string' ? user.handle.trim() : '';
+      const userId = user?.id != null ? String(user.id).trim() : '';
+      for (const postId of Object.keys(user?.posts || {})) {
+        if (!postId) continue;
+        if (out.has(postId)) continue;
+        out.set(postId, {
+          user_handle: userHandle,
+          user_id: userId,
+          user_key: userKey,
+        });
+      }
+    }
+    return out;
+  }
+
+  function applyHarvestOwnerFallback(records, metricsState) {
+    if (!Array.isArray(records) || !records.length) return [];
+    const ownerByPostId = buildHarvestOwnerFallbackMap(metricsState);
+    return records.map((record) => {
+      if (!record || record.kind !== 'published') return record;
+      if (record.user_handle || record.user_id) return record;
+      const fallback = ownerByPostId.get(record.id);
+      if (!fallback) return record;
+      return {
+        ...record,
+        user_handle: fallback.user_handle || record.user_handle || '',
+        user_id: fallback.user_id || record.user_id || '',
+      };
+    });
+  }
+
+  function harvestSortValue(record, key) {
+    if (!record) return null;
+    return record[key];
+  }
+
+  function compareHarvestValues(a, b) {
+    const aNull = a == null || a === '';
+    const bNull = b == null || b === '';
+    if (aNull && bNull) return 0;
+    if (aNull) return 1;
+    if (bNull) return -1;
+    const aNum = Number(a);
+    const bNum = Number(b);
+    const aNumOk = Number.isFinite(aNum);
+    const bNumOk = Number.isFinite(bNum);
+    if (aNumOk && bNumOk) return aNum === bNum ? 0 : (aNum > bNum ? 1 : -1);
+    return String(a).localeCompare(String(b));
+  }
+
+  function parseHarvestSort() {
+    const raw = $('#harvestSortBy')?.value || 'last_seen_ts:desc';
+    const [keyRaw, dirRaw] = String(raw).split(':');
+    const key = String(keyRaw || 'last_seen_ts').trim();
+    const dir = String(dirRaw || 'desc').trim().toLowerCase() === 'asc' ? 'asc' : 'desc';
+    return { key, dir };
+  }
+
+  function getHarvestFilterState() {
+    const search = String($('#harvestSearch')?.value || '').trim().toLowerCase();
+    const kind = String($('#harvestKindFilter')?.value || 'all').trim().toLowerCase();
+    const context = String($('#harvestContextFilter')?.value || 'all').trim().toLowerCase();
+    const source = String($('#harvestSourceFilter')?.value || 'all').trim().toLowerCase();
+    const promptState = String($('#harvestPromptFilter')?.value || 'all').trim().toLowerCase();
+    const { key: sortKey, dir: sortDir } = parseHarvestSort();
+    return { search, kind, context, source, promptState, sortKey, sortDir };
+  }
+
+  function filterAndSortHarvestRecords(records, filters) {
+    if (!Array.isArray(records) || !records.length) return [];
+    const out = [];
+    for (const record of records) {
+      if (!record) continue;
+      if (filters.search && !String(record.search_text || '').includes(filters.search)) continue;
+      if (filters.kind !== 'all' && record.kind !== filters.kind) continue;
+      if (filters.context !== 'all' && record.context !== filters.context) continue;
+      if (filters.source !== 'all' && record.source !== filters.source) continue;
+      if (filters.promptState === 'with_prompt' && !record.prompt) continue;
+      if (filters.promptState === 'without_prompt' && !!record.prompt) continue;
+      out.push(record);
+    }
+    out.sort((left, right) => {
+      const cmp = compareHarvestValues(harvestSortValue(left, filters.sortKey), harvestSortValue(right, filters.sortKey));
+      if (cmp === 0) {
+        return String(left.recordKey || '').localeCompare(String(right.recordKey || ''));
+      }
+      return filters.sortDir === 'asc' ? cmp : -cmp;
+    });
+    return out;
+  }
+
+  function formatHarvestDateTime(value) {
+    const ts = toTs(value);
+    if (!ts) return '-';
+    try { return new Date(ts).toLocaleString(); } catch { return String(value || '-'); }
+  }
+
+  function formatHarvestDuration(seconds) {
+    const n = Number(seconds);
+    if (!Number.isFinite(n) || n < 0) return '-';
+    if (n < 60) return `${Math.round(n)}s`;
+    const mins = Math.floor(n / 60);
+    const sec = Math.round(n % 60);
+    return `${mins}m ${sec}s`;
+  }
+
+  function renderHarvestSummary() {
+    const total = harvestRecords.length;
+    const published = harvestRecords.filter((r) => r.kind === 'published').length;
+    const drafts = harvestRecords.filter((r) => r.kind === 'draft').length;
+    const prompts = harvestRecords.filter((r) => !!r.prompt).length;
+    const api = harvestRecords.filter((r) => r.source === 'api').length;
+    const top = harvestRecords.filter((r) => r.context === 'top').length;
+    const profile = harvestRecords.filter((r) => r.context === 'profile').length;
+    const draftsContext = harvestRecords.filter((r) => r.context === 'drafts').length;
+    const promptPct = total ? Math.round((prompts / total) * 100) : 0;
+    const apiPct = total ? Math.round((api / total) * 100) : 0;
+    const setText = (id, value) => {
+      const el = $(id);
+      if (el) el.textContent = value;
+    };
+    setText('#harvestTotalRecords', fmt(total));
+    setText('#harvestPublishedCount', fmt(published));
+    setText('#harvestDraftCount', fmt(drafts));
+    setText('#harvestPromptCoverage', `${promptPct}%`);
+    setText('#harvestApiCoverage', `${apiPct}%`);
+    setText('#harvestUpdatedAt', harvestLastUpdatedAt ? formatHarvestDateTime(harvestLastUpdatedAt) : '-');
+    setText('#harvestTopCount', fmt(top));
+    setText('#harvestProfileCount', fmt(profile));
+    setText('#harvestDraftsContextCount', fmt(draftsContext));
+    setText('#harvestFilteredCount', fmt(harvestFilteredRecords.length));
+    const summaryNote = $('#harvestSummaryNote');
+    if (summaryNote) {
+      summaryNote.textContent = `${fmt(harvestFilteredRecords.length)} record(s) shown from ${fmt(total)} Harvest record(s).`;
+    }
+  }
+
+  function findHarvestRecordByKey(recordKey) {
+    if (!recordKey) return null;
+    for (const record of harvestFilteredRecords) {
+      if (record?.recordKey === recordKey) return record;
+    }
+    for (const record of harvestRecords) {
+      if (record?.recordKey === recordKey) return record;
+    }
+    return null;
+  }
+
+  function setHarvestDetailLink(selector, value) {
+    const el = $(selector);
+    if (!el) return;
+    if (typeof value === 'string' && value.trim()) {
+      const href = value.trim();
+      el.textContent = href;
+      el.href = href;
+      el.style.pointerEvents = '';
+      el.removeAttribute('aria-disabled');
+      return;
+    }
+    el.textContent = '-';
+    el.removeAttribute('href');
+    el.style.pointerEvents = 'none';
+    el.setAttribute('aria-disabled', 'true');
+  }
+
+  function renderHarvestDetail(record) {
+    const setText = (id, value) => {
+      const el = $(id);
+      if (el) el.textContent = value || '-';
+    };
+    if (!record) {
+      setText('#harvestDetailRecordKey', '-');
+      setText('#harvestDetailGenerationId', '-');
+      setText('#harvestDetailCastNames', '-');
+      setText('#harvestDetailRunId', '-');
+      setText('#harvestDetailPrompt', 'Select a row to inspect prompt and metadata.');
+      setHarvestDetailLink('#harvestDetailPermalink', '');
+      setHarvestDetailLink('#harvestDetailEndpoint', '');
+      const copyBtn = $('#harvestCopyPrompt');
+      if (copyBtn) copyBtn.setAttribute('disabled', 'disabled');
+      return;
+    }
+    setText('#harvestDetailRecordKey', record.recordKey || '-');
+    setText('#harvestDetailGenerationId', record.generation_id ? String(record.generation_id) : '-');
+    setText('#harvestDetailCastNames', joinHarvestList(record.cast_names || record.cameos) || '-');
+    setText('#harvestDetailRunId', record.last_harvest_run_id ? String(record.last_harvest_run_id) : '-');
+    setText('#harvestDetailPrompt', record.prompt || '(no prompt captured)');
+    setHarvestDetailLink('#harvestDetailPermalink', record.post_permalink || '');
+    setHarvestDetailLink('#harvestDetailEndpoint', record.detail_url || '');
+    const copyBtn = $('#harvestCopyPrompt');
+    if (copyBtn) {
+      if (record.prompt) copyBtn.removeAttribute('disabled');
+      else copyBtn.setAttribute('disabled', 'disabled');
+    }
+  }
+
+  function recomputeHarvestView(opts = {}) {
+    const preservePage = !!opts.preservePage;
+    harvestFilteredRecords = filterAndSortHarvestRecords(harvestRecords, getHarvestFilterState());
+    if (!preservePage) harvestCurrentPage = 1;
+    const maxPage = Math.max(1, Math.ceil(harvestFilteredRecords.length / HARVEST_TABLE_PAGE_SIZE));
+    if (harvestCurrentPage > maxPage) harvestCurrentPage = maxPage;
+    renderHarvestSummary();
+    renderHarvestTable();
+  }
+
+  function renderHarvestTable() {
+    const tbody = $('#harvestTableBody');
+    const emptyState = $('#harvestEmptyState');
+    const prevBtn = $('#harvestPrevPage');
+    const nextBtn = $('#harvestNextPage');
+    const label = $('#harvestPageLabel');
+    if (!tbody) return;
+    const totalRows = harvestFilteredRecords.length;
+    const pageCount = Math.max(1, Math.ceil(totalRows / HARVEST_TABLE_PAGE_SIZE));
+    if (harvestCurrentPage > pageCount) harvestCurrentPage = pageCount;
+    const start = (harvestCurrentPage - 1) * HARVEST_TABLE_PAGE_SIZE;
+    const pageRows = harvestFilteredRecords.slice(start, start + HARVEST_TABLE_PAGE_SIZE);
+    if (!harvestSelectedRecordKey && pageRows.length) {
+      harvestSelectedRecordKey = pageRows[0].recordKey;
+    } else if (harvestSelectedRecordKey && !findHarvestRecordByKey(harvestSelectedRecordKey)) {
+      harvestSelectedRecordKey = pageRows.length ? pageRows[0].recordKey : null;
+    }
+    if (emptyState) emptyState.classList.toggle('is-hidden', pageRows.length > 0);
+    tbody.innerHTML = pageRows.map((record) => {
+      const selectedClass = record.recordKey === harvestSelectedRecordKey ? ' is-selected' : '';
+      const ownerText = record.user_handle || record.user_id || '-';
+      const preview = record.title || record.prompt || '-';
+      const resolution = (record.width && record.height) ? `${record.width}x${record.height}` : '-';
+      return `<tr data-record-key="${esc(record.recordKey)}" class="${selectedClass.trim()}">
+        <td><span class="harvest-pill kind-${esc(record.kind)}">${esc(record.kind)}</span></td>
+        <td>${esc(record.context || '-')}</td>
+        <td><span class="harvest-pill source-${esc(record.source || 'unknown')}">${esc(record.source || 'unknown')}</span></td>
+        <td>${esc(ownerText)}</td>
+        <td>${esc(preview.length > 90 ? `${preview.slice(0, 90)}...` : preview)}</td>
+        <td><code>${esc(resolution)}</code></td>
+        <td>${esc(formatHarvestDuration(record.duration_s))}</td>
+        <td>${esc(formatHarvestDateTime(record.created_at_ts || record.created_at_raw))}</td>
+        <td>${esc(record.view_count != null ? fmt(record.view_count) : '-')}</td>
+        <td>${esc(record.like_count != null ? fmt(record.like_count) : '-')}</td>
+        <td>${esc(record.reply_count != null ? fmt(record.reply_count) : '-')}</td>
+        <td>${esc(record.remix_count != null ? fmt(record.remix_count) : '-')}</td>
+        <td>${esc(formatHarvestDateTime(record.last_seen_ts || record.updated_at_ts || record.first_seen_ts))}</td>
+      </tr>`;
+    }).join('');
+    if (label) label.textContent = `Page ${harvestCurrentPage} / ${pageCount}`;
+    if (prevBtn) prevBtn.disabled = harvestCurrentPage <= 1;
+    if (nextBtn) nextBtn.disabled = harvestCurrentPage >= pageCount;
+    renderHarvestDetail(findHarvestRecordByKey(harvestSelectedRecordKey));
+  }
+
+  async function refreshHarvestData(opts = {}) {
+    const force = !!opts.force;
+    if (harvestLoading) return;
+    harvestLoading = true;
+    const sidebarMeta = $('#harvestSidebarMeta');
+    if (sidebarMeta) sidebarMeta.textContent = 'Loading Harvest records...';
+    try {
+      const st = await chrome.storage.local.get([HARVEST_UPDATED_AT_KEY, HARVEST_STORAGE_META_KEY]);
+      const updatedAt = Number(st?.[HARVEST_UPDATED_AT_KEY]) || 0;
+      if (!force && updatedAt && updatedAt === harvestLastUpdatedAt && harvestRecords.length) {
+        recomputeHarvestView({ preservePage: true });
+        if (sidebarMeta) sidebarMeta.textContent = `Harvest records loaded: ${fmt(harvestRecords.length)}. Last sync ${formatHarvestDateTime(harvestLastUpdatedAt)}.`;
+        return;
+      }
+      const rawRecords = await loadHarvestRecordsFromIndexedDb();
+      const normalized = rawRecords
+        .map((entry) => normalizeHarvestRecordForDashboard(entry))
+        .filter(Boolean);
+      harvestRecords = applyHarvestOwnerFallback(normalized, metrics);
+      harvestLastUpdatedAt = updatedAt || Date.now();
+      recomputeHarvestView();
+      if (sidebarMeta) {
+        const storageCount = Number(st?.[HARVEST_STORAGE_META_KEY]?.count);
+        const countLabel = Number.isFinite(storageCount) && storageCount >= 0 ? storageCount : harvestRecords.length;
+        sidebarMeta.textContent = `Harvest records loaded: ${fmt(countLabel)}. Last sync ${formatHarvestDateTime(harvestLastUpdatedAt)}.`;
+      }
+    } catch {
+      if (sidebarMeta) sidebarMeta.textContent = 'Unable to read Harvest records.';
+      showToast('Failed to load Harvest records');
+    } finally {
+      harvestLoading = false;
+    }
+  }
+
+  async function setDashboardMode(mode, opts = {}) {
+    const normalized = normalizeDashboardMode(mode);
+    const changed = dashboardMode !== normalized;
+    dashboardMode = normalized;
+    applyDashboardModeUI(normalized);
+    if (opts.persist !== false) persistDashboardMode(normalized);
+    if (normalized === 'harvest' && (changed || opts.forceReloadHarvest || !harvestRecords.length)) {
+      await refreshHarvestData({ force: !!opts.forceReloadHarvest });
+    }
+  }
+
+  function bindDashboardModeControls() {
+    const metricsBtn = $('#dashboardModeMetrics');
+    const harvestBtn = $('#dashboardModeHarvest');
+    if (metricsBtn) {
+      metricsBtn.addEventListener('click', () => {
+        setDashboardMode('metrics');
+      });
+    }
+    if (harvestBtn) {
+      harvestBtn.addEventListener('click', () => {
+        setDashboardMode('harvest');
+      });
+    }
+
+    const filterSelectors = ['#harvestSearch', '#harvestKindFilter', '#harvestContextFilter', '#harvestSourceFilter', '#harvestPromptFilter', '#harvestSortBy'];
+    for (const selector of filterSelectors) {
+      const el = $(selector);
+      if (!el) continue;
+      const eventName = selector === '#harvestSearch' ? 'input' : 'change';
+      el.addEventListener(eventName, () => {
+        if (selector !== '#harvestSearch') {
+          const searchEl = $('#harvestSearch');
+          if (searchEl && document.activeElement !== searchEl) searchEl.blur();
+        }
+        harvestCurrentPage = 1;
+        recomputeHarvestView();
+      });
+    }
+
+    const refreshBtn = $('#harvestRefreshBtn');
+    if (refreshBtn) refreshBtn.addEventListener('click', () => refreshHarvestData({ force: true }));
+    const resetBtn = $('#harvestResetFiltersBtn');
+    if (resetBtn) {
+      resetBtn.addEventListener('click', () => {
+        const search = $('#harvestSearch');
+        const kind = $('#harvestKindFilter');
+        const context = $('#harvestContextFilter');
+        const source = $('#harvestSourceFilter');
+        const prompt = $('#harvestPromptFilter');
+        const sortBy = $('#harvestSortBy');
+        if (search) search.value = '';
+        if (kind) kind.value = 'all';
+        if (context) context.value = 'all';
+        if (source) source.value = 'all';
+        if (prompt) prompt.value = 'all';
+        if (sortBy) sortBy.value = 'last_seen_ts:desc';
+        harvestCurrentPage = 1;
+        recomputeHarvestView();
+      });
+    }
+
+    const tbody = $('#harvestTableBody');
+    if (tbody) {
+      tbody.addEventListener('click', (event) => {
+        const row = event.target?.closest?.('tr[data-record-key]');
+        if (!row) return;
+        const key = row.getAttribute('data-record-key');
+        if (!key) return;
+        harvestSelectedRecordKey = key;
+        renderHarvestTable();
+      });
+    }
+
+    const prevBtn = $('#harvestPrevPage');
+    if (prevBtn) {
+      prevBtn.addEventListener('click', () => {
+        if (harvestCurrentPage <= 1) return;
+        harvestCurrentPage -= 1;
+        renderHarvestTable();
+      });
+    }
+    const nextBtn = $('#harvestNextPage');
+    if (nextBtn) {
+      nextBtn.addEventListener('click', () => {
+        const pageCount = Math.max(1, Math.ceil(harvestFilteredRecords.length / HARVEST_TABLE_PAGE_SIZE));
+        if (harvestCurrentPage >= pageCount) return;
+        harvestCurrentPage += 1;
+        renderHarvestTable();
+      });
+    }
+
+    const copyPromptBtn = $('#harvestCopyPrompt');
+    if (copyPromptBtn) {
+      copyPromptBtn.addEventListener('click', async () => {
+        const current = findHarvestRecordByKey(harvestSelectedRecordKey);
+        const prompt = current?.prompt || '';
+        if (!prompt) return;
+        try {
+          await navigator.clipboard.writeText(prompt);
+          showToast('Prompt copied');
+        } catch {
+          showToast('Prompt copy failed');
+        }
+      });
+    }
+  }
+
+  const HARVEST_EXPORT_COLUMNS = [
+    'record_key',
+    'id',
+    'kind',
+    'context',
+    'source',
+    'user_handle',
+    'user_id',
+    'title',
+    'prompt',
+    'prompt_source',
+    'generation_type',
+    'generation_id',
+    'width',
+    'height',
+    'duration_s',
+    'created_at_raw',
+    'created_at_iso',
+    'posted_at_raw',
+    'posted_at_iso',
+    'updated_at_raw',
+    'updated_at_iso',
+    'first_seen_ts',
+    'first_seen_iso',
+    'last_seen_ts',
+    'last_seen_iso',
+    'view_count',
+    'unique_view_count',
+    'like_count',
+    'dislike_count',
+    'reply_count',
+    'recursive_reply_count',
+    'remix_count',
+    'post_visibility',
+    'post_permalink',
+    'detail_url',
+    'cast_count',
+    'cast_names',
+    'cameos',
+    'last_harvest_run_id',
+  ];
+
+  function tsToIso(ts) {
+    const n = Number(ts);
+    if (!Number.isFinite(n) || n <= 0) return '';
+    try { return new Date(n).toISOString(); } catch { return ''; }
+  }
+
+  function buildHarvestExportRows(records) {
+    if (!Array.isArray(records)) return [];
+    return records.map((record) => ({
+      record_key: record.recordKey || '',
+      id: record.id || '',
+      kind: record.kind || '',
+      context: record.context || '',
+      source: record.source || '',
+      user_handle: record.user_handle || '',
+      user_id: record.user_id || '',
+      title: record.title || '',
+      prompt: record.prompt || '',
+      prompt_source: record.prompt_source || '',
+      generation_type: record.generation_type || '',
+      generation_id: record.generation_id || '',
+      width: record.width != null ? record.width : '',
+      height: record.height != null ? record.height : '',
+      duration_s: record.duration_s != null ? record.duration_s : '',
+      created_at_raw: record.created_at_raw || '',
+      created_at_iso: tsToIso(record.created_at_ts),
+      posted_at_raw: record.posted_at_raw || '',
+      posted_at_iso: tsToIso(record.posted_at_ts),
+      updated_at_raw: record.updated_at_raw || '',
+      updated_at_iso: tsToIso(record.updated_at_ts),
+      first_seen_ts: record.first_seen_ts || '',
+      first_seen_iso: tsToIso(record.first_seen_ts),
+      last_seen_ts: record.last_seen_ts || '',
+      last_seen_iso: tsToIso(record.last_seen_ts),
+      view_count: record.view_count != null ? record.view_count : '',
+      unique_view_count: record.unique_view_count != null ? record.unique_view_count : '',
+      like_count: record.like_count != null ? record.like_count : '',
+      dislike_count: record.dislike_count != null ? record.dislike_count : '',
+      reply_count: record.reply_count != null ? record.reply_count : '',
+      recursive_reply_count: record.recursive_reply_count != null ? record.recursive_reply_count : '',
+      remix_count: record.remix_count != null ? record.remix_count : '',
+      post_visibility: record.post_visibility || '',
+      post_permalink: record.post_permalink || '',
+      detail_url: record.detail_url || '',
+      cast_count: record.cast_count != null ? record.cast_count : '',
+      cast_names: joinHarvestList(record.cast_names),
+      cameos: joinHarvestList(record.cameos),
+      last_harvest_run_id: record.last_harvest_run_id || '',
+    }));
+  }
+
+  function buildHarvestCsv(records) {
+    const rows = buildHarvestExportRows(records);
+    const lines = [HARVEST_EXPORT_COLUMNS.map(escapeCSV).join(',')];
+    for (const row of rows) {
+      lines.push(HARVEST_EXPORT_COLUMNS.map((column) => escapeCSV(row[column])).join(','));
+    }
+    return lines.join('\n');
+  }
+
+  function buildHarvestJsonl(records) {
+    const rows = buildHarvestExportRows(records);
+    return rows.map((row) => JSON.stringify(row)).join('\n');
+  }
+
+  function downloadTextFile(filename, text, mimeType) {
+    const blob = new Blob([text], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function normalizeHarvestExportScope(scope) {
+    return String(scope || '').trim().toLowerCase() === 'filtered' ? 'filtered' : 'all';
+  }
+
+  function getHarvestExportRecords(scope) {
+    const normalized = normalizeHarvestExportScope(scope);
+    return normalized === 'filtered' ? harvestFilteredRecords : harvestRecords;
+  }
+
+  async function exportHarvestData(format, scope) {
+    if (!harvestRecords.length) {
+      await refreshHarvestData({ force: true });
+    }
+    const records = getHarvestExportRecords(scope);
+    if (!records.length) {
+      showToast('No Harvest records to export');
+      return;
+    }
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
+    if (format === 'jsonl') {
+      downloadTextFile(`sora_harvest_${normalizeHarvestExportScope(scope)}_${stamp}.jsonl`, buildHarvestJsonl(records), 'application/x-ndjson;charset=utf-8;');
+      showToast('Harvest JSONL export ready');
+      return;
+    }
+    downloadTextFile(`sora_harvest_${normalizeHarvestExportScope(scope)}_${stamp}.csv`, buildHarvestCsv(records), 'text/csv;charset=utf-8;');
+    showToast('Harvest CSV export ready');
+  }
+
   const SNAPSHOT_NUMERIC_FIELDS = ['views', 'uv', 'likes', 'comments', 'remixes', 'remix_count', 'interactions', 'followers', 'count'];
   function mergeSnapshotPoint(existing, incoming){
     const left = (existing && typeof existing === 'object') ? existing : null;
@@ -6616,6 +7365,9 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     const perfBoot = perfStart('boot total');
     initSidebarResizer();
     initThemePicker();
+    bindDashboardModeControls();
+    dashboardMode = loadDashboardModeLocal();
+    applyDashboardModeUI(dashboardMode);
     hoistChartTooltips();
     hoistToBody($('#purgeConfirmDialog'));
     hoistToBody($('#postPurgeConfirm'));
@@ -6709,6 +7461,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     const prefsPromise = chrome.storage.local
       .get([
         'lastUserKey',
+        DASHBOARD_MODE_STORAGE_KEY,
         'zoomStates',
         'customVisibilityByUser',
         'customFiltersByUser',
@@ -10744,6 +11497,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         SIDEBAR_WIDTH_KEY,
         VIEWS_TYPE_STORAGE_KEY,
         CHART_MODE_STORAGE_KEY,
+        DASHBOARD_MODE_STORAGE_KEY,
         BEST_TIME_PREFS_KEY,
         'sctLastFilterAction',
         'sctLastFilterActionByUser'
@@ -10759,6 +11513,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         BEST_TIME_PREFS_KEY,
         VIEWS_TYPE_STORAGE_KEY,
         CHART_MODE_STORAGE_KEY,
+        DASHBOARD_MODE_STORAGE_KEY,
         'lastFilterAction',
         'lastFilterActionByUser',
         'lastUserKey',
@@ -11040,6 +11795,30 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     if (purgeExportBtn) {
       purgeExportBtn.addEventListener('click', async ()=>{
         await exportAllDataCSV();
+      });
+    }
+    const purgeHarvestExportCsvAllBtn = $('#purgeHarvestExportCsvAll');
+    if (purgeHarvestExportCsvAllBtn) {
+      purgeHarvestExportCsvAllBtn.addEventListener('click', async () => {
+        await exportHarvestData('csv', 'all');
+      });
+    }
+    const purgeHarvestExportCsvFilteredBtn = $('#purgeHarvestExportCsvFiltered');
+    if (purgeHarvestExportCsvFilteredBtn) {
+      purgeHarvestExportCsvFilteredBtn.addEventListener('click', async () => {
+        await exportHarvestData('csv', 'filtered');
+      });
+    }
+    const purgeHarvestExportJsonlAllBtn = $('#purgeHarvestExportJsonlAll');
+    if (purgeHarvestExportJsonlAllBtn) {
+      purgeHarvestExportJsonlAllBtn.addEventListener('click', async () => {
+        await exportHarvestData('jsonl', 'all');
+      });
+    }
+    const purgeHarvestExportJsonlFilteredBtn = $('#purgeHarvestExportJsonlFiltered');
+    if (purgeHarvestExportJsonlFilteredBtn) {
+      purgeHarvestExportJsonlFilteredBtn.addEventListener('click', async () => {
+        await exportHarvestData('jsonl', 'filtered');
       });
     }
 
@@ -12111,6 +12890,9 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
 
     try {
       const st = await prefsPromise;
+      const storedDashboardMode = normalizeDashboardMode(st?.[DASHBOARD_MODE_STORAGE_KEY] || dashboardMode);
+      dashboardMode = storedDashboardMode;
+      applyDashboardModeUI(dashboardMode);
       const prevUserKey = currentUserKey;
       const storedLastUserKey = typeof st.lastUserKey === 'string' && st.lastUserKey ? st.lastUserKey : null;
       const prevSelectable = isSelectableUserKey(prevUserKey);
@@ -12364,6 +13146,11 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         }
       }
     } catch {}
+    if (dashboardMode === 'harvest') {
+      await setDashboardMode('harvest', { persist: false, forceReloadHarvest: true });
+    } else {
+      applyDashboardModeUI('metrics');
+    }
     if (!isMetricsPartial) {
       saveSessionCache();
     }
@@ -12380,6 +13167,14 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     initBestTimeGatherLink();
     initBestTimeInfoTooltip();
     initMetricsGatherLink();
+    try {
+      chrome.storage.onChanged.addListener((changes, areaName) => {
+        if (areaName !== 'local' || !changes) return;
+        if (!Object.prototype.hasOwnProperty.call(changes, HARVEST_UPDATED_AT_KEY)) return;
+        if (dashboardMode !== 'harvest') return;
+        refreshHarvestData({ force: false }).catch(() => {});
+      });
+    } catch {}
     let autoRefreshInFlight = false;
     let autoRefreshTimer = null;
     const scheduleAutoRefresh = (delayMs, opts = {}) => {
@@ -12410,7 +13205,10 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       }
       autoRefreshInFlight = true;
       snapLog('autoRefresh:run', { currentUserKey });
-      refreshData({ skipPostListRebuild: true, autoRefresh: true })
+      const refreshPromise = dashboardMode === 'harvest'
+        ? refreshHarvestData({ force: false })
+        : refreshData({ skipPostListRebuild: true, autoRefresh: true });
+      refreshPromise
         .catch(() => {})
         .finally(() => {
           autoRefreshInFlight = false;

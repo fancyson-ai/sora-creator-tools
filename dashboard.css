@@ -204,6 +204,14 @@ button:active,.action-link:active{transform:translateY(0)}
 #purgeMenu{
   margin-left:auto;
 }
+.dashboard-mode-toggle{
+  margin-left:4px;
+  margin-right:4px;
+}
+.dashboard-mode-toggle .toggle-pill{
+  min-width:74px;
+  text-align:center;
+}
 #themeToggle .theme-notif-dot{
   position:absolute;
   top:-2px;
@@ -882,6 +890,179 @@ body.is-purging .sidebar{
   color:var(--fg);
   font-variant-numeric:tabular-nums;
   line-height:1.2;
+}
+.harvest-filter-group{
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+  margin:0 6px 10px;
+}
+.harvest-filter-label{
+  color:var(--muted);
+  font-size:11px;
+  font-weight:700;
+  letter-spacing:0.04em;
+  text-transform:uppercase;
+  font-family:var(--font-system);
+}
+.harvest-filter-group input,
+.harvest-filter-group select{
+  width:100%;
+}
+.harvest-filter-actions{
+  display:flex;
+  flex-wrap:wrap;
+  gap:8px;
+  margin:10px 6px 0;
+}
+.harvest-filter-actions button{
+  flex:1 1 130px;
+}
+.harvest-metric-grid{
+  margin-bottom:10px;
+}
+.harvest-context-grid{
+  grid-template-columns:repeat(auto-fit, minmax(150px, 1fr));
+}
+.harvest-table-wrap{
+  border:1px solid rgba(var(--accent-rgb),0.16);
+  border-radius:14px;
+  overflow:auto;
+  background:
+    linear-gradient(140deg, var(--accent-tint), transparent 65%),
+    rgba(var(--panel-mid-rgb),0.55);
+  box-shadow:var(--shadow-sm);
+}
+.harvest-table{
+  width:100%;
+  min-width:1260px;
+  border-collapse:collapse;
+}
+.harvest-table th,
+.harvest-table td{
+  padding:9px 10px;
+  border-bottom:1px solid rgba(255,255,255,0.08);
+  text-align:left;
+  vertical-align:top;
+  font-size:12px;
+}
+.harvest-table th{
+  position:sticky;
+  top:0;
+  z-index:1;
+  background:rgba(var(--panel-strong-rgb),0.92);
+  color:rgba(255,255,255,0.88);
+  font-size:11px;
+  letter-spacing:0.06em;
+  text-transform:uppercase;
+  font-family:var(--font-system);
+}
+.harvest-table tbody tr{
+  cursor:pointer;
+  transition:background 120ms ease;
+}
+.harvest-table tbody tr:hover{
+  background:rgba(var(--accent-rgb),0.12);
+}
+.harvest-table tbody tr.is-selected{
+  background:rgba(var(--accent-rgb),0.2);
+}
+.harvest-table td code{
+  font-family:var(--font-mono);
+  font-size:11px;
+  color:rgba(255,255,255,0.9);
+}
+.harvest-pill{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  border-radius:999px;
+  padding:3px 8px;
+  font-size:10px;
+  font-weight:700;
+  letter-spacing:0.05em;
+  text-transform:uppercase;
+  border:1px solid rgba(255,255,255,0.16);
+  background:rgba(var(--panel-strong-rgb),0.7);
+}
+.harvest-pill.kind-published{background:rgba(53,217,139,0.2);border-color:rgba(53,217,139,0.4);color:#b7ffd8}
+.harvest-pill.kind-draft{background:rgba(125,196,255,0.2);border-color:rgba(125,196,255,0.45);color:#d7ecff}
+.harvest-pill.source-api{background:rgba(255,207,143,0.2);border-color:rgba(255,207,143,0.45);color:#ffe6bc}
+.harvest-pill.source-dom{background:rgba(178,141,255,0.2);border-color:rgba(178,141,255,0.42);color:#ebdcff}
+.harvest-empty-state{
+  padding:24px;
+  text-align:center;
+  color:var(--muted);
+  font-size:13px;
+}
+.harvest-pagination{
+  display:flex;
+  align-items:center;
+  justify-content:flex-end;
+  gap:10px;
+  margin-top:10px;
+}
+.harvest-pagination #harvestPageLabel{
+  min-width:120px;
+  text-align:center;
+  color:var(--muted);
+  font-size:12px;
+  font-family:var(--font-system);
+}
+.harvest-detail-panel{
+  margin-top:14px;
+  border:1px solid rgba(255,255,255,0.1);
+  border-radius:14px;
+  padding:12px;
+  background:
+    linear-gradient(145deg, var(--accent-tint), transparent 65%),
+    rgba(var(--panel-mid-rgb),0.58);
+}
+.harvest-detail-grid{
+  display:grid;
+  grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));
+  gap:8px 12px;
+}
+.harvest-detail-item{
+  display:flex;
+  flex-direction:column;
+  gap:3px;
+  min-width:0;
+}
+.harvest-detail-label{
+  color:var(--muted);
+  font-size:11px;
+  letter-spacing:0.06em;
+  text-transform:uppercase;
+  font-family:var(--font-system);
+}
+.harvest-detail-value{
+  font-family:var(--font-mono);
+  color:rgba(255,255,255,0.92);
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+.harvest-prompt-head{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:8px;
+  margin-top:10px;
+}
+.harvest-detail-prompt{
+  margin:8px 0 0;
+  border-radius:10px;
+  border:1px solid rgba(255,255,255,0.1);
+  padding:10px;
+  min-height:100px;
+  max-height:220px;
+  overflow:auto;
+  white-space:pre-wrap;
+  background:rgba(var(--panel-deep-rgb),0.72);
+  color:rgba(255,255,255,0.9);
+  font-family:var(--font-mono);
+  font-size:12px;
 }
 .metric-break{display:none}
 .chip{display:inline-flex;gap:6px;align-items:center;border:1px solid var(--border);background:var(--chip);border-radius:999px;padding:4px 8px;font-size:12px}
