@@ -1573,6 +1573,11 @@ function badgeEmojiFor(id, meta) {
     return viewsNum / Math.max(ageNum, 1);
   }
 
+  function formatPerMinute(rate) {
+    if (!Number.isFinite(rate) || rate < 0) return '';
+    return rate.toFixed(2);
+  }
+
   function formatPostedAtLocal(tsMs) {
     if (!Number.isFinite(tsMs)) return null;
     const d = new Date(tsMs);
@@ -3870,8 +3875,13 @@ function badgeEmojiFor(id, meta) {
           isFinite(likes) && likes > 0 && isFinite(remixes) && remixes >= 0 ? (remixes / likes) * 100 : null;
         const irVal = isFinite(uv) && uv > 0 ? (((Number(likes) || 0) + (Number(comments) || 0)) / uv) * 100 : null;
 
-        const ageMin = Math.max(0, Math.floor((NOW - tPost) / 60000));
+        const ageMinExact = Math.max(0, (NOW - tPost) / 60000);
+        const ageMin = Math.floor(ageMinExact);
         const expiringMin = Math.max(0, ANALYZE_EXPIRES_WINDOW_MIN - ageMin);
+        const lpmVal = likesPerMinute(likes, ageMinExact);
+        const vpmVal = viewsPerMinute(uv, ageMinExact);
+        const lpmStr = formatPerMinute(lpmVal);
+        const vpmStr = formatPerMinute(vpmVal);
 
         const caption =
           typeof p?.caption === 'string' && p.caption ? p.caption : typeof p?.text === 'string' && p.text ? p.text : '';
@@ -3931,6 +3941,10 @@ function badgeEmojiFor(id, meta) {
           likes: isFinite(likes) ? likes : 0,
           remixes: isFinite(remixes) ? remixes : 0,
           comments: isFinite(comments) ? comments : 0,
+          lpmVal: lpmVal == null ? -1 : lpmVal,
+          lpmStr,
+          vpmVal: vpmVal == null ? -1 : vpmVal,
+          vpmStr,
           rrPctStr,
           rrPctVal: rrVal == null ? -1 : rrVal,
           irPctStr,
@@ -3970,6 +3984,10 @@ function badgeEmojiFor(id, meta) {
 
       const irVal = uv > 0 ? (((Number(likes) || 0) + (Number(comments) || 0)) / uv) * 100 : null;
       const irPctStr = irVal == null ? '' : irVal === 0 ? '0%' : irVal.toFixed(1).replace(/\.0$/, '') + '%';
+      const lpmVal = likesPerMinute(likes, ageMin);
+      const vpmVal = viewsPerMinute(uv, ageMin);
+      const lpmStr = formatPerMinute(lpmVal);
+      const vpmStr = formatPerMinute(vpmVal);
 
       const ageMinInt = Math.floor(ageMin);
       const expiringMin = Math.max(0, ANALYZE_EXPIRES_WINDOW_MIN - ageMinInt);
@@ -3986,6 +4004,10 @@ function badgeEmojiFor(id, meta) {
         likes: Number(likes) || 0,
         remixes: remixes || 0,
         comments: comments || 0,
+        lpmVal: lpmVal == null ? -1 : lpmVal,
+        lpmStr,
+        vpmVal: vpmVal == null ? -1 : vpmVal,
+        vpmStr,
         rrPctStr,
         rrPctVal,
         irPctStr,
@@ -4346,7 +4368,7 @@ function badgeEmojiFor(id, meta) {
       colPost.style.minWidth = '140px';
       cg.appendChild(colPost);
 
-      ['100px', '60px', '60px', '60px', '60px', '75px', '75px', '100px'].forEach((w) => {
+      ['100px', '60px', '60px', '60px', '60px', '75px', '75px', '75px', '75px', '100px'].forEach((w) => {
         const c = document.createElement('col');
         c.style.width = w;
         c.style.maxWidth = w;
@@ -4368,6 +4390,8 @@ function badgeEmojiFor(id, meta) {
         ['likes', '👍'],
         ['remixes', '🌀'],
         ['comments', '💬'],
+        ['lpm', 'LPM'],
+        ['vpm', 'VPM'],
         ['rr', 'RR %'],
         ['ir', 'IR %'],
         ['expiring', 'Expires'],
@@ -4376,6 +4400,8 @@ function badgeEmojiFor(id, meta) {
         th.dataset.key = key;
         th.textContent = label;
         if (key === 'prompt') th.title = 'Prompt';
+        if (key === 'lpm') th.title = 'Likes per minute since post';
+        if (key === 'vpm') th.title = 'Views per minute since post';
         Object.assign(th.style, {
           background: 'rgba(24,24,24,0.88)',
           textAlign: key === 'post' ? 'left' : (key === 'prompt' ? 'center' : 'right'),
@@ -4663,6 +4689,8 @@ async function renderAnalyzeTable(force = false) {
       const tdLikes = mkTdNum(r.likes);
       const tdRemixes = mkTdNum(r.remixes);
       const tdComments = mkTdNum(r.comments);
+      const tdLPM = mkTdNum(r.lpmStr || '—');
+      const tdVPM = mkTdNum(r.vpmStr || '—');
       const tdRR = mkTdNum(r.rrPctStr || '—');
       const tdIR = mkTdNum(r.irPctStr || '—');
       const expStr = fmtHoursMinutesRemaining(r.expiringMin);
@@ -4675,6 +4703,8 @@ async function renderAnalyzeTable(force = false) {
       tr.appendChild(tdLikes);
       tr.appendChild(tdRemixes);
       tr.appendChild(tdComments);
+      tr.appendChild(tdLPM);
+      tr.appendChild(tdVPM);
       tr.appendChild(tdRR);
       tr.appendChild(tdIR);
       tr.appendChild(tdExp);
@@ -4792,6 +4822,8 @@ async function renderAnalyzeTable(force = false) {
 	      else if (key === 'likes') primary = (a.likes - b.likes) * dir;
 	      else if (key === 'remixes') primary = (a.remixes - b.remixes) * dir;
 	      else if (key === 'comments') primary = (a.comments - b.comments) * dir;
+	      else if (key === 'lpm') primary = ((a.lpmVal ?? -1) - (b.lpmVal ?? -1)) * dir;
+	      else if (key === 'vpm') primary = ((a.vpmVal ?? -1) - (b.vpmVal ?? -1)) * dir;
 	      else if (key === 'rr') primary = ((a.rrPctVal ?? -1) - (b.rrPctVal ?? -1)) * dir;
 	      else if (key === 'ir') primary = ((a.irPctVal ?? -1) - (b.irPctVal ?? -1)) * dir;
 	      else if (key === 'expiring') primary = (a.expiringMin - b.expiringMin) * dir;
