@@ -3100,13 +3100,13 @@
         <span>Prompt</span>
         <textarea data-uvd-compose-prompt="1" placeholder="Describe your video..."></textarea>
       </label>
-      <label class="uvd-field">
-        <span>Model</span>
-        <select data-uvd-compose-model="1">
-          ${modelOptionsHtml}
-        </select>
-      </label>
       <div class="uvd-field-grid">
+        <label class="uvd-field">
+          <span>Model</span>
+          <select data-uvd-compose-model="1">
+            ${modelOptionsHtml}
+          </select>
+        </label>
         <label class="uvd-field">
           <span>Duration</span>
           <select data-uvd-compose-duration="1">
@@ -3116,24 +3116,17 @@
             <option value="25">25s</option>
           </select>
         </label>
-        <label class="uvd-field">
-          <span>Generations</span>
-          <input type="number" data-uvd-compose-gens="1" min="1" step="1" />
-        </label>
       </div>
       <div class="uvd-field-grid">
+        <label class="uvd-field">
+          <span>Gens</span>
+          <input type="number" data-uvd-compose-gens="1" min="1" step="1" />
+        </label>
         <label class="uvd-field">
           <span>Orientation</span>
           <select data-uvd-compose-orientation="1">
             <option value="portrait">Portrait</option>
             <option value="landscape">Landscape</option>
-          </select>
-        </label>
-        <label class="uvd-field">
-          <span>Size</span>
-          <select data-uvd-compose-size="1">
-            <option value="small">Standard</option>
-            <option value="large">High</option>
           </select>
         </label>
       </div>
@@ -3142,6 +3135,13 @@
           <span>Style</span>
           <select data-uvd-compose-style="1">
             ${styleOptionsHtml}
+          </select>
+        </label>
+        <label class="uvd-field">
+          <span>Size</span>
+          <select data-uvd-compose-size="1">
+            <option value="small">Standard</option>
+            <option value="large">High</option>
           </select>
         </label>
       </div>
