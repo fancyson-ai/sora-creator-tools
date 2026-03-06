@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Sora Creator Tools – Sora Video Stats, Post Analytics, Views Tracker",
+  "name": "Sora Creator Tools",
   "version": "2.0.0",
   "description": "Unofficial community overlays and analytics for Sora creators. Not affiliated with or endorsed by OpenAI.",
   "icons": {
