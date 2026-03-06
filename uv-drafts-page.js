@@ -2320,7 +2320,7 @@
     uvDraftsComposerSource = nextSource;
 
     // Auto-populate cameos from source draft
-    populateCameosFromSource(source);
+    populateCameosFromSource(nextSource);
 
     if (uvDraftsComposerEl) {
       const sourcePanelEl = uvDraftsComposerEl.querySelector('[data-uvd-compose-source-panel="1"]');
@@ -2611,7 +2611,10 @@
     composerCameoReplacements = {};
     if (source?.cameo_profiles && Array.isArray(source.cameo_profiles)) {
       for (const cp of source.cameo_profiles) {
-        const userId = typeof cp === 'string' ? cp : cp?.user_id || cp?.id || '';
+        const rawId = typeof cp === 'string'
+          ? cp
+          : cp?.user_id || cp?.id || cp?.username || cp?.handle || cp?.name || cp?.user?.id || cp?.user?.username || cp?.user?.handle || '';
+        const userId = String(rawId || '').trim().replace(/^@/, '');
         if (userId && !composerCameoIds.includes(userId)) {
           composerCameoIds.push(userId);
         }
