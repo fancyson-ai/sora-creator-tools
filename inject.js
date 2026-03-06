@@ -57,7 +57,7 @@
   const MIN_PER_H = 60;
   const MIN_PER_D = 1440;
   const MIN_PER_Y = 525600;
-  const HOT_FLAME_MAX_AGE_MIN = 24 * MIN_PER_H; // 4/5 flames only apply within first 24h
+  const HOT_FLAME_MAX_AGE_MIN = 3 * MIN_PER_D; // Flames apply within first 3 days
   const ANALYZE_EXPIRES_WINDOW_MIN = 24 * MIN_PER_H; // Expires column always counts down to 24h post age
 
   // Debug toggle for characters
@@ -850,6 +850,14 @@
     const l = 42 - 12 * t;
     return `hsla(${h.toFixed(1)}, 100%, ${l.toFixed(1)}%, 0.85)`;
   }
+  function colorForFlameCount(flameCount) {
+    if (!Number.isFinite(flameCount) || flameCount <= 0) return null;
+    if (flameCount >= 4) return colorForAgeMin(0);
+    if (flameCount === 3) return colorForAgeMin(3 * MIN_PER_H);
+    if (flameCount === 2) return colorForAgeMin(9 * MIN_PER_H);
+    if (flameCount === 1) return colorForAgeMin(15 * MIN_PER_H);
+    return null;
+  }
   function isNearWholeDay(ageMin, windowMin = 15) {
     if (!Number.isFinite(ageMin) || ageMin < 0) return false;
     const nearest = Math.round(ageMin / 1440) * 1440;
@@ -857,30 +865,23 @@
     return nearest >= 1440 && diff <= windowMin;
   }
   const greenEmblemColor = () => 'hsla(120, 85%, 32%, 0.92)';
-  const FIRE_THRESHOLDS = [
-    { maxHours: 6, flames: '🔥🔥🔥' },
-    { maxHours: 12, flames: '🔥🔥' },
-    { maxHours: 18, flames: '🔥' },
-  ];
-  function fireForAge(ageMin) {
-    if (!Number.isFinite(ageMin)) return '';
-    const h = ageMin / MIN_PER_H;
-    for (const rule of FIRE_THRESHOLDS) {
-      if (h < rule.maxHours) return rule.flames;
-    }
-    return '';
+  function flameCountByRate(likes, ageMin) {
+    if (!Number.isFinite(ageMin) || ageMin <= 0 || ageMin >= HOT_FLAME_MAX_AGE_MIN) return 0;
+    const l = Number(likes);
+    if (!Number.isFinite(l) || l < 0) return 0;
+    if (l < 10) return 0;
+    if (l >= (5 * ageMin) / 6) return 5;
+    if (ageMin >= 10 && l >= (4 * ageMin) / 6) return 4;
+    if (l >= (3 * ageMin) / 6) return 3;
+    if (l >= (2 * ageMin) / 6) return 2;
+    if (l >= ageMin / 6) return 1;
+    return 0;
   }
   function isSuperHotByRate(likes, ageMin) {
-    if (!Number.isFinite(ageMin) || ageMin <= 0 || ageMin >= HOT_FLAME_MAX_AGE_MIN) return false;
-    const l = Number(likes);
-    if (!Number.isFinite(l) || l < 0) return false;
-    return l >= 10 && l >= (5 * ageMin) / 6;
+    return flameCountByRate(likes, ageMin) === 5;
   }
   function isVeryHotByRate(likes, ageMin) {
-    if (!Number.isFinite(ageMin) || ageMin < 10 || ageMin >= HOT_FLAME_MAX_AGE_MIN) return false;
-    const l = Number(likes);
-    if (!Number.isFinite(l) || l < 0) return false;
-    return l >= (4 * ageMin) / 6;
+    return flameCountByRate(likes, ageMin) === 4;
   }
 
   // Tooltip (1s delayed, cursor-follow)
@@ -1528,11 +1529,13 @@
   }
 
   function badgeStateFor(likes, ageMin) {
+    const flameCount = flameCountByRate(likes, ageMin);
     return {
-      isSuperHot: isSuperHotByRate(likes, ageMin),
-      isVeryHot: isVeryHotByRate(likes, ageMin),
+      flameCount,
+      isSuperHot: flameCount === 5,
+      isVeryHot: flameCount === 4,
       isNearDay: isNearWholeDay(ageMin),
-      isHot: likes >= 25,
+      isHot: flameCount > 0,
     };
   }
 
@@ -1541,10 +1544,8 @@
     const ageMin = meta.ageMin;
     const likes = idToLikes.get(id) ?? 0;
     const state = badgeStateFor(likes, ageMin);
-    if (state.isSuperHot) return colorForAgeMin(0);
-    if (state.isVeryHot) return colorForAgeMin(0);
+    if (state.isHot) return colorForFlameCount(state.flameCount);
     if (state.isNearDay) return greenEmblemColor();
-    if (state.isHot) return colorForAgeMin(ageMin);
     return null;
   }
 function badgeEmojiFor(id, meta) {
@@ -1552,10 +1553,7 @@ function badgeEmojiFor(id, meta) {
     const ageMin = meta.ageMin;
     const likes = idToLikes.get(id) ?? 0;
     const state = badgeStateFor(likes, ageMin);
-    if (state.isSuperHot) return '🔥🔥🔥🔥🔥';
-    if (state.isVeryHot) return '🔥🔥🔥🔥';
-    if (state.isHot) return fireForAge(ageMin);
-    return '';
+    return state.flameCount > 0 ? '🔥'.repeat(state.flameCount) : '';
   }
 
   function likesPerMinute(likes, ageMin) {
