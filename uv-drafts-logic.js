@@ -9,6 +9,7 @@
   const GENS_COUNT_MIN = 1;
   const GENS_COUNT_MAX_DEFAULT = 10;
   const GENS_COUNT_MAX_ULTRA = 40;
+  const DEFAULT_PROMPT_QUEUE_MAX = 20;
   const ACTIVE_PENDING_STATUSES = new Set([
     'pending',
     'queued',
@@ -594,6 +595,14 @@
       const seed = overrides.seed.replace(/[^\d]/g, '').slice(0, 10);
       if (seed) out.seed = seed;
     }
+    const durationSeconds = Number(overrides.durationSeconds);
+    if (Number.isFinite(durationSeconds) && durationSeconds > 0) {
+      out.durationSeconds = Math.floor(durationSeconds);
+    }
+    const nFrames = Number(overrides.nFrames);
+    if (Number.isFinite(nFrames) && nFrames > 0) {
+      out.nFrames = Math.floor(nFrames);
+    }
     return Object.keys(out).length ? out : null;
   }
 
@@ -659,6 +668,28 @@
         changed = true;
       }
 
+      if (Number.isFinite(normalized.durationSeconds) && normalized.durationSeconds > 0) {
+        if (creationConfig.duration_seconds !== normalized.durationSeconds) {
+          creationConfig.duration_seconds = normalized.durationSeconds;
+          changed = true;
+        }
+        if (obj.duration_seconds !== normalized.durationSeconds) {
+          obj.duration_seconds = normalized.durationSeconds;
+          changed = true;
+        }
+      }
+
+      if (Number.isFinite(normalized.nFrames) && normalized.nFrames > 0) {
+        if (creationConfig.n_frames !== normalized.nFrames) {
+          creationConfig.n_frames = normalized.nFrames;
+          changed = true;
+        }
+        if (obj.n_frames !== normalized.nFrames) {
+          obj.n_frames = normalized.nFrames;
+          changed = true;
+        }
+      }
+
       if (normalized.mode && obj.mode !== normalized.mode) {
         obj.mode = normalized.mode;
         changed = true;
@@ -685,6 +716,211 @@
     } catch {
       return bodyString;
     }
+  }
+
+  function normalizeQueuePrompt(value) {
+    if (typeof value !== 'string') return '';
+    return value.trim();
+  }
+
+  function parsePromptJsonl(text, options) {
+    const raw = typeof text === 'string' ? text : '';
+    const providedMax = Number(options && options.maxPrompts);
+    const maxPrompts = Number.isFinite(providedMax) && providedMax > 0
+      ? Math.floor(providedMax)
+      : DEFAULT_PROMPT_QUEUE_MAX;
+    const lines = raw.split(/\r?\n/);
+    const prompts = [];
+    const errors = [];
+    let invalidCount = 0;
+    let truncatedCount = 0;
+    let nonEmptyLines = 0;
+
+    for (let i = 0; i < lines.length; i += 1) {
+      const lineNumber = i + 1;
+      const line = String(lines[i] || '');
+      if (!line.trim()) continue;
+      nonEmptyLines += 1;
+
+      let parsed = null;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        invalidCount += 1;
+        errors.push({ line: lineNumber, reason: 'Invalid JSON' });
+        continue;
+      }
+
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        invalidCount += 1;
+        errors.push({ line: lineNumber, reason: 'Line must be a JSON object' });
+        continue;
+      }
+
+      const prompt = normalizeQueuePrompt(parsed.prompt);
+      if (!prompt) {
+        invalidCount += 1;
+        errors.push({ line: lineNumber, reason: 'Missing non-empty "prompt" string' });
+        continue;
+      }
+
+      if (prompts.length >= maxPrompts) {
+        truncatedCount += 1;
+        continue;
+      }
+      prompts.push(prompt);
+    }
+
+    return {
+      maxPrompts,
+      prompts,
+      acceptedCount: prompts.length,
+      invalidCount,
+      truncatedCount,
+      nonEmptyLines,
+      errors,
+    };
+  }
+
+  function normalizePromptQueueState(raw) {
+    const promptsRaw = Array.isArray(raw)
+      ? raw
+      : (Array.isArray(raw && raw.prompts) ? raw.prompts : []);
+    const prompts = [];
+    for (const value of promptsRaw) {
+      const prompt = normalizeQueuePrompt(value);
+      if (!prompt) continue;
+      prompts.push(prompt);
+    }
+
+    const total = prompts.length;
+    const rawIndex = Number(raw && raw.index);
+    let index = Number.isFinite(rawIndex) ? Math.floor(rawIndex) : 0;
+    if (index < 0) index = 0;
+    if (index > total) index = total;
+
+    const createdAtRaw = Number(raw && raw.createdAt);
+    const createdAt = Number.isFinite(createdAtRaw) && createdAtRaw > 0
+      ? Math.floor(createdAtRaw)
+      : Date.now();
+    const rawSelectedIndex = Number(raw && raw.selectedIndex);
+    const selectedDefault = total > 0 ? Math.min(index, total - 1) : 0;
+    let selectedIndex = Number.isFinite(rawSelectedIndex)
+      ? Math.floor(rawSelectedIndex)
+      : selectedDefault;
+    if (total <= 0) {
+      selectedIndex = 0;
+    } else {
+      if (selectedIndex < 0) selectedIndex = 0;
+      if (selectedIndex > total - 1) selectedIndex = total - 1;
+    }
+    const remaining = Math.max(0, total - index);
+
+    return {
+      prompts,
+      index,
+      selectedIndex,
+      total,
+      remaining,
+      createdAt,
+      exhausted: remaining === 0,
+    };
+  }
+
+  function peekCurrentPrompt(queueState) {
+    const current = normalizePromptQueueState(queueState);
+    const prompt = current.remaining > 0
+      ? String(current.prompts[current.index] || '')
+      : '';
+    return {
+      prompt,
+      index: current.index,
+      queue: current,
+      remaining: current.remaining,
+      hasPrompt: !!prompt,
+    };
+  }
+
+  function advancePromptQueue(queueState) {
+    const current = normalizePromptQueueState(queueState);
+    if (current.remaining <= 0) {
+      return {
+        prompt: '',
+        queue: current,
+        consumed: false,
+        remaining: 0,
+      };
+    }
+
+    const prompt = current.prompts[current.index];
+    const queue = normalizePromptQueueState({
+      prompts: current.prompts,
+      index: current.index + 1,
+      selectedIndex: current.selectedIndex,
+      createdAt: current.createdAt,
+    });
+
+    return {
+      prompt,
+      queue,
+      consumed: true,
+      remaining: queue.remaining,
+    };
+  }
+
+  function setPromptQueueSelection(queueState, nextSelectedIndex) {
+    const current = normalizePromptQueueState(queueState);
+    if (current.total <= 0) return current;
+    const raw = Number(nextSelectedIndex);
+    let selectedIndex = Number.isFinite(raw)
+      ? Math.floor(raw)
+      : current.selectedIndex;
+    if (selectedIndex < 0) selectedIndex = 0;
+    if (selectedIndex > current.total - 1) selectedIndex = current.total - 1;
+    return normalizePromptQueueState({
+      prompts: current.prompts,
+      index: current.index,
+      selectedIndex,
+      createdAt: current.createdAt,
+    });
+  }
+
+  function removePromptAtIndex(queueState, removeIndex) {
+    const current = normalizePromptQueueState(queueState);
+    if (current.total <= 0) return current;
+    const raw = Number(removeIndex);
+    if (!Number.isFinite(raw)) return current;
+    const targetIndex = Math.floor(raw);
+    if (targetIndex < 0 || targetIndex >= current.total) return current;
+
+    const prompts = current.prompts.filter((_, idx) => idx !== targetIndex);
+    let index = current.index;
+    if (targetIndex < current.index) {
+      index -= 1;
+    } else if (targetIndex === current.index && index >= prompts.length) {
+      index = prompts.length;
+    }
+    if (index < 0) index = 0;
+    if (index > prompts.length) index = prompts.length;
+
+    let selectedIndex = current.selectedIndex;
+    if (targetIndex < selectedIndex) {
+      selectedIndex -= 1;
+    } else if (targetIndex === selectedIndex) {
+      selectedIndex = Math.min(selectedIndex, Math.max(0, prompts.length - 1));
+    }
+    if (prompts.length <= 0) selectedIndex = 0;
+
+    return normalizePromptQueueState({
+      prompts,
+      index,
+      selectedIndex,
+      createdAt: current.createdAt,
+    });
+  }
+
+  function consumeNextPrompt(queueState) {
+    return advancePromptQueue(queueState);
   }
 
   function normalizeViewState(raw) {
@@ -740,6 +976,7 @@
     GENS_COUNT_MIN,
     GENS_COUNT_MAX_DEFAULT,
     GENS_COUNT_MAX_ULTRA,
+    DEFAULT_PROMPT_QUEUE_MAX,
     getDraftPreviewText,
     mergeDraftListById,
     appendUniqueDrafts,
@@ -752,6 +989,13 @@
     matchesDraftSearchFilters,
     draftMatchesSearchQuery,
     applyCreateBodyOverrides,
+    parsePromptJsonl,
+    normalizePromptQueueState,
+    peekCurrentPrompt,
+    advancePromptQueue,
+    setPromptQueueSelection,
+    removePromptAtIndex,
+    consumeNextPrompt,
     modeRequiresComposerSource,
     getGensCountMax,
     clampGensCount,

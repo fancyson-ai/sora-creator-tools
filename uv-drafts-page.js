@@ -1006,6 +1006,8 @@
   const UV_DRAFTS_COMPOSER_KEY = 'SORA_UV_DRAFTS_COMPOSER_V1';
   const UV_PENDING_COMPOSE_KEY = 'SORA_UV_PENDING_COMPOSE_V1';
   const UV_PENDING_CREATE_OVERRIDES_KEY = 'SORA_UV_PENDING_CREATE_OVERRIDES_V1';
+  const UV_PENDING_CREATE_QUEUE_KEY = 'SORA_UV_PENDING_CREATE_QUEUE_V1';
+  const UV_PENDING_CREATE_BATCH_KEY = 'SORA_UV_PENDING_CREATE_BATCH_V1';
 
   const uvDraftsLogic = window.SoraUVDraftsLogic || null;
 
@@ -1440,6 +1442,320 @@
     try {
       sessionStorage.removeItem(UV_PENDING_CREATE_OVERRIDES_KEY);
     } catch {}
+  }
+
+  function normalizePromptQueueState(raw) {
+    if (uvDraftsLogic && typeof uvDraftsLogic.normalizePromptQueueState === 'function') {
+      return uvDraftsLogic.normalizePromptQueueState(raw);
+    }
+    const promptsRaw = Array.isArray(raw)
+      ? raw
+      : (Array.isArray(raw && raw.prompts) ? raw.prompts : []);
+    const prompts = promptsRaw
+      .map((item) => (typeof item === 'string' ? item.trim() : ''))
+      .filter(Boolean);
+    const total = prompts.length;
+    const rawIndex = Number(raw && raw.index);
+    let index = Number.isFinite(rawIndex) ? Math.floor(rawIndex) : 0;
+    if (index < 0) index = 0;
+    if (index > total) index = total;
+    const rawSelectedIndex = Number(raw && raw.selectedIndex);
+    const selectedDefault = total > 0 ? Math.min(index, total - 1) : 0;
+    let selectedIndex = Number.isFinite(rawSelectedIndex)
+      ? Math.floor(rawSelectedIndex)
+      : selectedDefault;
+    if (total <= 0) {
+      selectedIndex = 0;
+    } else {
+      if (selectedIndex < 0) selectedIndex = 0;
+      if (selectedIndex > total - 1) selectedIndex = total - 1;
+    }
+    const createdAtRaw = Number(raw && raw.createdAt);
+    const createdAt = Number.isFinite(createdAtRaw) && createdAtRaw > 0
+      ? Math.floor(createdAtRaw)
+      : Date.now();
+    const remaining = Math.max(0, total - index);
+    return {
+      prompts,
+      index,
+      selectedIndex,
+      total,
+      remaining,
+      createdAt,
+      exhausted: remaining === 0,
+    };
+  }
+
+  function parsePromptJsonl(text, options) {
+    if (uvDraftsLogic && typeof uvDraftsLogic.parsePromptJsonl === 'function') {
+      return uvDraftsLogic.parsePromptJsonl(text, options);
+    }
+    const maxPrompts = Math.max(1, Math.floor(Number(options && options.maxPrompts) || 20));
+    const lines = String(text || '').split(/\r?\n/);
+    const prompts = [];
+    const errors = [];
+    let invalidCount = 0;
+    let truncatedCount = 0;
+    let nonEmptyLines = 0;
+    for (let i = 0; i < lines.length; i += 1) {
+      const line = String(lines[i] || '');
+      if (!line.trim()) continue;
+      nonEmptyLines += 1;
+      let parsed = null;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        invalidCount += 1;
+        errors.push({ line: i + 1, reason: 'Invalid JSON' });
+        continue;
+      }
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        invalidCount += 1;
+        errors.push({ line: i + 1, reason: 'Line must be a JSON object' });
+        continue;
+      }
+      const prompt = typeof parsed.prompt === 'string' ? parsed.prompt.trim() : '';
+      if (!prompt) {
+        invalidCount += 1;
+        errors.push({ line: i + 1, reason: 'Missing non-empty "prompt" string' });
+        continue;
+      }
+      if (prompts.length >= maxPrompts) {
+        truncatedCount += 1;
+        continue;
+      }
+      prompts.push(prompt);
+    }
+    return {
+      maxPrompts,
+      prompts,
+      acceptedCount: prompts.length,
+      invalidCount,
+      truncatedCount,
+      nonEmptyLines,
+      errors,
+    };
+  }
+
+  function loadPendingCreateQueue() {
+    try {
+      const raw = sessionStorage.getItem(UV_PENDING_CREATE_QUEUE_KEY);
+      if (!raw) return normalizePromptQueueState(null);
+      const parsed = JSON.parse(raw);
+      return normalizePromptQueueState(parsed);
+    } catch {
+      return normalizePromptQueueState(null);
+    }
+  }
+
+  function savePendingCreateQueue(queueState) {
+    const normalized = normalizePromptQueueState(queueState);
+    if (normalized.total <= 0 || normalized.remaining <= 0) {
+      try {
+        sessionStorage.removeItem(UV_PENDING_CREATE_QUEUE_KEY);
+      } catch {}
+      return normalized;
+    }
+    try {
+      sessionStorage.setItem(UV_PENDING_CREATE_QUEUE_KEY, JSON.stringify({
+        prompts: normalized.prompts,
+        index: normalized.index,
+        selectedIndex: normalized.selectedIndex,
+        createdAt: normalized.createdAt,
+      }));
+    } catch {}
+    return normalized;
+  }
+
+  function clearPendingCreateQueue() {
+    try {
+      sessionStorage.removeItem(UV_PENDING_CREATE_QUEUE_KEY);
+    } catch {}
+    return normalizePromptQueueState(null);
+  }
+
+  function peekPendingCreateQueuePrompt() {
+    const current = loadPendingCreateQueue();
+    const hasPeeker = uvDraftsLogic && typeof uvDraftsLogic.peekCurrentPrompt === 'function';
+    const out = hasPeeker
+      ? uvDraftsLogic.peekCurrentPrompt(current)
+      : (() => {
+          if (current.remaining <= 0) {
+            return { prompt: '', queue: current, index: current.index, remaining: 0, hasPrompt: false };
+          }
+          return {
+            prompt: current.prompts[current.index],
+            queue: current,
+            index: current.index,
+            remaining: current.remaining,
+            hasPrompt: true,
+          };
+        })();
+    const queue = normalizePromptQueueState(out && out.queue);
+    return {
+      prompt: String(out && out.prompt || ''),
+      queue,
+      index: Number.isFinite(Number(out && out.index)) ? Math.floor(Number(out.index)) : queue.index,
+      hasPrompt: !!(out && out.hasPrompt),
+      remaining: queue.remaining,
+    };
+  }
+
+  function advancePendingCreateQueuePrompt() {
+    const current = loadPendingCreateQueue();
+    const hasAdvancer = uvDraftsLogic && typeof uvDraftsLogic.advancePromptQueue === 'function';
+    const out = hasAdvancer
+      ? uvDraftsLogic.advancePromptQueue(current)
+      : (() => {
+          if (current.remaining <= 0) {
+            return { prompt: '', queue: current, consumed: false, remaining: 0 };
+          }
+          const nextQueue = normalizePromptQueueState({
+            prompts: current.prompts,
+            index: current.index + 1,
+            selectedIndex: current.selectedIndex,
+            createdAt: current.createdAt,
+          });
+          return {
+            prompt: current.prompts[current.index],
+            queue: nextQueue,
+            consumed: true,
+            remaining: nextQueue.remaining,
+          };
+        })();
+    const queue = normalizePromptQueueState(out && out.queue);
+    if (queue.remaining > 0) savePendingCreateQueue(queue);
+    else clearPendingCreateQueue();
+    return {
+      prompt: String(out && out.prompt || ''),
+      queue,
+      consumed: !!(out && out.consumed),
+      remaining: queue.remaining,
+    };
+  }
+
+  function consumePendingCreateQueuePrompt() {
+    return advancePendingCreateQueuePrompt();
+  }
+
+  function setPendingCreateQueueSelection(nextSelectedIndex) {
+    const current = loadPendingCreateQueue();
+    const hasSetter = uvDraftsLogic && typeof uvDraftsLogic.setPromptQueueSelection === 'function';
+    const queue = normalizePromptQueueState(
+      hasSetter
+        ? uvDraftsLogic.setPromptQueueSelection(current, nextSelectedIndex)
+        : {
+            ...current,
+            selectedIndex: Number(nextSelectedIndex),
+          }
+    );
+    if (queue.remaining > 0) savePendingCreateQueue(queue);
+    else clearPendingCreateQueue();
+    return queue;
+  }
+
+  function removePendingCreateQueueAtIndex(indexToRemove) {
+    const current = loadPendingCreateQueue();
+    const targetIndex = Number.isFinite(Number(indexToRemove))
+      ? Math.floor(Number(indexToRemove))
+      : current.selectedIndex;
+    const hasRemover = uvDraftsLogic && typeof uvDraftsLogic.removePromptAtIndex === 'function';
+    const queue = normalizePromptQueueState(
+      hasRemover
+        ? uvDraftsLogic.removePromptAtIndex(current, targetIndex)
+        : {
+            prompts: current.prompts.filter((_, idx) => idx !== targetIndex),
+            index: current.index,
+            selectedIndex: current.selectedIndex,
+            createdAt: current.createdAt,
+          }
+    );
+    if (queue.remaining > 0) savePendingCreateQueue(queue);
+    else clearPendingCreateQueue();
+    return queue;
+  }
+
+  function normalizePendingCreateBatchState(raw) {
+    const defaultState = {
+      status: 'idle',
+      createdAt: 0,
+      startedAt: 0,
+      completedAt: 0,
+      awaitingRequest: false,
+      settings: null,
+      progress: { submitted: 0, total: 0 },
+      lastError: '',
+    };
+    if (!raw || typeof raw !== 'object') return defaultState;
+    const statusRaw = String(raw.status || '').trim().toLowerCase();
+    const allowedStatus = new Set(['idle', 'armed', 'running', 'paused_error', 'completed']);
+    const status = allowedStatus.has(statusRaw) ? statusRaw : 'idle';
+    const createdAt = Number.isFinite(Number(raw.createdAt)) ? Math.floor(Number(raw.createdAt)) : 0;
+    const startedAt = Number.isFinite(Number(raw.startedAt)) ? Math.floor(Number(raw.startedAt)) : 0;
+    const completedAt = Number.isFinite(Number(raw.completedAt)) ? Math.floor(Number(raw.completedAt)) : 0;
+    const awaitingRequest = raw.awaitingRequest === true;
+    const settings = raw.settings && typeof raw.settings === 'object'
+      ? {
+          model: typeof raw.settings.model === 'string' ? raw.settings.model : '',
+          durationSeconds: Number.isFinite(Number(raw.settings.durationSeconds)) ? Math.max(0, Math.floor(Number(raw.settings.durationSeconds))) : 0,
+          gensCount: Number.isFinite(Number(raw.settings.gensCount)) ? Math.max(0, Math.floor(Number(raw.settings.gensCount))) : 0,
+          orientation: typeof raw.settings.orientation === 'string' ? raw.settings.orientation : '',
+          resolution: typeof raw.settings.resolution === 'string' ? raw.settings.resolution : '',
+          style: typeof raw.settings.style === 'string' ? raw.settings.style : '',
+          seed: typeof raw.settings.seed === 'string' ? raw.settings.seed : '',
+        }
+      : null;
+    const submitted = Number.isFinite(Number(raw.progress && raw.progress.submitted))
+      ? Math.max(0, Math.floor(Number(raw.progress.submitted)))
+      : 0;
+    const total = Number.isFinite(Number(raw.progress && raw.progress.total))
+      ? Math.max(0, Math.floor(Number(raw.progress.total)))
+      : 0;
+    return {
+      status,
+      createdAt,
+      startedAt,
+      completedAt,
+      awaitingRequest,
+      settings,
+      progress: {
+        submitted: Math.min(submitted, total || submitted),
+        total: Math.max(total, submitted),
+      },
+      lastError: typeof raw.lastError === 'string' ? raw.lastError : '',
+    };
+  }
+
+  function loadPendingCreateBatchState() {
+    try {
+      const raw = sessionStorage.getItem(UV_PENDING_CREATE_BATCH_KEY);
+      if (!raw) return normalizePendingCreateBatchState(null);
+      const parsed = JSON.parse(raw);
+      return normalizePendingCreateBatchState(parsed);
+    } catch {
+      return normalizePendingCreateBatchState(null);
+    }
+  }
+
+  function savePendingCreateBatchState(nextState) {
+    const normalized = normalizePendingCreateBatchState(nextState);
+    if (normalized.status === 'idle') {
+      try {
+        sessionStorage.removeItem(UV_PENDING_CREATE_BATCH_KEY);
+      } catch {}
+      return normalized;
+    }
+    try {
+      sessionStorage.setItem(UV_PENDING_CREATE_BATCH_KEY, JSON.stringify(normalized));
+    } catch {}
+    return normalized;
+  }
+
+  function clearPendingCreateBatchState() {
+    try {
+      sessionStorage.removeItem(UV_PENDING_CREATE_BATCH_KEY);
+    } catch {}
+    return normalizePendingCreateBatchState(null);
   }
 
   function applyComposerOverridesToCreateBody(bodyString, overrides) {
@@ -2619,16 +2935,27 @@
     renderCameoList();
   }
 
-  // ---- Direct API: startComposerFlow ----
-
-  async function startComposerFlow(mode, statusEl) {
+  function startComposerFlow(mode, statusEl) {
     const state = normalizeUVDraftsComposerState(uvDraftsComposerState || defaultUVDraftsComposerState());
     uvDraftsComposerState = state;
     persistUVDraftsComposerState();
 
-    const prompt = state.prompt.trim();
+    const manualPrompt = state.prompt.trim();
+    const style = state.style.trim();
     const seed = state.seed.trim();
     const source = uvDraftsComposerSource;
+    const queueState = mode === 'compose' ? loadPendingCreateQueue() : normalizePromptQueueState(null);
+    const batchState = mode === 'compose'
+      ? loadPendingCreateBatchState()
+      : normalizePendingCreateBatchState(null);
+    const queueBatchActive = mode === 'compose' && ['running', 'armed'].includes(batchState.status);
+    const selectedQueuePrompt = mode === 'compose' && queueState.total > 0
+      ? String(queueState.prompts[queueState.selectedIndex] || '').trim()
+      : '';
+    const useSingleQueuedPrompt = mode === 'compose' && queueState.remaining > 0 && !queueBatchActive;
+    const prompt = useSingleQueuedPrompt
+      ? (selectedQueuePrompt || manualPrompt)
+      : manualPrompt;
 
     const setStatus = (text, tone = 'info') => {
       if (!statusEl) return;
@@ -2648,133 +2975,112 @@
       setStatus('Drop a draft/video source first.', 'error');
       return;
     }
-
-    if (!prompt && mode === 'compose') {
-      setStatus('Enter a prompt.', 'error');
+    if (mode === 'compose' && useSingleQueuedPrompt && !prompt) {
+      setStatus('Selected queued prompt is empty.', 'error');
       return;
     }
 
-    // Update model override for api.js compatibility
+    const createOverrides = {
+      prompt: prompt || null,
+      model: normalizeComposerModel(state.model) || null,
+      orientation: state.orientation || null,
+      resolution: state.resolution || null,
+      style: style || null,
+      seed: seed || null,
+      mode: mode !== 'compose' ? mode : null,
+      durationSeconds: Number(state.durationSeconds) || null,
+      nFrames: Number(state.durationSeconds) > 0 ? Math.round(Number(state.durationSeconds) * SORA_DEFAULT_FPS) : null,
+      gensCount: clampGensCount(state.gensCount),
+      firstFrameImage: uvDraftsComposerFirstFrame?.object_url || null,
+    };
+    savePendingCreateOverrides(createOverrides);
     if (state.model) modelOverride = normalizeComposerModel(state.model) || modelOverride;
     persistComposerDurationOverride(state.durationSeconds);
     persistComposerGensCount(state.gensCount);
 
-    // Build the /nf/create request body
-    const nFrames = SECONDS_TO_FRAMES[state.durationSeconds] || 300;
-    const body = {
-      kind: 'video',
-      prompt: prompt || source?.prompt || source?.title || '',
-      model: normalizeComposerModel(state.model) || composerModels[0]?.value || 'sy_8',
-      orientation: state.orientation || 'portrait',
-      size: state.size || 'small',
-      n_frames: nFrames,
+    const sourceHint = getComposerSourceHint(source);
+    const makePromptWithSource = (basePrompt, includeSource = false) => {
+      const trimmed = (basePrompt || '').trim();
+      if (includeSource && sourceHint) {
+        return trimmed ? `${trimmed}\n\n${sourceHint}` : sourceHint;
+      }
+      return trimmed;
     };
 
-    // Style
-    if (state.style_id) body.style_id = state.style_id;
-
-    // Seed
-    if (seed) body.seed = Number(seed);
-
-    // Cameos
-    if (composerCameoIds.length) body.cameo_ids = [...composerCameoIds];
-    if (Object.keys(composerCameoReplacements).length) {
-      body.cameo_replacements = { ...composerCameoReplacements };
-    }
-
-    // Remix
-    if (mode === 'remix' && source?.id) {
-      body.remix_target_id = source.id;
-    }
-
-    // Extend (storyboard)
+    let promptForRemix = prompt || source?.prompt || source?.title || '';
     if (mode === 'extend') {
-      if (source?.storyboard_id) {
-        body.storyboard_id = source.storyboard_id;
-      } else if (source?.id) {
-        // Fallback: use remix with extend-style prompt
-        body.remix_target_id = source.id;
-        if (!prompt) {
-          body.prompt = 'Extend this video seamlessly with matching style, motion, and framing.';
-        }
-      }
+      promptForRemix = promptForRemix
+        ? `Extend this video seamlessly. ${promptForRemix}`
+        : 'Extend this video seamlessly with matching style, motion, and framing.';
     }
 
-    setStatus('Preparing generation…', 'ok');
-
-    try {
-      // Upload first frame if present
-      let firstFrameFileId = null;
-      if (uvDraftsComposerFirstFrame) {
-        const file = uvDraftsComposerFirstFrame._file;
-        if (file) {
-          setStatus('Uploading first frame…', 'ok');
-          firstFrameFileId = await uploadFirstFrame(file);
-        }
-      }
-      if (firstFrameFileId) {
-        body.inpaint_items = [{ kind: 'file', file_id: firstFrameFileId }];
-      }
-
-      // Get sentinel token
-      setStatus('Generating sentinel token…', 'ok');
-      const sentinel = await getSentinelToken();
-
-      const headers = {
-        'Authorization': capturedAuthToken,
-        'Content-Type': 'application/json',
-        'openai-sentinel-token': sentinel,
-      };
-
-      // Send N parallel generation requests
-      const gensCount = clampGensCount(state.gensCount || 1);
-      setStatus(`Starting ${gensCount} generation(s)…`, 'ok');
-
-      const tasks = [];
-      for (let i = 0; i < gensCount; i++) {
-        tasks.push(
-          fetch('https://sora.chatgpt.com/backend/nf/create', {
-            method: 'POST',
-            headers,
-            body: JSON.stringify(body),
-            __sctDirect: true,
-          }).then(r => r.json())
+    if (mode === 'compose') {
+      const composePrompt = makePromptWithSource(
+        useSingleQueuedPrompt
+          ? prompt
+          : (prompt || source?.prompt || source?.title || ''),
+        !!source && source.type !== 'draft'
+      );
+      if (composePrompt) {
+        sessionStorage.setItem(
+          UV_PENDING_COMPOSE_KEY,
+          JSON.stringify({ prompt: composePrompt, createdAt: Date.now() })
         );
       }
-      const results = await Promise.allSettled(tasks);
-
-      // Extract task IDs and feed into pending draft polling
-      const taskIds = [];
-      const errors = [];
-      for (const r of results) {
-        if (r.status === 'fulfilled' && r.value?.id) {
-          taskIds.push(r.value.id);
-        } else {
-          const errMsg = r.status === 'rejected'
-            ? r.reason?.message || 'Request failed'
-            : r.value?.error || r.value?.detail || 'Unknown error';
-          errors.push(errMsg);
-        }
-      }
-
-      if (taskIds.length) {
-        // Auto-tag: remember workspace for these tasks so completed drafts inherit it
-        if (uvDraftsWorkspaceFilter) {
-          for (const taskId of taskIds) {
-            uvDraftsPendingWorkspaceTags.set(taskId, uvDraftsWorkspaceFilter);
-          }
-        }
-        // Start continuous polling for the new tasks. The v2 endpoint may not
-        // list them immediately, so set a minimum poll count to prevent the
-        // poller from stopping before the backend registers the tasks.
-        uvDraftsPendingMinPolls = 3;
-        continuePendingDraftsPolling();
-        setStatus(`Started ${taskIds.length} generation(s).` + (errors.length ? ` ${errors.length} failed.` : ''), 'ok');
+      if (useSingleQueuedPrompt) {
+        setStatus('Opening native composer with selected queued prompt…', 'ok');
       } else {
-        setStatus('All generations failed: ' + (errors[0] || 'Unknown error'), 'error');
+        setStatus('Opening native composer…', 'ok');
       }
-    } catch (err) {
-      setStatus('Error: ' + (err.message || 'Generation failed'), 'error');
+      window.location.href = 'https://sora.chatgpt.com/drafts';
+      return;
+    }
+
+    if (mode === 'remix') {
+      if (source?.id) {
+        if (promptForRemix) {
+          sessionStorage.setItem('SORA_UV_REDO_PROMPT', promptForRemix);
+        }
+        setStatus('Opening remix…', 'ok');
+        window.location.href = `https://sora.chatgpt.com/d/${source.id}?remix=`;
+        return;
+      }
+      const manualRemixPrompt = makePromptWithSource(
+        promptForRemix || 'Remix this source video with high fidelity to motion and style.',
+        true
+      );
+      if (manualRemixPrompt) {
+        sessionStorage.setItem(
+          UV_PENDING_COMPOSE_KEY,
+          JSON.stringify({ prompt: manualRemixPrompt, createdAt: Date.now() })
+        );
+      }
+      setStatus('Opening composer for manual remix with dropped source…', 'ok');
+      window.location.href = 'https://sora.chatgpt.com/drafts';
+      return;
+    }
+
+    if (mode === 'extend') {
+      if (source?.storyboard_id) {
+        setStatus('Opening storyboard for extension…', 'ok');
+        window.location.href = `https://sora.chatgpt.com/storyboard/${source.storyboard_id}`;
+      } else if (source?.id) {
+        if (promptForRemix) {
+          sessionStorage.setItem('SORA_UV_REDO_PROMPT', promptForRemix);
+        }
+        setStatus('Opening remix as fallback extend flow…', 'ok');
+        window.location.href = `https://sora.chatgpt.com/d/${source.id}?remix=`;
+      } else {
+        const manualExtendPrompt = makePromptWithSource(promptForRemix, true);
+        if (manualExtendPrompt) {
+          sessionStorage.setItem(
+            UV_PENDING_COMPOSE_KEY,
+            JSON.stringify({ prompt: manualExtendPrompt, createdAt: Date.now() })
+          );
+        }
+        setStatus('Opening composer for manual extend with dropped source…', 'ok');
+        window.location.href = 'https://sora.chatgpt.com/drafts';
+      }
     }
   }
 
@@ -2796,6 +3102,31 @@
       <div class="uvd-composer-head">
         <h2>Compose</h2>
         <p>Create from prompt, or drop a draft card to remix or extend.</p>
+      </div>
+      <div class="uvd-jsonl-upload">
+        <div class="uvd-jsonl-upload-actions">
+          <button type="button" data-uvd-jsonl-upload-btn="1">Upload JSONL</button>
+          <button type="button" data-uvd-jsonl-clear-btn="1">Clear Queue</button>
+        </div>
+        <input type="file" accept=".jsonl,application/json,text/plain" data-uvd-jsonl-input="1" hidden />
+        <div class="uvd-jsonl-upload-summary" data-uvd-jsonl-summary="1"></div>
+        <div class="uvd-jsonl-queue-panel" data-uvd-jsonl-queue-panel="1" hidden>
+          <div class="uvd-jsonl-queue-meta" data-uvd-jsonl-queue-meta="1"></div>
+          <div class="uvd-jsonl-queue-controls">
+            <button type="button" data-uvd-jsonl-prev="1">Prev</button>
+            <button type="button" data-uvd-jsonl-next="1">Next</button>
+            <button type="button" data-uvd-jsonl-remove="1">Remove Selected</button>
+          </div>
+          <div class="uvd-jsonl-queue-list" data-uvd-jsonl-list="1"></div>
+          <label class="uvd-field uvd-jsonl-preview-field">
+            <span>Selected Prompt Preview</span>
+            <textarea data-uvd-jsonl-preview="1" readonly></textarea>
+          </label>
+          <div class="uvd-jsonl-batch-actions">
+            <button type="button" data-uvd-jsonl-review="1">Review Batch</button>
+            <button type="button" data-uvd-jsonl-resume="1">Resume Batch</button>
+          </div>
+        </div>
       </div>
       <div class="uvd-dropzone" data-uvd-dropzone="1">
         <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:.45"><rect x="2" y="2" width="20" height="20" rx="2"/><polygon points="10,8 16,12 10,16"/></svg>
@@ -2904,6 +3235,19 @@
     const seedEl = composer.querySelector('[data-uvd-compose-seed="1"]');
     const dropzone = composer.querySelector('[data-uvd-dropzone="1"]');
     const clearSourceBtn = composer.querySelector('[data-uvd-compose-source-clear="1"]');
+    const jsonlUploadBtn = composer.querySelector('[data-uvd-jsonl-upload-btn="1"]');
+    const jsonlClearBtn = composer.querySelector('[data-uvd-jsonl-clear-btn="1"]');
+    const jsonlInputEl = composer.querySelector('[data-uvd-jsonl-input="1"]');
+    const jsonlSummaryEl = composer.querySelector('[data-uvd-jsonl-summary="1"]');
+    const jsonlQueuePanelEl = composer.querySelector('[data-uvd-jsonl-queue-panel="1"]');
+    const jsonlQueueMetaEl = composer.querySelector('[data-uvd-jsonl-queue-meta="1"]');
+    const jsonlQueueListEl = composer.querySelector('[data-uvd-jsonl-list="1"]');
+    const jsonlPreviewEl = composer.querySelector('[data-uvd-jsonl-preview="1"]');
+    const jsonlPrevBtn = composer.querySelector('[data-uvd-jsonl-prev="1"]');
+    const jsonlNextBtn = composer.querySelector('[data-uvd-jsonl-next="1"]');
+    const jsonlRemoveBtn = composer.querySelector('[data-uvd-jsonl-remove="1"]');
+    const jsonlReviewBtn = composer.querySelector('[data-uvd-jsonl-review="1"]');
+    const jsonlResumeBtn = composer.querySelector('[data-uvd-jsonl-resume="1"]');
 
     const syncGensFieldLimits = () => {
       if (!gensEl) return;
@@ -2926,6 +3270,223 @@
       persistUVDraftsComposerState();
       persistComposerGensCount(uvDraftsComposerState.gensCount);
       if (gensEl) gensEl.value = String(uvDraftsComposerState.gensCount);
+    };
+
+    const setPromptFieldValue = (text) => {
+      if (!promptEl) return;
+      const nextText = String(text || '');
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
+      if (setter) setter.call(promptEl, nextText);
+      else promptEl.value = nextText;
+      promptEl.dispatchEvent(new Event('input', { bubbles: true }));
+      promptEl.dispatchEvent(new Event('change', { bubbles: true }));
+    };
+
+    const getBatchSettingsSnapshot = () => {
+      const composerState = normalizeUVDraftsComposerState(uvDraftsComposerState || defaultUVDraftsComposerState());
+      return {
+        model: normalizeComposerModel(modelEl?.value || composerState.model || '') || '',
+        durationSeconds: Number(durationEl?.value || composerState.durationSeconds || 0) || 0,
+        gensCount: clampGensCount(gensEl?.value || composerState.gensCount || 1),
+        orientation: String(orientationEl?.value || composerState.orientation || '').trim(),
+        resolution: String(resolutionEl?.value || composerState.resolution || '').trim(),
+        style: String(styleEl?.value || composerState.style || '').trim(),
+        seed: String(seedEl?.value || composerState.seed || '').trim(),
+      };
+    };
+
+    const setJsonlSummary = (message = '') => {
+      if (!jsonlSummaryEl) return;
+      const queue = loadPendingCreateQueue();
+      const batch = loadPendingCreateBatchState();
+      if (jsonlClearBtn) jsonlClearBtn.disabled = queue.total <= 0;
+
+      if (message) {
+        jsonlSummaryEl.textContent = message;
+        return;
+      }
+
+      if (batch.status === 'running' || batch.status === 'armed') {
+        const submitted = Number(batch.progress?.submitted || 0);
+        const total = Number(batch.progress?.total || queue.total || submitted);
+        jsonlSummaryEl.textContent = `Batch ${batch.status === 'armed' ? 'armed' : 'running'}: ${submitted}/${total} submitted.`;
+        return;
+      }
+      if (batch.status === 'paused_error') {
+        const submitted = Number(batch.progress?.submitted || 0);
+        const total = Number(batch.progress?.total || queue.total || submitted);
+        const reason = batch.lastError ? ` Error: ${batch.lastError}` : '';
+        jsonlSummaryEl.textContent = `Batch paused at ${submitted}/${total}.${reason}`;
+        return;
+      }
+      if (batch.status === 'completed') {
+        const submitted = Number(batch.progress?.submitted || 0);
+        const total = Number(batch.progress?.total || submitted);
+        jsonlSummaryEl.textContent = `Batch completed (${submitted}/${total} submitted).`;
+        return;
+      }
+
+      if (queue.total <= 0) {
+        jsonlSummaryEl.textContent = 'Queue empty. Upload a JSONL file with one {"prompt":"..."} per line.';
+        return;
+      }
+
+      jsonlSummaryEl.textContent = `Queue ready: ${queue.remaining}/${queue.total} prompts remaining.`;
+    };
+
+    const syncPromptFromSelectedQueue = (queueState = null) => {
+      const queue = normalizePromptQueueState(queueState || loadPendingCreateQueue());
+      if (queue.total <= 0) return;
+      const selectedPrompt = String(queue.prompts[queue.selectedIndex] || '').trim();
+      if (!selectedPrompt) return;
+      setPromptFieldValue(selectedPrompt);
+    };
+
+    const renderJsonlQueue = () => {
+      const queue = loadPendingCreateQueue();
+      const batch = loadPendingCreateBatchState();
+      const hasQueue = queue.total > 0;
+
+      if (jsonlQueuePanelEl) jsonlQueuePanelEl.hidden = !hasQueue;
+      if (!hasQueue) {
+        if (jsonlQueueListEl) jsonlQueueListEl.textContent = '';
+        if (jsonlQueueMetaEl) jsonlQueueMetaEl.textContent = '';
+        if (jsonlPreviewEl) jsonlPreviewEl.value = '';
+        if (jsonlPrevBtn) jsonlPrevBtn.disabled = true;
+        if (jsonlNextBtn) jsonlNextBtn.disabled = true;
+        if (jsonlRemoveBtn) jsonlRemoveBtn.disabled = true;
+        if (jsonlReviewBtn) jsonlReviewBtn.disabled = true;
+        if (jsonlResumeBtn) jsonlResumeBtn.disabled = true;
+        return;
+      }
+
+      const selectedPrompt = String(queue.prompts[queue.selectedIndex] || '');
+      const currentLabel = queue.remaining > 0
+        ? `${queue.index + 1}/${queue.total}`
+        : `done/${queue.total}`;
+      if (jsonlQueueMetaEl) {
+        jsonlQueueMetaEl.textContent = `Current ${currentLabel} • Selected ${queue.selectedIndex + 1}/${queue.total}`;
+      }
+      if (jsonlPreviewEl) {
+        jsonlPreviewEl.value = selectedPrompt;
+      }
+      if (jsonlPrevBtn) jsonlPrevBtn.disabled = queue.selectedIndex <= 0;
+      if (jsonlNextBtn) jsonlNextBtn.disabled = queue.selectedIndex >= queue.total - 1;
+      if (jsonlRemoveBtn) jsonlRemoveBtn.disabled = queue.total <= 0;
+      if (jsonlReviewBtn) jsonlReviewBtn.disabled = queue.remaining <= 0;
+      if (jsonlResumeBtn) jsonlResumeBtn.disabled = !(batch.status === 'paused_error' && queue.remaining > 0);
+
+      if (jsonlQueueListEl) {
+        jsonlQueueListEl.textContent = '';
+        const fragment = document.createDocumentFragment();
+        for (let i = 0; i < queue.prompts.length; i += 1) {
+          const item = document.createElement('button');
+          item.type = 'button';
+          item.className = 'uvd-jsonl-item';
+          item.dataset.selected = i === queue.selectedIndex ? 'true' : 'false';
+          item.dataset.current = i === queue.index ? 'true' : 'false';
+          const promptText = String(queue.prompts[i] || '');
+          const clipped = promptText.length > 140 ? `${promptText.slice(0, 140)}...` : promptText;
+          item.textContent = `${i + 1}. ${clipped}`;
+          item.addEventListener('click', () => {
+            setPendingCreateQueueSelection(i);
+            syncPromptFromSelectedQueue();
+            renderJsonlQueue();
+          });
+          fragment.appendChild(item);
+        }
+        jsonlQueueListEl.appendChild(fragment);
+      }
+    };
+
+    const openBatchReviewModal = () => {
+      const queue = loadPendingCreateQueue();
+      if (queue.remaining <= 0) {
+        setJsonlSummary('No queued prompts left to review.');
+        renderJsonlQueue();
+        return;
+      }
+
+      syncStateFromFields();
+      const settings = getBatchSettingsSnapshot();
+      const pendingPrompts = queue.prompts.slice(queue.index);
+      const totalJobs = pendingPrompts.length * Math.max(1, Number(settings.gensCount || 1));
+
+      const backdrop = document.createElement('div');
+      backdrop.className = 'uvd-modal-backdrop';
+      const modal = document.createElement('div');
+      modal.className = 'uvd-modal';
+      modal.innerHTML = `
+        <div class="uvd-modal-head">
+          <h3>Review Batch</h3>
+          <p>Confirm queued prompts before launch. UV Drafts batch settings will be applied via create-request overrides.</p>
+        </div>
+        <div class="uvd-jsonl-review-summary">
+          <div><strong>Prompts</strong>: ${pendingPrompts.length}</div>
+          <div><strong>Estimated Generations / Prompt</strong>: ${Math.max(1, Number(settings.gensCount || 1))}</div>
+          <div><strong>Estimated Total Jobs</strong>: ${totalJobs}</div>
+          <div><strong>Override Mode</strong>: Applies UV Drafts model/duration/gens/orientation/resolution/style/seed on each queued create.</div>
+        </div>
+        <div class="uvd-jsonl-review-list"></div>
+        <div class="uvd-modal-footer">
+          <button type="button" class="uvd-modal-btn" data-uvd-review-cancel="1">Cancel</button>
+          <button type="button" class="uvd-modal-btn is-primary" data-uvd-review-start="1">Start Batch</button>
+        </div>
+      `;
+
+      const reviewList = modal.querySelector('.uvd-jsonl-review-list');
+      if (reviewList) {
+        for (let i = 0; i < pendingPrompts.length; i += 1) {
+          const row = document.createElement('div');
+          row.className = 'uvd-jsonl-review-item';
+          const promptText = String(pendingPrompts[i] || '');
+          row.textContent = `${queue.index + i + 1}. ${promptText}`;
+          reviewList.appendChild(row);
+        }
+      }
+
+      const close = () => {
+        try { backdrop.remove(); } catch {}
+      };
+      modal.querySelector('[data-uvd-review-cancel="1"]')?.addEventListener('click', close);
+      modal.querySelector('[data-uvd-review-start="1"]')?.addEventListener('click', () => {
+        const now = Date.now();
+        persistComposerDurationOverride(settings.durationSeconds);
+        persistComposerGensCount(settings.gensCount);
+        savePendingCreateBatchState({
+          status: 'armed',
+          createdAt: now,
+          startedAt: 0,
+          completedAt: 0,
+          awaitingRequest: false,
+          settings,
+          progress: {
+            submitted: 0,
+            total: pendingPrompts.length,
+          },
+          lastError: '',
+        });
+
+        const peek = peekPendingCreateQueuePrompt();
+        if (peek.prompt) {
+          sessionStorage.setItem(
+            UV_PENDING_COMPOSE_KEY,
+            JSON.stringify({ prompt: peek.prompt, createdAt: now })
+          );
+        }
+        if (statusEl) {
+          statusEl.textContent = `Batch armed (${pendingPrompts.length} prompts). Opening native composer with UV Drafts request overrides...`;
+          statusEl.dataset.tone = 'ok';
+        }
+        close();
+        window.location.href = 'https://sora.chatgpt.com/drafts';
+      });
+
+      backdrop.addEventListener('click', (event) => {
+        if (event.target === backdrop) close();
+      });
+      backdrop.appendChild(modal);
+      document.documentElement.appendChild(backdrop);
     };
 
     promptEl.value = uvDraftsComposerState.prompt;
@@ -2956,6 +3517,156 @@
     composer.querySelector('[data-uvd-compose-remix="1"]')?.addEventListener('click', () => startComposerFlow('remix', statusEl));
     composer.querySelector('[data-uvd-compose-extend="1"]')?.addEventListener('click', () => startComposerFlow('extend', statusEl));
     clearSourceBtn?.addEventListener('click', () => setComposerSource(null, statusEl));
+    jsonlUploadBtn?.addEventListener('click', () => jsonlInputEl?.click());
+    jsonlClearBtn?.addEventListener('click', () => {
+      clearPendingCreateQueue();
+      clearPendingCreateBatchState();
+      setJsonlSummary('Queue cleared.');
+      renderJsonlQueue();
+      if (statusEl) {
+        statusEl.textContent = 'Prompt queue cleared.';
+        statusEl.dataset.tone = '';
+      }
+    });
+    jsonlPrevBtn?.addEventListener('click', () => {
+      const queue = loadPendingCreateQueue();
+      const updated = setPendingCreateQueueSelection(queue.selectedIndex - 1);
+      syncPromptFromSelectedQueue(updated);
+      renderJsonlQueue();
+      setJsonlSummary();
+    });
+    jsonlNextBtn?.addEventListener('click', () => {
+      const queue = loadPendingCreateQueue();
+      const updated = setPendingCreateQueueSelection(queue.selectedIndex + 1);
+      syncPromptFromSelectedQueue(updated);
+      renderJsonlQueue();
+      setJsonlSummary();
+    });
+    jsonlRemoveBtn?.addEventListener('click', () => {
+      const queue = loadPendingCreateQueue();
+      if (queue.total <= 0) return;
+      const updated = removePendingCreateQueueAtIndex(queue.selectedIndex);
+      const batch = loadPendingCreateBatchState();
+      if (batch.status !== 'idle') {
+        if (updated.total <= 0 || updated.remaining <= 0) {
+          clearPendingCreateBatchState();
+        } else {
+          const submitted = Number(batch.progress?.submitted || 0);
+          savePendingCreateBatchState({
+            ...batch,
+            progress: {
+              submitted,
+              total: Math.max(submitted, submitted + updated.remaining),
+            },
+          });
+        }
+      }
+      syncPromptFromSelectedQueue(updated);
+      renderJsonlQueue();
+      setJsonlSummary(updated.total > 0 ? 'Removed selected prompt from queue.' : 'Queue cleared.');
+    });
+    jsonlReviewBtn?.addEventListener('click', () => {
+      openBatchReviewModal();
+    });
+    jsonlResumeBtn?.addEventListener('click', () => {
+      const batch = loadPendingCreateBatchState();
+      const queue = loadPendingCreateQueue();
+      if (batch.status !== 'paused_error' || queue.remaining <= 0) {
+        setJsonlSummary();
+        renderJsonlQueue();
+        return;
+      }
+      syncStateFromFields();
+      const settings = getBatchSettingsSnapshot();
+      persistComposerDurationOverride(settings.durationSeconds);
+      persistComposerGensCount(settings.gensCount);
+      const now = Date.now();
+      savePendingCreateBatchState({
+        ...batch,
+        status: 'running',
+        awaitingRequest: false,
+        settings,
+        lastError: '',
+        startedAt: batch.startedAt || now,
+        progress: {
+          submitted: Number(batch.progress?.submitted || 0),
+          total: Math.max(
+            Number(batch.progress?.submitted || 0),
+            Number(batch.progress?.submitted || 0) + Number(queue.remaining || 0)
+          ),
+        },
+      });
+      const peek = peekPendingCreateQueuePrompt();
+      if (peek.prompt) {
+        sessionStorage.setItem(
+          UV_PENDING_COMPOSE_KEY,
+          JSON.stringify({ prompt: peek.prompt, createdAt: now })
+        );
+      }
+      if (statusEl) {
+        statusEl.textContent = 'Resuming batch in native composer with UV Drafts request overrides...';
+        statusEl.dataset.tone = 'ok';
+      }
+      renderJsonlQueue();
+      setJsonlSummary();
+      window.location.href = 'https://sora.chatgpt.com/drafts';
+    });
+    jsonlInputEl?.addEventListener('change', async () => {
+      const file = jsonlInputEl.files && jsonlInputEl.files[0];
+      jsonlInputEl.value = '';
+      if (!file) return;
+      try {
+        const text = await file.text();
+        const parsed = parsePromptJsonl(text, { maxPrompts: 20 });
+        if (parsed.acceptedCount <= 0) {
+          const firstError = parsed.errors && parsed.errors[0];
+          const detail = firstError ? ` First error on line ${firstError.line}: ${firstError.reason}.` : '';
+          setJsonlSummary(`No prompts loaded.${detail}`);
+          renderJsonlQueue();
+          if (statusEl) {
+            statusEl.textContent = 'Upload failed: no valid prompts.';
+            statusEl.dataset.tone = 'error';
+          }
+          return;
+        }
+
+        clearPendingCreateBatchState();
+        const queue = savePendingCreateQueue({
+          prompts: parsed.prompts,
+          index: 0,
+          selectedIndex: 0,
+          createdAt: Date.now(),
+        });
+        const firstPrompt = queue.total > 0
+          ? String(queue.prompts[queue.selectedIndex] || '').trim()
+          : '';
+        if (firstPrompt) setPromptFieldValue(firstPrompt);
+
+        const pieces = [`Loaded ${parsed.acceptedCount} prompt${parsed.acceptedCount === 1 ? '' : 's'}.`];
+        if (parsed.invalidCount > 0) pieces.push(`${parsed.invalidCount} invalid.`);
+        if (parsed.truncatedCount > 0) pieces.push(`${parsed.truncatedCount} truncated (cap ${parsed.maxPrompts}).`);
+        setJsonlSummary(pieces.join(' '));
+        renderJsonlQueue();
+
+        if (statusEl) {
+          statusEl.textContent = `Prompt queue ready (${queue.remaining} remaining). Use Create for one selected prompt, or Review Batch for full queue run with UV Drafts request overrides.`;
+          statusEl.dataset.tone = 'ok';
+        }
+      } catch (err) {
+        console.error('[UV Drafts] JSONL upload failed:', err);
+        setJsonlSummary('Failed to read file.');
+        renderJsonlQueue();
+        if (statusEl) {
+          statusEl.textContent = 'Upload failed. Use a valid JSONL file.';
+          statusEl.dataset.tone = 'error';
+        }
+      }
+    });
+
+    const initialQueueState = loadPendingCreateQueue();
+    if (initialQueueState.total > 0) {
+      syncPromptFromSelectedQueue(initialQueueState);
+    }
 
     // Cameo add button
     const cameoInput = composer.querySelector('[data-uvd-cameo-input="1"]');
@@ -3095,6 +3806,8 @@
       }
     });
 
+    renderJsonlQueue();
+    setJsonlSummary();
     setComposerSource(uvDraftsComposerSource, statusEl);
     return composer;
   }
@@ -4880,6 +5593,31 @@
       .uvd-composer { position: fixed; left: 0; top: 0; bottom: 0; width: 390px; box-sizing: border-box; padding: 22px 18px 24px; overflow: auto; border-right: 1px solid var(--uvd-border); background: var(--token-bg-primary, #0a0e18); z-index: 2; }
       .uvd-composer-head h2 { margin: 0; font-size: 52px; line-height: .92; letter-spacing: -0.03em; color: var(--uvd-text); font-weight: 700; }
       .uvd-composer-head p { margin: 10px 0 0; color: var(--uvd-subtext); font-size: 16px; line-height: 1.35; }
+      .uvd-jsonl-upload { margin-top: 12px; border: 1px solid var(--uvd-border); border-radius: 12px; background: var(--uvd-surface); padding: 10px; }
+      .uvd-jsonl-upload-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+      .uvd-jsonl-upload-actions button { border: 1px solid var(--uvd-border); background: transparent; color: var(--uvd-text); border-radius: 9px; min-height: 34px; padding: 0 8px; font-size: 12px; font-weight: 700; cursor: pointer; }
+      .uvd-jsonl-upload-actions button:hover:not(:disabled) { background: var(--uvd-surface-hover); border-color: var(--uvd-border-strong); }
+      .uvd-jsonl-upload-actions button:disabled { opacity: 0.45; cursor: not-allowed; }
+      .uvd-jsonl-upload-summary { margin-top: 8px; min-height: 18px; color: var(--uvd-subtext); font-size: 12px; line-height: 1.35; }
+      .uvd-jsonl-queue-panel { margin-top: 8px; border-top: 1px solid var(--uvd-border); padding-top: 8px; display: grid; gap: 8px; }
+      .uvd-jsonl-queue-meta { color: var(--uvd-subtext); font-size: 12px; line-height: 1.35; }
+      .uvd-jsonl-queue-controls { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+      .uvd-jsonl-queue-controls button { border: 1px solid var(--uvd-border); background: transparent; color: var(--uvd-text); border-radius: 8px; min-height: 30px; padding: 0 6px; font-size: 11px; font-weight: 700; cursor: pointer; }
+      .uvd-jsonl-queue-controls button:hover:not(:disabled) { background: var(--uvd-surface-hover); border-color: var(--uvd-border-strong); }
+      .uvd-jsonl-queue-controls button:disabled { opacity: 0.45; cursor: not-allowed; }
+      .uvd-jsonl-queue-list { max-height: 150px; overflow: auto; border: 1px solid var(--uvd-border); border-radius: 10px; padding: 6px; display: grid; gap: 6px; background: rgba(0,0,0,0.15); }
+      .uvd-jsonl-item { width: 100%; text-align: left; border: 1px solid var(--uvd-border); background: transparent; color: var(--uvd-text); border-radius: 8px; padding: 7px 8px; font-size: 11px; line-height: 1.35; cursor: pointer; }
+      .uvd-jsonl-item[data-selected="true"] { border-color: rgba(103,177,255,0.95); box-shadow: inset 0 0 0 1px rgba(103,177,255,0.45); }
+      .uvd-jsonl-item[data-current="true"]::before { content: "Current"; margin-right: 6px; color: #8de3ab; font-weight: 700; }
+      .uvd-jsonl-preview-field { margin-top: 0; }
+      .uvd-jsonl-preview-field textarea { min-height: 90px; font-size: 12px; line-height: 1.35; }
+      .uvd-jsonl-batch-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+      .uvd-jsonl-batch-actions button { border: 1px solid var(--uvd-border); background: var(--uvd-surface); color: var(--uvd-text); border-radius: 9px; min-height: 34px; padding: 0 8px; font-size: 12px; font-weight: 700; cursor: pointer; }
+      .uvd-jsonl-batch-actions button:hover:not(:disabled) { background: var(--uvd-surface-hover); border-color: var(--uvd-border-strong); }
+      .uvd-jsonl-batch-actions button:disabled { opacity: 0.45; cursor: not-allowed; }
+      .uvd-jsonl-review-summary { margin-top: 12px; display: grid; gap: 6px; color: var(--uvd-subtext); font-size: 13px; line-height: 1.35; }
+      .uvd-jsonl-review-list { margin-top: 12px; border: 1px solid var(--uvd-border); border-radius: 12px; padding: 8px; max-height: 320px; overflow: auto; display: grid; gap: 6px; background: var(--uvd-surface); }
+      .uvd-jsonl-review-item { border: 1px solid var(--uvd-border); border-radius: 8px; padding: 8px; color: var(--uvd-text); font-size: 12px; line-height: 1.35; background: rgba(0,0,0,0.12); }
       .uvd-dropzone { margin-top: 14px; border: 2px dashed var(--uvd-border-strong); border-radius: 12px; padding: 20px 14px; background: transparent; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:6px; text-align:center; transition: background .15s ease, border-color .15s ease; cursor: default; }
       .uvd-composer.is-source-ready .uvd-dropzone { display: none !important; }
       .uvd-dropzone strong { font-size: 15px; color: var(--uvd-text); }
@@ -5318,6 +6056,16 @@
       checkPendingComposePrompt,
       loadPendingCreateOverrides,
       clearPendingCreateOverrides,
+      loadPendingCreateQueue,
+      savePendingCreateQueue,
+      peekPendingCreateQueuePrompt,
+      advancePendingCreateQueuePrompt,
+      consumePendingCreateQueuePrompt,
+      setPendingCreateQueueSelection,
+      removePendingCreateQueueAtIndex,
+      loadPendingCreateBatchState,
+      savePendingCreateBatchState,
+      clearPendingCreateBatchState,
       applyComposerOverridesToCreateBody,
       setCapturedAuthToken,
       setModelOverride,
