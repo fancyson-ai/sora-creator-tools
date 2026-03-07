@@ -3049,7 +3049,7 @@
     }
 
     updateWorkspaceSelect();
-    renderUVDraftsGrid();
+    rerenderUVDraftsGridForLocalMutation();
     updateUVDraftsStats();
   }
 
@@ -3308,7 +3308,7 @@
         const nextWorkspaceId = selectedWorkspaceId || null;
         if (String(draft.workspace_id || '') !== String(nextWorkspaceId || '')) {
           await addDraftToWorkspace(draft.id, nextWorkspaceId, { taskId: draft.task_id });
-          renderUVDraftsGrid();
+          rerenderUVDraftsGridForLocalMutation();
           updateUVDraftsStats();
         }
         closeDraftWorkspacePicker();
@@ -5698,7 +5698,7 @@
       syncBookmarkIndicator(newState);
       updateUVDraftsStats();
       if (uvDraftsFilterState === 'bookmarked' || searchDependsOnBookmark(uvDraftsSearchQuery)) {
-        renderUVDraftsGrid();
+        rerenderUVDraftsGridForLocalMutation([draft.id]);
       }
     });
     bookmarkBtn.disabled = isPendingDraft;
@@ -5791,12 +5791,11 @@
 
     // Hide button
     const hideBtn = createActionBtn(draft.hidden ? icons.eyeClosed : icons.eyeOpen, draft.hidden ? 'Unhide' : 'Hide', async () => {
-      const anchor = captureUVDraftsScrollAnchor([draft.id]);
       draft.hidden = !draft.hidden;
       hideBtn.innerHTML = draft.hidden ? icons.eyeClosed : icons.eyeOpen;
       hideBtn.title = draft.hidden ? 'Unhide' : 'Hide';
       await uvDBPut(UV_DRAFTS_STORES.drafts, draft);
-      rerenderUVDraftsGridPreservingViewport(anchor);
+      rerenderUVDraftsGridForLocalMutation([draft.id]);
       updateUVDraftsStats();
     });
     hideBtn.disabled = isPendingDraft;
@@ -5821,13 +5820,12 @@
           headers: deleteHeaders,
         });
         if (res.ok) {
-          const anchor = captureUVDraftsScrollAnchor([draft.id]);
           await uvDBDelete(UV_DRAFTS_STORES.drafts, draft.id);
           await deleteScheduledPostsForDraft(draft.id);
           uvDraftsData = removeDraftById(uvDraftsData, draft.id);
           uvDraftsJustSeenIds.delete(draft.id);
           removeBookmark(draft.id);
-          rerenderUVDraftsGridPreservingViewport(anchor);
+          rerenderUVDraftsGridForLocalMutation([draft.id]);
           updateUVDraftsStats();
         } else {
           alert('Failed to delete draft');
@@ -6215,6 +6213,11 @@
     setupUVDraftsInfiniteScroll();
     restoreUVDraftsScrollAnchor(preservedAnchor);
     restoreUVDraftsPlaybackState();
+  }
+
+  function rerenderUVDraftsGridForLocalMutation(excludedDraftIds = null) {
+    const anchor = captureUVDraftsScrollAnchor(excludedDraftIds);
+    rerenderUVDraftsGridPreservingViewport(anchor);
   }
 
   function rerenderUVDraftsGridForGeometryChange() {
@@ -7258,7 +7261,7 @@
           await uvDBDelete(UV_DRAFTS_STORES.drafts, draft.id);
         }
         uvDraftsData = uvDraftsData.filter(d => d?.is_unsynced !== true);
-        renderUVDraftsGrid();
+        rerenderUVDraftsGridForLocalMutation(unsyncedDrafts.map((draft) => draft?.id));
         updateUVDraftsStats();
       } catch (err) {
         console.error('[UV Drafts] Failed to remove unsynced drafts:', err);
