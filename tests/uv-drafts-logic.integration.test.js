@@ -9,9 +9,17 @@ const {
   parseSearchQuery,
   draftMatchesSearchQuery,
   applyCreateBodyOverrides,
+  parsePromptJsonl,
+  normalizePromptQueueState,
+  peekCurrentPrompt,
+  advancePromptQueue,
+  setPromptQueueSelection,
+  removePromptAtIndex,
+  consumeNextPrompt,
   modeRequiresComposerSource,
   isDraftPubliclyPosted,
   getDraftPostUrl,
+  getDraftRemixSource,
   canTrimDraft,
   getDraftTrimUrl,
   clampGensCount,
@@ -107,6 +115,83 @@ test('integration: advanced search + composer override payload work together', (
   assert.equal(parsedBody.creation_config.seed, '77');
 });
 
+test('integration: queued prompts consume in order and apply to create payloads', () => {
+  const parsed = parsePromptJsonl([
+    '{"prompt":"first queued"}',
+    '{"prompt":"second queued"}',
+  ].join('\n'));
+  let queue = normalizePromptQueueState({ prompts: parsed.prompts, index: 0, createdAt: 1 });
+  const payload = JSON.stringify({ prompt: 'fallback', creation_config: {} });
+
+  const first = consumeNextPrompt(queue);
+  const firstBody = applyCreateBodyOverrides(payload, { prompt: first.prompt });
+  const parsedFirst = JSON.parse(firstBody);
+  assert.equal(parsedFirst.prompt, 'first queued');
+  assert.equal(parsedFirst.creation_config.prompt, 'first queued');
+
+  queue = first.queue;
+  const second = consumeNextPrompt(queue);
+  const secondBody = applyCreateBodyOverrides(payload, { prompt: second.prompt });
+  const parsedSecond = JSON.parse(secondBody);
+  assert.equal(parsedSecond.prompt, 'second queued');
+  assert.equal(parsedSecond.creation_config.prompt, 'second queued');
+  assert.equal(second.remaining, 0);
+});
+
+test('integration: queue browse/edit operations preserve expected prompt order', () => {
+  const parsed = parsePromptJsonl([
+    '{"prompt":"alpha"}',
+    '{"prompt":"beta"}',
+    '{"prompt":"gamma"}',
+    '{"prompt":"delta"}',
+  ].join('\n'));
+  let queue = normalizePromptQueueState({ prompts: parsed.prompts, index: 0, selectedIndex: 0, createdAt: 7 });
+
+  queue = setPromptQueueSelection(queue, 2);
+  assert.equal(queue.selectedIndex, 2);
+  assert.equal(String(queue.prompts[queue.selectedIndex]), 'gamma');
+
+  queue = removePromptAtIndex(queue, 1);
+  assert.deepEqual(queue.prompts, ['alpha', 'gamma', 'delta']);
+  assert.equal(queue.selectedIndex, 1);
+  assert.equal(String(queue.prompts[queue.selectedIndex]), 'gamma');
+});
+
+test('integration: batch totals derive from prompts multiplied by gens-per-prompt', () => {
+  const parsed = parsePromptJsonl([
+    '{"prompt":"p1"}',
+    '{"prompt":"p2"}',
+    '{"prompt":"p3"}',
+  ].join('\n'));
+  const queue = normalizePromptQueueState({ prompts: parsed.prompts, index: 0 });
+  const gensPerPrompt = 4;
+  const totalGenerationJobs = queue.remaining * gensPerPrompt;
+  assert.equal(queue.remaining, 3);
+  assert.equal(totalGenerationJobs, 12);
+});
+
+test('integration: success path advances queue while failure path keeps current prompt intact', () => {
+  let queue = normalizePromptQueueState({
+    prompts: ['first', 'second', 'third'],
+    index: 0,
+    selectedIndex: 0,
+  });
+  const payload = JSON.stringify({ prompt: 'fallback', creation_config: {} });
+
+  const firstPeek = peekCurrentPrompt(queue);
+  const firstBody = applyCreateBodyOverrides(payload, { prompt: firstPeek.prompt });
+  assert.equal(JSON.parse(firstBody).prompt, 'first');
+  const afterSuccess = advancePromptQueue(queue);
+  queue = afterSuccess.queue;
+  assert.equal(queue.index, 1);
+
+  const secondPeek = peekCurrentPrompt(queue);
+  const secondBody = applyCreateBodyOverrides(payload, { prompt: secondPeek.prompt });
+  assert.equal(JSON.parse(secondBody).prompt, 'second');
+  assert.equal(queue.index, 1);
+  assert.equal(peekCurrentPrompt(queue).prompt, 'second');
+});
+
 test('integration: composer source gating stays aligned with compose/remix/extend modes', () => {
   const modes = ['compose', 'remix', 'extend'];
   const sourceRequired = modes.filter((mode) => modeRequiresComposerSource(mode));
@@ -141,6 +226,40 @@ test('integration: draft metadata helpers align card behavior for post links, tr
 
   assert.equal(clampGensCount(25, false), 10);
   assert.equal(clampGensCount(25, true), 25);
+});
+
+test('integration: remix source metadata stays normalized for UI card rendering', () => {
+  const remixPost = getDraftRemixSource({
+    remix_target_post_id: 's_parent_1',
+    creation_config: {
+      remix_target_draft: { id: 'draft_ignored' },
+    },
+  });
+  assert.equal(remixPost.isRemix, true);
+  assert.equal(remixPost.sourceType, 'post');
+  assert.equal(remixPost.sourcePostId, 's_parent_1');
+  assert.equal(remixPost.sourceDraftId, '');
+
+  const remixDraft = getDraftRemixSource({
+    creation_config: {
+      source_draft_id: 'd_source_5',
+    },
+  });
+  assert.equal(remixDraft.isRemix, true);
+  assert.equal(remixDraft.sourceType, 'draft');
+  assert.equal(remixDraft.sourceDraftId, 'd_source_5');
+  assert.equal(remixDraft.sourcePostId, '');
+});
+
+test('integration: non-remix drafts produce no remix source links', () => {
+  const plain = getDraftRemixSource({
+    id: 'd_plain',
+    creation_config: { mode: 'compose' },
+  });
+  assert.equal(plain.isRemix, false);
+  assert.equal(plain.sourceId, '');
+  assert.equal(plain.sourcePostId, '');
+  assert.equal(plain.sourceDraftId, '');
 });
 
 test('integration: new:true filter excludes violation and processing kinds', () => {

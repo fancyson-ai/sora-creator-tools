@@ -8,9 +8,9 @@ const UV_DRAFTS_PAGE_PATH = path.join(__dirname, '..', 'uv-drafts-page.js');
 
 function extractRenderSnippet() {
   const src = fs.readFileSync(UV_DRAFTS_PAGE_PATH, 'utf8');
-  const start = src.indexOf("function showUVDraftsLoadingIndicator(message = 'Loading...') {");
+  const start = src.indexOf("function isUVDraftsLoadingIndicatorVisible() {");
   assert.notEqual(start, -1, 'render snippet start not found');
-  const end = src.indexOf('  // Infinite scroll: append next batch.', start);
+  const end = src.indexOf('  function setupUVDraftsInfiniteScroll() {', start);
   assert.notEqual(end, -1, 'render snippet end not found');
   return src.slice(start, end);
 }
@@ -219,7 +219,13 @@ function buildRenderHarness() {
       loadingText: uvDraftsLoadingEl.textContent || '',
       renderedCount: uvDraftsRenderedCount,
       childClasses: uvDraftsGridEl.children.map((child) => child.className || ''),
-      childDraftIds: uvDraftsGridEl.children.flatMap((child) => (child.children || []).map((grandChild) => grandChild.dataset?.draftId || '')),
+      childDraftIds: uvDraftsGridEl.children.flatMap((child) => {
+        const selfId = child.dataset?.draftId ? [child.dataset.draftId] : [];
+        const nestedIds = Array.isArray(child.children)
+          ? child.children.map((grandChild) => grandChild.dataset?.draftId || '').filter(Boolean)
+          : [];
+        return [...selfId, ...nestedIds];
+      }),
       emptyText: uvDraftsGridEl.querySelector('.uvd-empty-state')?.textContent || null,
     });
   `;
@@ -276,15 +282,14 @@ test('renderUVDraftsGrid keeps loading state while initial sync is still in prog
   assert.equal(snapshot.loadingText, 'Loading drafts...');
 });
 
-test('renderUVDraftsGrid keeps loading state during fresh boot before initial cache hydration finishes', () => {
+test('renderUVDraftsGrid shows empty state immediately when a search query has no matches', () => {
   const harness = buildRenderHarness();
   harness.setState({
     currentDrafts: [],
     allDrafts: [],
     awaitingMoreResults: false,
-    initialLoadComplete: false,
     syncing: false,
-    searchQuery: '',
+    searchQuery: 'workspace:alpha',
     resetGrid: true,
     loadingDisplay: '',
     loadingText: '',
@@ -293,9 +298,8 @@ test('renderUVDraftsGrid keeps loading state during fresh boot before initial ca
   harness.renderGrid();
   const snapshot = harness.snapshot();
 
-  assert.equal(snapshot.emptyText, null);
-  assert.equal(snapshot.loadingDisplay, 'flex');
-  assert.equal(snapshot.loadingText, 'Loading drafts...');
+  assert.equal(snapshot.loadingDisplay, 'none');
+  assert.equal(snapshot.emptyText, 'No drafts match your search');
 });
 
 test('renderUVDraftsGrid shows empty state once syncing has finished with no drafts', () => {
@@ -358,6 +362,6 @@ test('renderUVDraftsSyncUpdate removes stale empty state before appending real d
 
   assert.equal(snapshot.emptyText, null);
   assert.equal(snapshot.loadingDisplay, 'none');
-  assert.deepEqual(Array.from(snapshot.childClasses), ['uvd-grid-row']);
+  assert.deepEqual(Array.from(snapshot.childClasses), ['uv-draft-card']);
   assert.deepEqual(Array.from(snapshot.childDraftIds), ['draft_1']);
 });

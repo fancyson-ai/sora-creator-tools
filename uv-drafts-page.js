@@ -1,1176 +1,8 @@
 /*
- * UV Drafts page module extracted from inject.js.
+ * Creator Tools page module extracted from inject.js.
  */
 (function initSoraUVDraftsPageModule(globalScope) {
   'use strict';
-
-  function getComposerModelFamily(value) {
-    const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
-    if (!normalized) return '';
-    if (normalized === 'sora2pro' || normalized === 'sy_ore' || normalized.startsWith('sy_ore_')) return 'sy_ore';
-    if (normalized === 'sora2' || normalized === 'sy_8' || normalized.startsWith('sy_8_')) return 'sy_8';
-    return '';
-  }
-
-  function composerModelMatchesFamily(model, family) {
-    if (!model || typeof model !== 'object' || !family) return false;
-    if (getComposerModelFamily(model.value) === family) return true;
-    const label = typeof model.label === 'string' ? model.label : '';
-    if (family === 'sy_ore') return /sora\s*2\s*pro/i.test(label);
-    if (family === 'sy_8') return /sora\s*2(?!\s*pro)/i.test(label);
-    return false;
-  }
-
-  function resolveComposerModelValue(models, value) {
-    const normalized = typeof value === 'string' ? value.trim() : '';
-    if (!normalized) return '';
-    const available = Array.isArray(models) ? models : [];
-    if (available.some((model) => model?.value === normalized)) return normalized;
-    const family = getComposerModelFamily(normalized);
-    if (!family) return '';
-    return available.find((model) => composerModelMatchesFamily(model, family))?.value || '';
-  }
-
-  function mergePendingDraftStatesById(primaryDrafts, secondaryDrafts) {
-    const merged = [];
-    const seen = new Set();
-    const pushUnique = (draft) => {
-      const id = String(draft?.id || '').trim();
-      if (!id || seen.has(id)) return;
-      seen.add(id);
-      merged.push(draft);
-    };
-    for (const draft of Array.isArray(primaryDrafts) ? primaryDrafts : []) pushUnique(draft);
-    for (const draft of Array.isArray(secondaryDrafts) ? secondaryDrafts : []) pushUnique(draft);
-    return merged;
-  }
-
-  function buildPendingCompletionDraft(draft) {
-    const next = draft && typeof draft === 'object' ? { ...draft } : {};
-    next.is_pending = true;
-    next.pending_status = 'complete';
-    next.pending_task_status = 'complete';
-    next.progress_pct = 100;
-    next.pending_completion_waiting = true;
-    return next;
-  }
-
-  function getDraftCardVideoObjectFit(isFullscreen = false) {
-    return isFullscreen ? 'contain' : 'cover';
-  }
-
-  function getDocumentFullscreenElement(targetDocument = null) {
-    const doc = targetDocument && typeof targetDocument === 'object'
-      ? targetDocument
-      : (typeof document !== 'undefined' ? document : null);
-    if (!doc) return null;
-    return doc.fullscreenElement || doc.webkitFullscreenElement || null;
-  }
-
-  function applyDraftCardVideoFullscreenPresentation(video, targetDocument = null) {
-    if (!video || typeof video !== 'object') return false;
-    const isFullscreen = getDocumentFullscreenElement(targetDocument || video.ownerDocument || null) === video;
-    if (video.style) {
-      video.style.objectFit = getDraftCardVideoObjectFit(isFullscreen);
-      video.style.background = isFullscreen ? '#000' : '';
-    }
-    return isFullscreen;
-  }
-
-  function findSettledDraftMatchForPending(pendingDraft, drafts) {
-    if (!pendingDraft || typeof pendingDraft !== 'object' || !Array.isArray(drafts)) return null;
-    const pendingKeys = new Set(
-      [pendingDraft.id, pendingDraft.task_id]
-        .map((value) => String(value || '').trim())
-        .filter(Boolean)
-    );
-    if (pendingKeys.size === 0) return null;
-    return drafts.find((draft) => {
-      const draftKeys = [
-        String(draft?.id || '').trim(),
-        String(draft?.task_id || '').trim(),
-      ].filter(Boolean);
-      return draftKeys.some((key) => pendingKeys.has(key));
-    }) || null;
-  }
-
-  function isPendingDraftSettledInCollection(drafts, pendingDraft) {
-    return !!findSettledDraftMatchForPending(pendingDraft, drafts);
-  }
-
-  function buildPendingCompletionHandoffPlan(previousVisibleDrafts, nextVisibleIds, existingDrafts) {
-    const priorVisible = Array.isArray(previousVisibleDrafts) ? previousVisibleDrafts : [];
-    const nextIds = nextVisibleIds instanceof Set
-      ? nextVisibleIds
-      : new Set(
-        (Array.isArray(nextVisibleIds) ? nextVisibleIds : [])
-          .map((id) => String(id || '').trim())
-          .filter(Boolean)
-      );
-    const handoffs = [];
-    for (const pendingDraft of priorVisible) {
-      const pendingId = String(pendingDraft?.id || '').trim();
-      if (!pendingId || nextIds.has(pendingId)) continue;
-      const settledDraft = findSettledDraftMatchForPending(pendingDraft, existingDrafts);
-      if (!settledDraft) continue;
-      handoffs.push({
-        pendingId,
-        settledId: String(settledDraft?.id || '').trim(),
-        pendingDraft,
-        settledDraft,
-      });
-    }
-    return handoffs;
-  }
-
-  function resolvePendingPollState(previousVisibleDrafts, previousEndpointIds, nextEndpointDrafts, existingDrafts, pendingLogic = null) {
-    const priorVisible = Array.isArray(previousVisibleDrafts) ? previousVisibleDrafts : [];
-    const priorEndpointIds = previousEndpointIds instanceof Set
-      ? previousEndpointIds
-      : new Set(
-        (Array.isArray(previousEndpointIds) ? previousEndpointIds : [])
-          .map((id) => String(id || '').trim())
-          .filter(Boolean)
-      );
-    const nextPending = Array.isArray(nextEndpointDrafts) ? nextEndpointDrafts : [];
-    const nextEndpointIds = new Set(
-      nextPending
-        .map((draft) => String(draft?.id || '').trim())
-        .filter(Boolean)
-    );
-    const droppedIds = pendingLogic && typeof pendingLogic.getDroppedIds === 'function'
-      ? pendingLogic.getDroppedIds(priorEndpointIds, nextEndpointIds)
-      : [...priorEndpointIds].filter((id) => !nextEndpointIds.has(id));
-    const priorById = new Map(
-      priorVisible
-        .map((draft) => [String(draft?.id || '').trim(), draft])
-        .filter(([id]) => id)
-    );
-    const settlingDrafts = [];
-    const settlingSeen = new Set();
-
-    const maybePushSettlingDraft = (draft) => {
-      const id = String(draft?.id || '').trim();
-      if (!id || settlingSeen.has(id) || nextEndpointIds.has(id) || isPendingDraftSettledInCollection(existingDrafts, draft)) return;
-      settlingSeen.add(id);
-      settlingDrafts.push(buildPendingCompletionDraft(draft));
-    };
-
-    for (const draft of priorVisible) {
-      if (draft?.pending_completion_waiting === true) {
-        maybePushSettlingDraft(draft);
-      }
-    }
-    for (const droppedId of droppedIds) {
-      const priorVisibleDraft = priorById.get(droppedId);
-      if (priorVisibleDraft) {
-        maybePushSettlingDraft(priorVisibleDraft);
-      }
-    }
-
-    const visibleDrafts = mergePendingDraftStatesById(nextPending, settlingDrafts);
-    const visibleIds = new Set(
-      visibleDrafts
-        .map((draft) => String(draft?.id || '').trim())
-        .filter(Boolean)
-    );
-    return {
-      droppedIds,
-      endpointIds: nextEndpointIds,
-      settlingDrafts,
-      visibleDrafts,
-      visibleIds,
-      requiresTopRefresh: droppedIds.length > 0 || settlingDrafts.length > 0,
-    };
-  }
-
-  function didPendingPollStateChange(previousVisibleDrafts, previousVisibleIds, nextVisibleDrafts, nextVisibleIds) {
-    const priorIds = previousVisibleIds instanceof Set
-      ? previousVisibleIds
-      : new Set(
-        (Array.isArray(previousVisibleIds) ? previousVisibleIds : [])
-          .map((id) => String(id || '').trim())
-          .filter(Boolean)
-      );
-    const nextIds = nextVisibleIds instanceof Set
-      ? nextVisibleIds
-      : new Set(
-        (Array.isArray(nextVisibleIds) ? nextVisibleIds : [])
-          .map((id) => String(id || '').trim())
-          .filter(Boolean)
-      );
-    if (nextIds.size !== priorIds.size || [...nextIds].some((id) => !priorIds.has(id))) return true;
-
-    const priorVisible = Array.isArray(previousVisibleDrafts) ? previousVisibleDrafts : [];
-    const nextVisible = Array.isArray(nextVisibleDrafts) ? nextVisibleDrafts : [];
-    if (nextVisible.length !== priorVisible.length) return true;
-
-    return nextVisible.some((draft, index) => {
-      const prev = priorVisible[index];
-      if (!prev) return true;
-      const draftId = String(draft?.id || '').trim();
-      const prevId = String(prev?.id || '').trim();
-      const draftProgress = draft?.progress_pct == null ? null : Number(draft.progress_pct);
-      const prevProgress = prev?.progress_pct == null ? null : Number(prev.progress_pct);
-      return draftId !== prevId ||
-        draftProgress !== prevProgress ||
-        String(draft?.pending_status || '') !== String(prev?.pending_status || '') ||
-        String(draft?.pending_task_status || '') !== String(prev?.pending_task_status || '') ||
-        (draft?.pending_completion_waiting === true) !== (prev?.pending_completion_waiting === true);
-    });
-  }
-
-  function buildPublicPostPayload(generationId, postText) {
-    const id = typeof generationId === 'string' ? generationId.trim() : '';
-    if (!id) throw new Error('Missing draft ID');
-    return {
-      post_text: typeof postText === 'string' ? postText : '',
-      attachments_to_create: [
-        {
-          kind: 'sora',
-          generation_id: id,
-        },
-      ],
-      destinations: [{ type: 'public' }],
-    };
-  }
-
-  const FIRST_FRAME_UPLOAD_USE_CASE = 'inpaint_safe';
-
-  function buildFirstFrameInpaintItems(fileId) {
-    const id = typeof fileId === 'string' ? fileId.trim() : '';
-    if (!id) return [];
-    return [
-      {
-        kind: 'file',
-        file_id: id,
-        frames: null,
-        entity: null,
-      },
-    ];
-  }
-
-  function extractPublishedPost(payload) {
-    if (!payload || typeof payload !== 'object') return null;
-    const candidates = [
-      payload.post,
-      payload.item?.post,
-      payload.data?.post,
-      Array.isArray(payload.items) ? payload.items[0]?.post || payload.items[0] : null,
-    ];
-    for (const candidate of candidates) {
-      if (candidate && typeof candidate === 'object') return candidate;
-    }
-    if (payload.id || payload.permalink || payload.visibility || payload.post_text != null) return payload;
-    return null;
-  }
-
-  function applyPublishedPostToDraftData(draft, publishedPost) {
-    if (!draft || typeof draft !== 'object') return draft;
-    const next = draft;
-    const post = publishedPost && typeof publishedPost === 'object' ? publishedPost : {};
-    const postId = post.id || next.post_id || next.post_meta?.id || null;
-    const permalink = post.permalink || next.post_permalink || next.post_meta?.permalink || null;
-    next.post_id = postId;
-    next.post_permalink = permalink;
-    next.post_visibility = 'public';
-    next.posted_to_public = true;
-    next.post_meta = {
-      ...(next.post_meta && typeof next.post_meta === 'object' ? next.post_meta : {}),
-      id: postId,
-      permalink,
-      visibility: 'public',
-      posted_to_public: true,
-      share_ref: post.share_ref ?? next.post_meta?.share_ref ?? null,
-      share_setting: post.permissions?.share_setting ?? post.share_setting ?? next.post_meta?.share_setting ?? null,
-    };
-    delete next.scheduled_post_id;
-    delete next.scheduled_post_at;
-    delete next.scheduled_post_status;
-    delete next.scheduled_post_caption;
-    return next;
-  }
-
-  function pickFirstDraftPostValue(...candidates) {
-    for (const candidate of candidates) {
-      if (candidate == null) continue;
-      if (typeof candidate === 'string') {
-        const trimmed = candidate.trim();
-        if (trimmed) return trimmed;
-        continue;
-      }
-      return candidate;
-    }
-    return null;
-  }
-
-  function pickFirstDraftPostBoolean(...candidates) {
-    for (const candidate of candidates) {
-      if (typeof candidate === 'boolean') return candidate;
-    }
-    return null;
-  }
-
-  function resolveDraftPostData(apiDraft, existingData = {}) {
-    const draftData = apiDraft && typeof apiDraft === 'object' ? apiDraft : {};
-    const priorData = existingData && typeof existingData === 'object' ? existingData : {};
-    const existingPostMeta = priorData.post_meta && typeof priorData.post_meta === 'object'
-      ? priorData.post_meta
-      : null;
-    const post = extractPublishedPost(draftData.post);
-    const postId = pickFirstDraftPostValue(
-      draftData.post_id,
-      post?.id,
-      priorData.post_id,
-      existingPostMeta?.id
-    );
-    const postPermalink = pickFirstDraftPostValue(
-      draftData.post_permalink,
-      draftData.permalink,
-      post?.permalink,
-      priorData.post_permalink,
-      existingPostMeta?.permalink
-    );
-    const postVisibility = pickFirstDraftPostValue(
-      draftData.post_visibility,
-      post?.visibility,
-      priorData.post_visibility,
-      existingPostMeta?.visibility
-    );
-    const postedToPublic = pickFirstDraftPostBoolean(
-      draftData.posted_to_public,
-      post?.posted_to_public,
-      priorData.posted_to_public,
-      existingPostMeta?.posted_to_public
-    );
-    const shareRef = pickFirstDraftPostValue(
-      draftData.share_ref,
-      post?.share_ref,
-      existingPostMeta?.share_ref
-    );
-    const shareSetting = pickFirstDraftPostValue(
-      post?.permissions?.share_setting,
-      draftData.share_setting,
-      existingPostMeta?.share_setting
-    );
-
-    let postMeta = existingPostMeta ? { ...existingPostMeta } : null;
-    if (
-      postId ||
-      postPermalink ||
-      postVisibility ||
-      typeof postedToPublic === 'boolean' ||
-      shareRef ||
-      shareSetting
-    ) {
-      postMeta = {
-        ...(postMeta || {}),
-        id: postId || null,
-        permalink: postPermalink || null,
-        visibility: postVisibility || null,
-        posted_to_public: postedToPublic === true,
-        share_ref: shareRef || null,
-        share_setting: shareSetting || null,
-      };
-    }
-
-    return {
-      post,
-      postId: postId || null,
-      postPermalink: postPermalink || null,
-      postVisibility: postVisibility || null,
-      postedToPublic,
-      postMeta,
-    };
-  }
-
-  function extractRemixTargetPostId(apiDraft, existingData = {}) {
-    const candidates = [
-      apiDraft?.creation_config?.remix_target_post?.post?.id,
-      apiDraft?.creation_config?.remix_target_post?.id,
-      apiDraft?.remix_target_post_id,
-      existingData?.remix_target_post_id,
-    ];
-    for (const candidate of candidates) {
-      const value = typeof candidate === 'string' ? candidate.trim() : '';
-      if (value) return value;
-    }
-    return null;
-  }
-
-  function extractPublishedPostGenerationId(post) {
-    const candidates = [
-      post?.generation_id,
-      post?.draft_id,
-    ];
-    const attachments = Array.isArray(post?.attachments) ? post.attachments : [];
-    for (const attachment of attachments) {
-      candidates.push(
-        attachment?.generation_id,
-        attachment?.draft_id,
-        attachment?.draft?.id,
-        attachment?.generation?.id,
-        attachment?.source_id,
-        attachment?.core_id,
-        attachment?.id
-      );
-    }
-    for (const candidate of candidates) {
-      const value = typeof candidate === 'string' ? candidate.trim() : '';
-      if (/^gen_/i.test(value)) return value;
-    }
-    return '';
-  }
-
-  function extractPublishedPostVideoUrl(post) {
-    const attachments = Array.isArray(post?.attachments) ? post.attachments : [];
-    const candidates = [
-      post?.url,
-      post?.video_url,
-      post?.media?.url,
-      Array.isArray(post?.assets) ? post.assets[0]?.url : '',
-    ];
-    for (const attachment of attachments) {
-      candidates.push(
-        attachment?.url,
-        attachment?.video_url,
-        attachment?.draft?.url,
-        attachment?.post?.url,
-        attachment?.media?.url,
-        attachment?.encodings?.source?.path,
-        attachment?.encodings?.source_wm?.path,
-        attachment?.encodings?.md?.path
-      );
-    }
-    for (const candidate of candidates) {
-      const value = typeof candidate === 'string' ? candidate.trim() : '';
-      if (value) return value;
-    }
-    return '';
-  }
-
-  function extractPublishedPostThumbnailUrl(post) {
-    const attachments = Array.isArray(post?.attachments) ? post.attachments : [];
-    const candidates = [
-      post?.preview_image_url,
-      post?.thumbnail_url,
-      post?.thumb,
-      post?.cover,
-      post?.poster?.url,
-      post?.image?.url,
-      Array.isArray(post?.images) ? post.images[0]?.url : '',
-      Array.isArray(post?.assets) ? (post.assets[0]?.thumbnail_url || post.assets[0]?.url) : '',
-      post?.media?.thumbnail,
-      post?.media?.cover,
-      post?.media?.poster,
-    ];
-    for (const attachment of attachments) {
-      candidates.push(
-        attachment?.thumbnail_url,
-        attachment?.thumb,
-        attachment?.cover,
-        attachment?.poster?.url,
-        attachment?.image?.url,
-        attachment?.encodings?.thumbnail?.path
-      );
-    }
-    for (const candidate of candidates) {
-      const value = typeof candidate === 'string' ? candidate.trim() : '';
-      if (value) return value;
-    }
-    return '';
-  }
-
-  function extractPublishedPostDurationSeconds(post) {
-    const directDuration = Number(post?.duration_s);
-    if (Number.isFinite(directDuration) && directDuration > 0) return directDuration;
-    const attachments = Array.isArray(post?.attachments) ? post.attachments : [];
-    for (const attachment of attachments) {
-      const attDuration = Number(attachment?.duration_s);
-      if (Number.isFinite(attDuration) && attDuration > 0) return attDuration;
-      const attFrames = Number(attachment?.n_frames);
-      if (Number.isFinite(attFrames) && attFrames > 0) return attFrames / 30;
-    }
-    const directFrames = Number(post?.n_frames || post?.video_metadata?.n_frames);
-    if (Number.isFinite(directFrames) && directFrames > 0) return directFrames / 30;
-    return 0;
-  }
-
-  function extractPublishedPostDimensions(post) {
-    const attachments = Array.isArray(post?.attachments) ? post.attachments : [];
-    const widthCandidates = [post?.width, post?.video_metadata?.width];
-    const heightCandidates = [post?.height, post?.video_metadata?.height];
-    for (const attachment of attachments) {
-      widthCandidates.push(attachment?.width);
-      heightCandidates.push(attachment?.height);
-    }
-    const width = widthCandidates.map(Number).find((value) => Number.isFinite(value) && value > 0) || 0;
-    const height = heightCandidates.map(Number).find((value) => Number.isFinite(value) && value > 0) || 0;
-    return { width, height };
-  }
-
-  function buildComposerSourceFromPublishedPost(post, fallbackPostId = '') {
-    const publishedPost = post && typeof post === 'object' ? post : {};
-    const postId = String(publishedPost.id || fallbackPostId || '').trim();
-    const generationId = extractPublishedPostGenerationId(publishedPost);
-    const prompt = String(publishedPost.text || publishedPost.post_text || '').trim();
-    const title = String(publishedPost.title || '').trim();
-    const url = extractPublishedPostVideoUrl(publishedPost);
-    const thumbnailUrl = extractPublishedPostThumbnailUrl(publishedPost);
-    const durationSeconds = extractPublishedPostDurationSeconds(publishedPost);
-    const { width, height } = extractPublishedPostDimensions(publishedPost);
-    const orientation = width > 0 && height > 0 ? (width > height ? 'landscape' : 'portrait') : '';
-    if (!postId && !url) return null;
-    return {
-      type: 'post',
-      id: generationId,
-      post_id: postId,
-      storyboard_id: '',
-      can_storyboard: false,
-      prompt,
-      title,
-      url,
-      preview_url: url,
-      thumbnail_url: thumbnailUrl,
-      orientation,
-      duration_seconds: durationSeconds,
-      cameo_profiles: [],
-      label: `${title || prompt || postId || 'Published video'}`.slice(0, 90),
-    };
-  }
-
-  function isLargeComposerSizeAllowed(modelValue, ultraModeEnabled = false) {
-    if (ultraModeEnabled) return true;
-    return getComposerModelFamily(modelValue) === 'sy_ore';
-  }
-
-  function normalizeComposerSizeForModel(sizeValue, modelValue, ultraModeEnabled = false) {
-    const normalizedSize = sizeValue === 'large' ? 'large' : 'small';
-    if (normalizedSize === 'large' && !isLargeComposerSizeAllowed(modelValue, ultraModeEnabled)) {
-      return 'small';
-    }
-    return normalizedSize;
-  }
-
-  function normalizeDraftOrientationValue(value) {
-    const normalized = typeof value === 'string'
-      ? value.trim().toLowerCase().replace(/[\s-]+/g, '_')
-      : '';
-    if (!normalized) return '';
-    if (normalized === 'portrait' || normalized.startsWith('portrait_')) return 'portrait';
-    if (normalized === 'landscape' || normalized.startsWith('landscape_')) return 'landscape';
-    return '';
-  }
-
-  function extractDraftDimensions(draft, fallbackDraft = null) {
-    const widthCandidates = [
-      draft?.width,
-      draft?.draft?.width,
-      draft?.generation?.width,
-      draft?.asset?.width,
-      draft?.creation_config?.width,
-      fallbackDraft?.width,
-    ];
-    const heightCandidates = [
-      draft?.height,
-      draft?.draft?.height,
-      draft?.generation?.height,
-      draft?.asset?.height,
-      draft?.creation_config?.height,
-      fallbackDraft?.height,
-    ];
-    const width = widthCandidates.map(Number).find((value) => Number.isFinite(value) && value > 0) || 0;
-    const height = heightCandidates.map(Number).find((value) => Number.isFinite(value) && value > 0) || 0;
-    return { width, height };
-  }
-
-  function resolveDraftOrientationValue(draft, fallbackDraft = null, dimensions = null) {
-    const explicitOrientation = normalizeDraftOrientationValue(draft?.orientation)
-      || normalizeDraftOrientationValue(draft?.creation_config?.orientation)
-      || normalizeDraftOrientationValue(fallbackDraft?.orientation)
-      || normalizeDraftOrientationValue(fallbackDraft?.creation_config?.orientation);
-    if (explicitOrientation) return explicitOrientation;
-    const resolvedDimensions = dimensions && typeof dimensions === 'object'
-      ? dimensions
-      : extractDraftDimensions(draft, fallbackDraft);
-    if (resolvedDimensions.width > 0 && resolvedDimensions.height > 0) {
-      return resolvedDimensions.width > resolvedDimensions.height ? 'landscape' : 'portrait';
-    }
-    return '';
-  }
-
-  function getDraftOrientationForLayout(draft) {
-    return resolveDraftOrientationValue(draft);
-  }
-
-  function getDraftLayoutStateBlob(draft) {
-    if (!draft || typeof draft !== 'object') return '';
-    const fields = [
-      draft.kind,
-      draft.type,
-      draft.status,
-      draft.state,
-      draft.reason,
-      draft.failure_reason,
-      draft.moderation_reason,
-      draft.user_error_message,
-      draft.message,
-      draft.pending_status,
-      draft.pending_task_status,
-      draft.error,
-      draft.detail,
-    ];
-    const parts = [];
-    for (const field of fields) {
-      if (typeof field === 'string') {
-        const trimmed = field.trim();
-        if (trimmed) parts.push(trimmed.toLowerCase());
-        continue;
-      }
-      if (field && typeof field === 'object') {
-        try {
-          const serialized = JSON.stringify(field);
-          if (serialized && serialized !== '{}') parts.push(serialized.toLowerCase());
-        } catch {}
-      }
-    }
-    return parts.join(' ');
-  }
-
-  function isForcedFullHeightDraftCard(draft) {
-    const kind = String(draft?.kind || draft?.type || '').trim().toLowerCase();
-    const status = String(
-      draft?.status ||
-      draft?.state ||
-      draft?.pending_status ||
-      draft?.pending_task_status ||
-      ''
-    ).trim().toLowerCase();
-    const statusBlob = getDraftLayoutStateBlob(draft);
-    const reasonValue = draft?.violation_reason;
-    const reasonText = typeof reasonValue === 'string'
-      ? reasonValue.toLowerCase()
-      : (() => {
-        if (!reasonValue || typeof reasonValue !== 'object') return '';
-        try {
-          return JSON.stringify(reasonValue).toLowerCase();
-        } catch {
-          return '';
-        }
-      })();
-    const hasMedia = !!(String(draft?.preview_url || '').trim() || String(draft?.thumbnail_url || '').trim());
-    const isContentViolation = kind === 'sora_content_violation'
-      || kind.includes('content_violation')
-      || kind.includes('policy_violation')
-      || kind.includes('moderation_violation')
-      || kind.includes('safety_violation')
-      || status === 'content_violation'
-      || status === 'sora_content_violation'
-      || status.includes('content_violation')
-      || status.includes('policy_violation')
-      || status.includes('moderation_violation')
-      || status.includes('safety_violation')
-      || statusBlob.includes('policy blocked');
-    const isContextViolation = kind === 'sora_context_violation'
-      || kind.includes('context_violation')
-      || status === 'context_violation'
-      || status === 'sora_context_violation'
-      || status.includes('context_violation');
-    const isProcessingError = kind === 'sora_processing_error'
-      || kind === 'processing_error'
-      || kind.includes('processing_error')
-      || kind.includes('processing_failed')
-      || kind.includes('generation_error')
-      || kind.endsWith('_error')
-      || status === 'processing_error'
-      || status.includes('processing_error')
-      || status.includes('processing_failed')
-      || status.includes('generation_error')
-      || status.endsWith('_error')
-      || status === 'failed'
-      || status.endsWith('_failed')
-      || (!!reasonText && !hasMedia && !isContentViolation && !isContextViolation);
-    return draft?.is_pending === true
-      || /\bpending\b/.test(statusBlob)
-      || isContentViolation
-      || isContextViolation
-      || isProcessingError;
-  }
-
-  function getDraftOrientationForGrouping(draft) {
-    if (isForcedFullHeightDraftCard(draft)) return 'portrait';
-    return getDraftOrientationForLayout(draft);
-  }
-
-  function getDraftCardPaddingTop(draft, usePlaceholderThumb = false) {
-    if (usePlaceholderThumb) return '177.78%';
-    const draftOrientation = getDraftOrientationForLayout(draft);
-    if (draftOrientation === 'landscape') return '56.25%';
-    if (draftOrientation === 'portrait') return '177.78%';
-    return Number(draft?.height) > Number(draft?.width) ? '177.78%' : '56.25%';
-  }
-
-  function getDraftCardLayoutStyle(draft, usePlaceholderThumb = false) {
-    return {
-      alignSelf: 'start',
-      paddingTop: getDraftCardPaddingTop(draft, usePlaceholderThumb),
-    };
-  }
-
-  const UV_DRAFTS_GRID_MIN_COLUMN_WIDTH = 240;
-  const UV_DRAFTS_GRID_GAP = 14;
-  const UV_DRAFTS_BATCH_SIZE = 50; // Render 50 cards at a time
-
-  function getUVDraftsViewportRerenderTargetCount(totalDraftCount, renderedCount) {
-    const total = Math.max(0, Math.floor(Number(totalDraftCount) || 0));
-    const rendered = Math.max(0, Math.floor(Number(renderedCount) || 0));
-    return Math.max(
-      Math.min(UV_DRAFTS_BATCH_SIZE, total),
-      Math.min(rendered, total)
-    );
-  }
-
-  function shouldGroupLandscapeDraftCard(drafts, index) {
-    if (!Array.isArray(drafts) || !Number.isInteger(index) || index < 0 || index >= drafts.length) {
-      return false;
-    }
-    if (getDraftOrientationForGrouping(drafts[index]) !== 'landscape') return false;
-    return getDraftOrientationForGrouping(drafts[index - 1]) === 'landscape'
-      || getDraftOrientationForGrouping(drafts[index + 1]) === 'landscape';
-  }
-
-  function getLandscapeRunStartIndex(drafts, index) {
-    if (!Array.isArray(drafts) || !Number.isInteger(index) || index < 0 || index >= drafts.length) return -1;
-    if (getDraftOrientationForGrouping(drafts[index]) !== 'landscape') return -1;
-    let start = index;
-    while (start > 0 && getDraftOrientationForGrouping(drafts[start - 1]) === 'landscape') {
-      start -= 1;
-    }
-    return start;
-  }
-
-  function getLandscapeRunEndIndex(drafts, index) {
-    if (!Array.isArray(drafts) || !Number.isInteger(index) || index < 0 || index >= drafts.length) return -1;
-    if (getDraftOrientationForGrouping(drafts[index]) !== 'landscape') return -1;
-    let end = index + 1;
-    while (end < drafts.length && getDraftOrientationForGrouping(drafts[end]) === 'landscape') {
-      end += 1;
-    }
-    return end;
-  }
-
-  function getLandscapeRunGridColumnCapacity(gridEl) {
-    const targetGridEl = gridEl && typeof gridEl === 'object' ? gridEl : null;
-    const width = Number(targetGridEl?.clientWidth)
-      || Number(targetGridEl?.getBoundingClientRect?.().width)
-      || 0;
-    if (!Number.isFinite(width) || width <= 0) return 4;
-    const capacity = Math.floor((width + UV_DRAFTS_GRID_GAP) / (UV_DRAFTS_GRID_MIN_COLUMN_WIDTH + UV_DRAFTS_GRID_GAP));
-    return Math.max(1, capacity);
-  }
-
-  function getLandscapeRunChunkSize(maxColumns) {
-    const normalizedMaxColumns = Math.max(1, Math.floor(Number(maxColumns) || 0));
-    return normalizedMaxColumns * 2;
-  }
-
-  function getLandscapeRunColumnSpan(chunkLength, maxColumns) {
-    if (!Number.isFinite(chunkLength) || chunkLength <= 1) return 1;
-    const normalizedMaxColumns = Math.max(1, Math.floor(Number(maxColumns) || 0));
-    return Math.min(normalizedMaxColumns, Math.max(2, Math.floor(chunkLength)));
-  }
-
-  function getLandscapeRunChunkPlan(remainingRunLength, maxColumns, currentRowFill = 0, options = {}) {
-    const normalizedRunLength = Math.max(0, Math.floor(Number(remainingRunLength) || 0));
-    const normalizedMaxColumns = Math.max(1, Math.floor(Number(maxColumns) || 0));
-    const normalizedRowFill = Math.max(0, Math.floor(Number(currentRowFill) || 0)) % normalizedMaxColumns;
-    const availableColumns = normalizedRowFill > 0
-      ? Math.max(1, normalizedMaxColumns - normalizedRowFill)
-      : normalizedMaxColumns;
-    if (normalizedRunLength <= 1) {
-      return {
-        columnSpan: 1,
-        chunkLength: normalizedRunLength,
-      };
-    }
-    const chunkLength = Math.min(normalizedRunLength, availableColumns * 2);
-    const columnSpan = Math.min(availableColumns, Math.max(1, Math.ceil(chunkLength / 2)));
-    return {
-      columnSpan,
-      chunkLength,
-    };
-  }
-
-  function planLandscapeRunChunks(runLength, maxColumns, currentRowFill = 0) {
-    const normalizedRunLength = Math.max(0, Math.floor(Number(runLength) || 0));
-    const normalizedMaxColumns = Math.max(1, Math.floor(Number(maxColumns) || 0));
-    let remaining = normalizedRunLength;
-    let rowFill = Math.max(0, Math.floor(Number(currentRowFill) || 0)) % normalizedMaxColumns;
-    const chunks = [];
-    while (remaining > 0) {
-      const chunk = getLandscapeRunChunkPlan(remaining, normalizedMaxColumns, rowFill);
-      if (!chunk || !Number.isFinite(chunk.chunkLength) || chunk.chunkLength <= 0) break;
-      chunks.push(chunk);
-      remaining -= chunk.chunkLength;
-      rowFill = (rowFill + chunk.columnSpan) % normalizedMaxColumns;
-    }
-    return chunks;
-  }
-
-  function planDraftGridRows(drafts, maxColumns) {
-    if (!Array.isArray(drafts) || drafts.length === 0) return [];
-    const normalizedMaxColumns = Math.max(1, Math.floor(Number(maxColumns) || 0));
-    const rows = [];
-    let index = 0;
-
-    while (index < drafts.length) {
-      const row = [];
-      let slotsRemaining = normalizedMaxColumns;
-
-      while (index < drafts.length && slotsRemaining > 0) {
-        if (shouldGroupLandscapeDraftCard(drafts, index)) {
-          const runEnd = getLandscapeRunEndIndex(drafts, index);
-          const remainingRunLength = runEnd > index ? (runEnd - index) : 1;
-          const { columnSpan, chunkLength } = getLandscapeRunChunkPlan(remainingRunLength, normalizedMaxColumns, normalizedMaxColumns - slotsRemaining);
-          const rowDrafts = drafts.slice(index, index + chunkLength);
-          row.push({
-            kind: 'landscape-run',
-            span: columnSpan,
-            draftIds: rowDrafts.map((draft) => draft?.id).filter(Boolean),
-          });
-          index += chunkLength;
-          slotsRemaining -= columnSpan;
-          continue;
-        }
-
-        const draft = drafts[index];
-        row.push({
-          kind: 'card',
-          span: 1,
-          draftIds: draft?.id ? [draft.id] : [],
-        });
-        index += 1;
-        slotsRemaining -= 1;
-      }
-
-      if (row.length > 0) rows.push(row);
-    }
-
-    return rows;
-  }
-
-  function getDraftCountForGridRows(rows, rowCount = rows.length) {
-    if (!Array.isArray(rows) || rowCount <= 0) return 0;
-    return rows
-      .slice(0, rowCount)
-      .reduce((total, row) => total + row.reduce((rowTotal, item) => rowTotal + (Array.isArray(item?.draftIds) ? item.draftIds.length : 0), 0), 0);
-  }
-
-  function extendDraftRenderEndToRowBoundary(drafts, targetEnd, maxColumns) {
-    if (!Array.isArray(drafts) || drafts.length === 0) return 0;
-    const normalizedTargetEnd = Math.max(0, Math.min(Math.floor(Number(targetEnd) || 0), drafts.length));
-    if (normalizedTargetEnd <= 0) return 0;
-    const rows = planDraftGridRows(drafts, maxColumns);
-    let consumed = 0;
-    for (const row of rows) {
-      consumed += row.reduce((rowTotal, item) => rowTotal + (Array.isArray(item?.draftIds) ? item.draftIds.length : 0), 0);
-      if (consumed >= normalizedTargetEnd) return consumed;
-    }
-    return drafts.length;
-  }
-
-  function getRenderedGridRowFillCount(gridEl, maxColumns) {
-    if (!gridEl || !Number.isFinite(maxColumns) || maxColumns <= 0) return 0;
-    const children = Array.isArray(gridEl.children) ? gridEl.children : Array.from(gridEl.children || []);
-    let fill = 0;
-    for (const child of children) {
-      const className = String(child?.className || '');
-      if (className.includes('uv-drafts-load-more') || className.includes('uvd-empty-state') || className.includes('uv-drafts-loading')) {
-        continue;
-      }
-      const gridColumnValue = String(child?.style?.gridColumn || '');
-      const match = /span\s+(\d+)/i.exec(gridColumnValue);
-      const span = match ? Math.max(1, Number(match[1]) || 1) : 1;
-      fill = (fill + span) % maxColumns;
-    }
-    return fill;
-  }
-
-  function extendLandscapeRunRenderEnd(drafts, end, maxLandscapeColumns = 4) {
-    if (!Array.isArray(drafts) || !Number.isInteger(end)) return 0;
-    let nextEnd = Math.max(0, Math.min(end, drafts.length));
-    if (nextEnd <= 0 || nextEnd >= drafts.length) return nextEnd;
-    if (
-      getDraftOrientationForGrouping(drafts[nextEnd - 1]) === 'landscape' &&
-      getDraftOrientationForGrouping(drafts[nextEnd]) === 'landscape'
-    ) {
-      const runStart = getLandscapeRunStartIndex(drafts, nextEnd - 1);
-      const runEnd = getLandscapeRunEndIndex(drafts, nextEnd - 1);
-      if (runStart >= 0) {
-        const chunkSize = getLandscapeRunChunkSize(maxLandscapeColumns);
-        const runOffset = nextEnd - runStart;
-        const nextChunkMultiple = Math.ceil(runOffset / chunkSize) * chunkSize;
-        nextEnd = Math.min(runStart + nextChunkMultiple, runEnd >= 0 ? runEnd : drafts.length);
-      }
-    }
-    return nextEnd;
-  }
-
-  function isGenerationDraftId(value) {
-    const normalized = typeof value === 'string' ? value.trim() : '';
-    return /^gen_/i.test(normalized);
-  }
-
-  function extractErrorMessage(value, fallback = 'Unknown error') {
-    if (value == null) return fallback;
-    if (typeof value === 'string') {
-      const trimmed = value.trim();
-      return trimmed || fallback;
-    }
-    if (value instanceof Error) {
-      const message = typeof value.message === 'string' ? value.message.trim() : '';
-      return message || fallback;
-    }
-    if (Array.isArray(value)) {
-      for (const item of value) {
-        const message = extractErrorMessage(item, '');
-        if (message) return message;
-      }
-      return fallback;
-    }
-    if (typeof value === 'object') {
-      const candidates = [
-        value.message,
-        value.user_error_message,
-        value.error,
-        value.detail,
-        value.failure_reason,
-        value.reason,
-        value.title,
-        value.errors,
-      ];
-      for (const candidate of candidates) {
-        const message = extractErrorMessage(candidate, '');
-        if (message) return message;
-      }
-      try {
-        const serialized = JSON.stringify(value);
-        return serialized && serialized !== '{}' ? serialized : fallback;
-      } catch {}
-    }
-    return fallback;
-  }
-
-  function parseComposerGensInputValue(value) {
-    if (typeof value === 'number') {
-      return Number.isFinite(value) ? value : null;
-    }
-    const raw = typeof value === 'string' ? value.trim() : '';
-    if (!raw) return null;
-    const parsed = Number(raw);
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-
-  function extractPersistedGensCountValue(rawStorageValue) {
-    if (rawStorageValue == null) return null;
-    try {
-      const parsed = JSON.parse(rawStorageValue);
-      const value = parsed && typeof parsed === 'object' ? parsed.count : parsed;
-      return parseComposerGensInputValue(value);
-    } catch {
-      return parseComposerGensInputValue(rawStorageValue);
-    }
-  }
-
-  function extractPersistedComposerPromptValue(rawStorageValue) {
-    if (rawStorageValue == null) return null;
-    try {
-      const parsed = JSON.parse(rawStorageValue);
-      if (typeof parsed === 'string') return parsed;
-      if (parsed && typeof parsed === 'object' && typeof parsed.prompt === 'string') return parsed.prompt;
-      return null;
-    } catch {
-      return typeof rawStorageValue === 'string' ? rawStorageValue : null;
-    }
-  }
-
-  function resolvePreferredComposerGensCountValue(
-    rawComposerGensCount,
-    storedGensCount = null,
-    preferStoredGensCount = true
-  ) {
-    const parsedRawComposerGensCount = parseComposerGensInputValue(rawComposerGensCount);
-    const parsedStoredGensCount = parseComposerGensInputValue(storedGensCount);
-    if (preferStoredGensCount && parsedStoredGensCount != null) return parsedStoredGensCount;
-    if (parsedRawComposerGensCount != null) return parsedRawComposerGensCount;
-    return parsedStoredGensCount;
-  }
-
-  function resolvePreferredComposerPromptValue(
-    rawComposerPrompt,
-    storedPrompt = null,
-    preferStoredPrompt = true
-  ) {
-    const parsedRawComposerPrompt = typeof rawComposerPrompt === 'string' ? rawComposerPrompt : null;
-    const parsedStoredPrompt = typeof storedPrompt === 'string' ? storedPrompt : null;
-    if (preferStoredPrompt && parsedStoredPrompt != null) return parsedStoredPrompt;
-    if (parsedRawComposerPrompt != null) return parsedRawComposerPrompt;
-    return parsedStoredPrompt;
-  }
-
-  function getDraftWorkspaceBadgeLabel(draft, currentWorkspaceFilter = null, resolveWorkspaceName = null) {
-    const normalizedWorkspaceFilter = typeof currentWorkspaceFilter === 'string'
-      ? currentWorkspaceFilter.trim()
-      : '';
-    if (normalizedWorkspaceFilter) return '';
-    const workspaceId = typeof draft?.workspace_id === 'string'
-      ? draft.workspace_id.trim()
-      : '';
-    if (!workspaceId) return '';
-    if (typeof resolveWorkspaceName !== 'function') return '';
-    const workspaceName = String(resolveWorkspaceName(workspaceId) || '').trim();
-    return workspaceName;
-  }
-
-  function getUVDraftsPageTitle(currentWorkspaceFilter = null, resolveWorkspaceName = null) {
-    const normalizedWorkspaceFilter = typeof currentWorkspaceFilter === 'string'
-      ? currentWorkspaceFilter.trim()
-      : '';
-    if (!normalizedWorkspaceFilter || typeof resolveWorkspaceName !== 'function') {
-      return 'My Drafts';
-    }
-    const workspaceName = String(resolveWorkspaceName(normalizedWorkspaceFilter) || '').trim();
-    return workspaceName || 'My Drafts';
-  }
-
-  function formatWorkspaceSlugForTitle(slug = '') {
-    const normalizedSlug = typeof slug === 'string' ? slug.trim().toLowerCase() : '';
-    if (!normalizedSlug) return '';
-    return normalizedSlug
-      .split('-')
-      .map((part) => part.trim())
-      .filter(Boolean)
-      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-      .join(' ');
-  }
-
-  function getUVDraftsDocumentTitle(currentWorkspaceFilter = null, resolveWorkspaceName = null, pathname = '') {
-    const pageTitle = getUVDraftsPageTitle(currentWorkspaceFilter, resolveWorkspaceName);
-    if (pageTitle && pageTitle !== 'My Drafts') {
-      return `${pageTitle} - Sora`;
-    }
-    const workspaceSlug = extractWorkspaceSlugFromCreatortoolsPath(pathname);
-    const fallbackWorkspaceTitle = formatWorkspaceSlugForTitle(workspaceSlug);
-    return `${fallbackWorkspaceTitle || pageTitle || 'My Drafts'} - Sora`;
-  }
-
-  function filterDraftsByWorkspace(drafts, currentWorkspaceFilter = null) {
-    if (!Array.isArray(drafts)) return [];
-    const normalizedWorkspaceFilter = typeof currentWorkspaceFilter === 'string'
-      ? currentWorkspaceFilter.trim()
-      : '';
-    if (!normalizedWorkspaceFilter) return drafts;
-    return drafts.filter((draft) => String(draft?.workspace_id || '').trim() === normalizedWorkspaceFilter);
-  }
-
-  function slugifyWorkspaceName(name, fallback = 'workspace') {
-    const fallbackSlug = String(fallback || 'workspace')
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-+|-+$/g, '') || 'workspace';
-    const rawName = typeof name === 'string' ? name.trim() : '';
-    if (!rawName) return fallbackSlug;
-    const normalized = rawName
-      .normalize('NFKD')
-      .replace(/[\u0300-\u036f]/g, '')
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-+|-+$/g, '');
-    return normalized || fallbackSlug;
-  }
-
-  function getWorkspaceUrlSlug(workspace, workspaces = []) {
-    const workspaceId = typeof workspace?.id === 'string' ? workspace.id.trim() : '';
-    if (!workspaceId) return '';
-    const fallbackSlug = slugifyWorkspaceName(workspaceId, 'workspace');
-    const baseSlug = slugifyWorkspaceName(workspace?.name, fallbackSlug);
-    let duplicateIndex = 0;
-    const list = Array.isArray(workspaces) ? workspaces : [];
-    for (const item of list) {
-      const itemId = typeof item?.id === 'string' ? item.id.trim() : '';
-      if (!itemId) continue;
-      const itemBaseSlug = slugifyWorkspaceName(item?.name, slugifyWorkspaceName(itemId, 'workspace'));
-      if (itemBaseSlug !== baseSlug) continue;
-      duplicateIndex += 1;
-      if (itemId === workspaceId) {
-        return duplicateIndex === 1 ? baseSlug : `${baseSlug}-${duplicateIndex}`;
-      }
-    }
-    return baseSlug;
-  }
-
-  function findWorkspaceIdByUrlSlug(slug, workspaces = []) {
-    const normalizedSlug = typeof slug === 'string' ? slug.trim().toLowerCase() : '';
-    if (!normalizedSlug) return null;
-    const list = Array.isArray(workspaces) ? workspaces : [];
-    for (const workspace of list) {
-      const workspaceId = typeof workspace?.id === 'string' ? workspace.id.trim() : '';
-      if (!workspaceId) continue;
-      const workspaceSlug = getWorkspaceUrlSlug(workspace, list);
-      if (workspaceSlug === normalizedSlug || workspaceId.toLowerCase() === normalizedSlug) {
-        return workspaceId;
-      }
-    }
-    return null;
-  }
-
-  function extractWorkspaceSlugFromCreatortoolsPath(pathname = '') {
-    const currentPath = String(pathname || '').split(/[?#]/)[0];
-    if (currentPath === '/creatortools') return '';
-    if (!currentPath.startsWith('/creatortools/')) return null;
-    const remainder = currentPath.slice('/creatortools/'.length).replace(/^\/+/, '');
-    if (!remainder) return '';
-    const firstSegment = remainder.split('/')[0];
-    if (!firstSegment) return '';
-    try {
-      return decodeURIComponent(firstSegment).trim().toLowerCase();
-    } catch {
-      return firstSegment.trim().toLowerCase();
-    }
-  }
-
-  function buildCreatortoolsPathForWorkspace(workspaceId = null, workspaces = []) {
-    const normalizedWorkspaceId = typeof workspaceId === 'string' ? workspaceId.trim() : '';
-    if (!normalizedWorkspaceId) return '/creatortools';
-    const list = Array.isArray(workspaces) ? workspaces : [];
-    const workspace = list.find((item) => String(item?.id || '').trim() === normalizedWorkspaceId);
-    const slug = workspace
-      ? getWorkspaceUrlSlug(workspace, list)
-      : slugifyWorkspaceName(normalizedWorkspaceId, 'workspace');
-    return slug ? `/creatortools/${encodeURIComponent(slug)}` : '/creatortools';
-  }
-
-  function isDraftVisibleInBookmarkedFilter(draft, bookmarks, justSeenIds, isUnread = false) {
-    if (!draft || draft.hidden || draft.is_unsynced === true) return false;
-    const draftId = String(draft?.id || '').trim();
-    const bookmarkSet = bookmarks instanceof Set ? bookmarks : new Set();
-    const seenSet = justSeenIds instanceof Set ? justSeenIds : new Set();
-    const justSeen = !!draftId && seenSet.has(draftId);
-    return (!!draftId && bookmarkSet.has(draftId)) || (!!isUnread && !justSeen) || justSeen;
-  }
-
-  function isDraftVisibleInFilterState(draft, filterState) {
-    if (!draft || typeof draft !== 'object') return false;
-    const state = typeof filterState === 'string' ? filterState.trim().toLowerCase() : 'all';
-    const isHidden = draft.hidden === true;
-    const isUnsynced = draft.is_unsynced === true;
-
-    if (state === 'hidden') return isHidden;
-    if (state === 'unsynced') return isUnsynced && !isHidden;
-    if (isUnsynced) return false;
-    return !isHidden;
-  }
 
   function createSoraUVDraftsPageModule(deps = {}) {
     let capturedAuthToken = null;
@@ -1179,8 +11,6 @@
     const SORA_DEFAULT_FPS = Number(deps.defaultFps) > 0 ? Number(deps.defaultFps) : 30;
     const BOOKMARKS_KEY = 'SORA_UV_BOOKMARKS_V1';
     const GENS_COUNT_KEY = 'SCT_GENS_COUNT_V1';
-    const UV_DRAFTS_GENS_COUNT_KEY = 'SORA_UV_DRAFTS_GENS_COUNT_V1';
-    const UV_DRAFTS_COMPOSER_PROMPT_KEY = 'SORA_UV_DRAFTS_PROMPT_V1';
     const ULTRA_MODE_KEY = 'SCT_ULTRA_MODE_V1';
     const GENS_COUNT_MIN = 1;
     const GENS_COUNT_MAX_DEFAULT = 10;
@@ -1197,33 +27,27 @@
       }
     })();
     const COMPOSER_MODELS = [
-      { value: 'sy_8', label: 'Sora 2' },
-      { value: 'sy_ore', label: 'Sora 2 Pro' },
+      { value: 'sora2', label: 'Sora 2' },
+      { value: 'sora2pro', label: 'Sora 2 Pro' },
     ];
     let composerModels = COMPOSER_MODELS.slice();
     let composerModelValues = new Set(composerModels.map((item) => item.value));
-
-    // Mutable — updated from API via fetchComposerStyles()
     let composerStyles = [];
-
-    // Duration → n_frames mapping (30 fps)
-    const SECONDS_TO_FRAMES = { 5: 150, 10: 300, 15: 450, 25: 750 };
-    const VALID_DURATIONS = [5, 10, 15, 25];
-
-    // Cameo state for composer
-    let composerCameoIds = [];
-    let composerCameoReplacements = {};
-    let composerCameoUsernames = {};
-    let composerSourceCameoIds = new Set();
-
-    // Sentinel SDK state
-    let sentinelInitialized = false;
-    let cachedSentinelToken = null;
-    let cachedSentinelExpiry = 0;
+    const REMIX_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="none" viewBox="0 0 20 20" style="pointer-events:none;">
+      <circle cx="10" cy="10" r="7" stroke="currentColor" stroke-width="1.556"></circle>
+      <path stroke="currentColor" stroke-linecap="round" stroke-width="1.556" d="M11.945 10c0-4.667-9.723-5.833-8.75 1.556"></path>
+      <path stroke="currentColor" stroke-linecap="round" stroke-width="1.556" d="M8.055 10c0 4.667 9.723 5.833 8.75-1.556"></path>
+    </svg>`;
 
     function debugLog(...args) {
       if (!UV_DRAFTS_DEBUG_ENABLED) return;
       try { console.log(...args); } catch {}
+    }
+
+    const HTML_ESCAPE_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+
+    function escapeHtml(value) {
+      return String(value ?? '').replace(/[&<>"']/g, (char) => HTML_ESCAPE_MAP[char] || char);
     }
 
     function getBookmarks() {
@@ -1255,7 +79,7 @@
           }
         } catch {}
         if (rawCount > 1 && bookmarksSet.size < rawCount - 1) {
-          console.error('[UV Drafts] Bookmark safety: blocked write of', bookmarksSet.size,
+          console.error('[Creator Tools] Bookmark safety: blocked write of', bookmarksSet.size,
             'bookmarks when storage has', rawCount, '. Potential data loss prevented.');
           return;
         }
@@ -1310,62 +134,38 @@
       return Math.min(getGensCountMax(), Math.max(GENS_COUNT_MIN, Math.round(n)));
     }
 
-    function loadStoredGensCountValue() {
-      try {
-        const rawLocalDraftsCount = localStorage.getItem(UV_DRAFTS_GENS_COUNT_KEY);
-        const rawSharedCount = localStorage.getItem(GENS_COUNT_KEY);
-        const parsedCount = extractPersistedGensCountValue(rawLocalDraftsCount ?? rawSharedCount);
-        return parsedCount == null ? null : clampGensCount(parsedCount);
-      } catch {
-        return null;
-      }
-    }
-
     function loadStoredGensCount() {
-      return loadStoredGensCountValue() ?? GENS_COUNT_MIN;
+      try {
+        const raw = localStorage.getItem(GENS_COUNT_KEY);
+        if (!raw) return GENS_COUNT_MIN;
+        const parsed = JSON.parse(raw);
+        const count = parsed && typeof parsed === 'object' ? parsed.count : raw;
+        return clampGensCount(count);
+      } catch {
+        return GENS_COUNT_MIN;
+      }
     }
 
     function persistComposerGensCount(count) {
-      const nextValue = JSON.stringify({ count: clampGensCount(count), setAt: Date.now() });
-      try {
-        localStorage.setItem(UV_DRAFTS_GENS_COUNT_KEY, nextValue);
-      } catch {}
-      try {
-        localStorage.setItem(GENS_COUNT_KEY, nextValue);
-      } catch {}
-    }
-
-    function loadStoredComposerPromptValue() {
-      try {
-        return extractPersistedComposerPromptValue(localStorage.getItem(UV_DRAFTS_COMPOSER_PROMPT_KEY));
-      } catch {
-        return null;
-      }
-    }
-
-    function persistComposerPrompt(prompt) {
-      const nextPrompt = typeof prompt === 'string' ? prompt : '';
       try {
         localStorage.setItem(
-          UV_DRAFTS_COMPOSER_PROMPT_KEY,
-          JSON.stringify({ prompt: nextPrompt, setAt: Date.now() })
+          GENS_COUNT_KEY,
+          JSON.stringify({ count: clampGensCount(count), setAt: Date.now() })
         );
       } catch {}
     }
 
-    function escapeHtml(str) {
-      return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-    }
-
     function normalizeComposerModel(value) {
-      return resolveComposerModelValue(composerModels, value);
+      const normalized = typeof value === 'string' ? value.trim() : '';
+      return composerModelValues.has(normalized) ? normalized : '';
     }
 
     function getDefaultComposerModel() {
       return (
         normalizeComposerModel(uvDraftsComposerState?.model) ||
         normalizeComposerModel(modelOverride) ||
-        composerModels[0]?.value || 'sy_8'
+        composerModels[0]?.value ||
+        COMPOSER_MODELS[0].value
       );
     }
 
@@ -1373,14 +173,11 @@
       if (uvDraftsLogic && typeof uvDraftsLogic.isDraftPubliclyPosted === 'function') {
         return !!uvDraftsLogic.isDraftPubliclyPosted(draft);
       }
-      const post = extractPublishedPost(draft?.post);
       const visibility = String(draft?.post_visibility || '').toLowerCase();
       if (visibility === 'public') return true;
       if (draft?.posted_to_public === true) return true;
       if (draft?.post_meta?.posted_to_public === true) return true;
       if (String(draft?.post_meta?.visibility || '').toLowerCase() === 'public') return true;
-      if (post?.posted_to_public === true) return true;
-      if (String(post?.visibility || '').toLowerCase() === 'public') return true;
       return false;
     }
 
@@ -1388,10 +185,7 @@
       if (uvDraftsLogic && typeof uvDraftsLogic.getDraftPostUrl === 'function') {
         return uvDraftsLogic.getDraftPostUrl(draft, 'https://sora.chatgpt.com');
       }
-      const post = extractPublishedPost(draft?.post);
-      const permalink = String(draft?.post_permalink || post?.permalink || '').trim();
-      if (permalink) return permalink;
-      const postId = String(draft?.post_id || draft?.post_meta?.id || post?.id || '').trim();
+      const postId = String(draft?.post_id || '').trim();
       if (!postId) return '';
       return `https://sora.chatgpt.com/p/${encodeURIComponent(postId)}`;
     }
@@ -1410,6 +204,86 @@
       if (!draft?.id) return '';
       if (draft.storyboard_id) return `https://sora.chatgpt.com/storyboard/${encodeURIComponent(draft.storyboard_id)}`;
       return `https://sora.chatgpt.com/d/${encodeURIComponent(draft.id)}`;
+    }
+
+    function normalizePostId(value) {
+      if (value == null) return '';
+      const raw = String(value).trim();
+      if (!raw) return '';
+      if (/^s_[A-Za-z0-9_-]+$/i.test(raw)) return raw;
+      try {
+        const parsed = new URL(raw, 'https://sora.chatgpt.com');
+        const match = parsed.pathname.match(/\/p\/(s_[A-Za-z0-9_-]+)/i);
+        return match ? match[1] : '';
+      } catch {
+        const match = raw.match(/\/p\/(s_[A-Za-z0-9_-]+)/i);
+        return match ? match[1] : '';
+      }
+    }
+
+    function normalizeDraftId(value) {
+      if (value == null) return '';
+      const raw = String(value).trim();
+      if (!raw) return '';
+      try {
+        const parsed = new URL(raw, 'https://sora.chatgpt.com');
+        const match = parsed.pathname.match(/\/d\/([A-Za-z0-9_-]+)/i);
+        if (match) return match[1];
+      } catch {
+        const match = raw.match(/\/d\/([A-Za-z0-9_-]+)/i);
+        if (match) return match[1];
+      }
+      return /^[A-Za-z0-9_-]+$/i.test(raw) ? raw : '';
+    }
+
+    function getDraftRemixSource(draft) {
+      if (uvDraftsLogic && typeof uvDraftsLogic.getDraftRemixSource === 'function') {
+        return uvDraftsLogic.getDraftRemixSource(draft);
+      }
+      const data = draft && typeof draft === 'object' ? draft : {};
+      const creationConfig = data.creation_config && typeof data.creation_config === 'object'
+        ? data.creation_config
+        : {};
+      const sourcePostId = normalizePostId(
+        data.remix_target_post_id ||
+        creationConfig?.remix_target_post?.id ||
+        creationConfig?.remix_target_post?.post?.id ||
+        data.source_post_id ||
+        creationConfig?.source_post_id
+      );
+      if (sourcePostId) {
+        return {
+          isRemix: true,
+          sourceType: 'post',
+          sourceId: sourcePostId,
+          sourcePostId,
+          sourceDraftId: '',
+        };
+      }
+      const sourceDraftId = normalizeDraftId(
+        data.remix_target_draft_id ||
+        creationConfig?.remix_target_draft?.id ||
+        creationConfig?.remix_target_draft?.draft?.id ||
+        creationConfig?.source_draft_id ||
+        data.source_draft_id
+      );
+      if (sourceDraftId) {
+        return {
+          isRemix: true,
+          sourceType: 'draft',
+          sourceId: sourceDraftId,
+          sourcePostId: '',
+          sourceDraftId,
+        };
+      }
+      const isRemix = data.is_remix === true || creationConfig?.is_remix === true || String(creationConfig?.mode || '').toLowerCase() === 'remix';
+      return {
+        isRemix,
+        sourceType: '',
+        sourceId: '',
+        sourcePostId: '',
+        sourceDraftId: '',
+      };
     }
 
     function getDraftKindKey(draft) {
@@ -1508,21 +382,11 @@
       return localResult;
     }
 
-    function getDraftPublishedPostId(draft) {
-      return String(
-        draft?.post_id ||
-        draft?.post_meta?.id ||
-        extractPublishedPost(draft?.post)?.id ||
-        ''
-      ).trim();
-    }
-
     function isDraftUnreadState(draft) {
       if (isNoDateDraft(draft)) return false;
       if (uvDraftsLogic && typeof uvDraftsLogic.isDraftUnread === 'function') {
         return !!uvDraftsLogic.isDraftUnread(draft);
       }
-      if (getDraftPublishedPostId(draft).startsWith('s_')) return false;
       return draft?.is_read === false;
     }
 
@@ -1560,7 +424,7 @@
     syncState: 'sync_state'
   };
 
-  // == IndexedDB Cache Layer for UV Drafts ==
+  // == IndexedDB Cache Layer for Creator Tools ==
   let uvDraftsDB = null;
 
   async function openUVDraftsDB() {
@@ -1696,7 +560,7 @@
     });
   }
 
-  // == UV Drafts API Fetcher ==
+  // == Creator Tools API Fetcher ==
   async function fetchAllUVDrafts(onProgress) {
     const allDrafts = [];
     let cursor = null;
@@ -1723,7 +587,7 @@
 
         if (!response.ok) {
           if (response.status === 401) {
-            console.error('[UV Drafts] Auth token missing or expired. Navigate to another page to capture a fresh token.');
+            console.error('[Creator Tools] Auth token missing or expired. Navigate to another page to capture a fresh token.');
           }
           throw new Error(`Drafts API error: ${response.status}`);
         }
@@ -1758,7 +622,7 @@
           }
         }
       } catch (err) {
-        console.error('[UV Drafts] Fetch error:', err);
+        console.error('[Creator Tools] Fetch error:', err);
         throw err;
       }
     } while (cursor);
@@ -1785,9 +649,8 @@
   }
 
   // Sync remaining drafts in background starting from cursor
-  async function syncRemainingDrafts(startCursor, onProgress, runId = uvDraftsInitRunId, startOrder = 0, syncedIds = null, maxPages = Infinity, options = {}) {
+  async function syncRemainingDrafts(startCursor, onProgress, runId = uvDraftsInitRunId, startOrder = 0, syncedIds = null) {
     const isStaleRun = () => runId !== uvDraftsInitRunId;
-    const suppressUiRender = options?.suppressUiRender === true;
     let cursor = startCursor;
     let pageNum = 1;
     let syncSucceeded = true;
@@ -1795,7 +658,6 @@
 
     while (cursor) {
       if (isStaleRun()) return false;
-      if (pageNum > maxPages) break;
       const url = new URL('https://sora.chatgpt.com/backend/project_y/profile/drafts');
       url.searchParams.set('limit', '500');
       url.searchParams.set('cursor', cursor);
@@ -1850,12 +712,10 @@
           pageNum++;
           if (onProgress) onProgress(uvDraftsData.length, pageNum);
 
-          if (!suppressUiRender && hadUpdates && uvDraftsPageEl && uvDraftsPageEl.style.display !== 'none') {
+          if (hadUpdates && uvDraftsPageEl && uvDraftsPageEl.style.display !== 'none') {
             renderUVDraftsSyncUpdate();
           }
-          if (!suppressUiRender) {
-            updateUVDraftsStats();
-          }
+          updateUVDraftsStats();
         }
 
         // Trust the cursor, don't cut off based on count
@@ -1897,15 +757,13 @@
               for (const incoming of incomingById2.values()) mergedData2.push(incoming);
               uvDraftsData = mergedData2;
               uvDraftsAwaitingMoreResults = false;
-              if (!suppressUiRender && uvDraftsPageEl && uvDraftsPageEl.style.display !== 'none') renderUVDraftsSyncUpdate();
-              if (!suppressUiRender) {
-                updateUVDraftsStats();
-              }
+              if (uvDraftsPageEl && uvDraftsPageEl.style.display !== 'none') renderUVDraftsSyncUpdate();
+              updateUVDraftsStats();
             }
           }
         }
       } catch (err) {
-        console.error('[UV Drafts] Background sync error:', err);
+        console.error('[Creator Tools] Background sync error:', err);
         syncSucceeded = false;
         break;
       }
@@ -1943,8 +801,8 @@
       apiDraft.reason ??
       existingData.violation_reason ??
       null;
-    const thumbnailUrl = apiDraft.encodings?.thumbnail?.path || apiDraft.thumbnail_url || existingData.thumbnail_url || '';
-    const previewUrl = apiDraft.encodings?.md?.path || apiDraft.video_url || apiDraft.url || existingData.preview_url || '';
+    const thumbnailUrl = apiDraft.encodings?.thumbnail?.path || existingData.thumbnail_url || '';
+    const previewUrl = apiDraft.encodings?.md?.path || apiDraft.url || existingData.preview_url || '';
     const noDate = isNoDateDraft({
       ...existingData,
       ...apiDraft,
@@ -1953,20 +811,16 @@
       thumbnail_url: thumbnailUrl,
       preview_url: previewUrl,
     });
-    const {
-      postId,
-      postPermalink,
-      postVisibility,
-      postedToPublic,
-      postMeta,
-    } = resolveDraftPostData(apiDraft, existingData);
-    const { width, height } = extractDraftDimensions(apiDraft, existingData);
-    const orientation = resolveDraftOrientationValue(apiDraft, existingData, { width, height });
+    const post = apiDraft.post && typeof apiDraft.post === 'object' ? apiDraft.post : null;
+    const existingPostMeta = existingData.post_meta && typeof existingData.post_meta === 'object'
+      ? existingData.post_meta
+      : null;
     const apiCreatedAt = Number(apiDraft.created_at);
     const existingCreatedAt = Number(existingData.created_at);
     const resolvedCreatedAt = Number.isFinite(apiCreatedAt) && apiCreatedAt > 0
       ? apiCreatedAt
       : (Number.isFinite(existingCreatedAt) && existingCreatedAt > 0 ? existingCreatedAt : null);
+    const remixSource = getDraftRemixSource({ ...existingData, ...apiDraft });
 
     // Determine is_read: use API value if present, otherwise existing, otherwise default to true
     let isRead = true; // Default: assume read (not new)
@@ -1992,37 +846,52 @@
     }
 
     return {
-      id: apiDraft.id || apiDraft.generation_id,
+      id: apiDraft.id,
       kind,
       prompt: apiDraft.prompt || '',
       title: apiDraft.title || '',
       created_at: noDate ? null : resolvedCreatedAt,
       no_date_order: noDate ? noDateOrder : null,
       api_order: apiOrder,
-      width,
-      height,
+      width: apiDraft.width || 0,
+      height: apiDraft.height || 0,
       duration_seconds: durationSeconds,
       thumbnail_url: thumbnailUrl,
       preview_url: previewUrl,
       gif_url: apiDraft.encodings?.gif?.path || '',
-      download_url: apiDraft.downloadable_url || apiDraft.download_urls?.no_watermark || apiDraft.video_url || apiDraft.url || existingData.download_url || '',
+      download_url: apiDraft.downloadable_url || apiDraft.download_urls?.no_watermark || existingData.download_url || '',
       can_remix: apiDraft.can_remix ?? true,
       can_storyboard: apiDraft.can_storyboard ?? true,
       storyboard_id: apiDraft.storyboard_id || apiDraft.creation_config?.storyboard_id || '',
-      remix_target_draft_id: apiDraft.creation_config?.remix_target_id || existingData.remix_target_draft_id || null,
-      remix_target_post_id: extractRemixTargetPostId(apiDraft, existingData),
-      post_visibility: postVisibility,
-      post_id: postId,
-      post_permalink: postPermalink,
-      posted_to_public: postedToPublic,
-      post_meta: postMeta,
+      remix_target_post_id: remixSource.sourcePostId || null,
+      remix_target_draft_id: remixSource.sourceDraftId || null,
+      is_remix: remixSource.isRemix === true,
+      post_visibility: apiDraft.post_visibility || null,
+      post_id: post?.id || existingData.post_id || null,
+      post_permalink: post?.permalink || existingData.post_permalink || null,
+      posted_to_public:
+        typeof post?.posted_to_public === 'boolean'
+          ? post.posted_to_public
+          : typeof existingData.posted_to_public === 'boolean'
+            ? existingData.posted_to_public
+            : null,
+      post_meta: post
+        ? {
+            id: post.id || null,
+            permalink: post.permalink || null,
+            visibility: post.visibility || null,
+            posted_to_public: post.posted_to_public === true,
+            share_ref: post.share_ref || null,
+            share_setting: post.permissions?.share_setting || null,
+          }
+        : existingPostMeta,
       tags: apiDraft.tags || [],
       cameo_profiles: apiDraft.creation_config?.cameo_profiles || [],
       task_id: apiDraft.task_id || '',
       generation_type: apiDraft.generation_type || 'video_gen',
       model: apiDraft.model || apiDraft.creation_config?.model || null,
       resolution: apiDraft.resolution || apiDraft.creation_config?.resolution || null,
-      orientation,
+      orientation: apiDraft.creation_config?.orientation || (apiDraft.width > apiDraft.height ? 'landscape' : 'portrait'),
       n_frames: apiDraft.creation_config?.n_frames || nFrames || 0,
       style: apiDraft.creation_config?.style || null,
       seed: apiDraft.creation_config?.seed || null,
@@ -2033,11 +902,7 @@
       // Preserve extension-specific fields from existing data
       // Note: bookmarked is stored separately in localStorage via BOOKMARKS_KEY
       hidden: existingData.hidden ?? false,
-      workspace_id: existingData.workspace_id ?? uvDraftsPendingWorkspaceTags.get(apiDraft.task_id) ?? null,
-      scheduled_post_id: existingData.scheduled_post_id || null,
-      scheduled_post_at: Number(existingData.scheduled_post_at) > 0 ? Number(existingData.scheduled_post_at) : null,
-      scheduled_post_status: existingData.scheduled_post_status || null,
-      scheduled_post_caption: typeof existingData.scheduled_post_caption === 'string' ? existingData.scheduled_post_caption : '',
+      workspace_id: existingData.workspace_id ?? null,
       is_unsynced: fromDraftsApi ? false : existingData?.is_unsynced === true,
       cached_at: Date.now(),
       last_fetched: Date.now()
@@ -2086,7 +951,7 @@
       if (!res.ok) {
         // 400 = server rejected it, won't succeed on retry — accept local mark and move on
         if (res.status === 400) {
-          console.warn('[UV Drafts] Server returned 400 for mark-read, accepting local state:', draftId);
+          console.warn('[Creator Tools] Server returned 400 for mark-read, accepting local state:', draftId);
           uvDraftsUnsyncedReads.delete(draftId);
           onReadSyncDelivered(draftId);
           return;
@@ -2098,7 +963,7 @@
       uvDraftsUnsyncedReads.delete(draftId);
       onReadSyncDelivered(draftId);
     } catch (err) {
-      console.error('[UV Drafts] Failed to mark draft as read on server:', err);
+      console.error('[Creator Tools] Failed to mark draft as read on server:', err);
       // Add to unsynced for retry
       uvDraftsUnsyncedReads.add(draftId);
       startUnsyncedReadsRetry();
@@ -2144,16 +1009,16 @@
 
         if (res.ok) {
           uvDraftsUnsyncedReads.delete(draftId);
-          console.log('[UV Drafts] Retry succeeded for:', draftId);
+          console.log('[Creator Tools] Retry succeeded for:', draftId);
           onReadSyncDelivered(draftId);
         } else if (res.status === 400) {
           // 400 = server won't accept it, stop retrying
           uvDraftsUnsyncedReads.delete(draftId);
-          console.warn('[UV Drafts] Retry got 400, giving up for:', draftId);
+          console.warn('[Creator Tools] Retry got 400, giving up for:', draftId);
           onReadSyncDelivered(draftId);
         }
       } catch (err) {
-        console.log('[UV Drafts] Retry failed for:', draftId, err.message);
+        console.log('[Creator Tools] Retry failed for:', draftId, err.message);
       }
       updateMarkAllProgressUI();
     }, 5000); // Retry one every 5 seconds
@@ -2165,26 +1030,28 @@
     return new Set(seenDrafts.map(d => d.id));
   }
 
-  // == UV Drafts Page State ==
+  // == Creator Tools Page State ==
   let uvDraftsPageEl = null;
-  let uvDraftsTitleEl = null;
   let uvDraftsGridEl = null;
   let uvDraftsFilterBarEl = null;
   let uvDraftsLoadingEl = null;
   let uvDraftsSearchInput = null;
   let uvDraftsFilterState = 'all'; // 'all', 'bookmarked', 'hidden', 'violations', 'new', 'unsynced'
+  let uvDraftsSortState = 'newest'; // 'newest', 'oldest' (API order)
   let uvDraftsWorkspaceFilter = null; // workspace_id or null
   let uvDraftsSearchQuery = '';
   let uvDraftsData = []; // Current loaded drafts
-  let uvDraftsInitialLoadComplete = false;
+
+  // Virtual scrolling state
+  const UV_DRAFTS_BATCH_SIZE = 50; // Render 50 cards at a time
+
   // Video playback state - once user clicks play, enable hover-to-play
   let uvDraftsVideoInteracted = false;
   let uvDraftsCurrentlyPlayingVideo = null;
-  let uvDraftsCurrentlyPlayingDraftId = null;
   let uvDraftsRenderedCount = 0;
   let uvDraftsFilteredCache = []; // Cache filtered results to avoid re-filtering on scroll
   let uvDraftsScrollHandler = null;
-  let uvDraftsAwaitingMoreResults = false; // First page was empty, but pagination indicates more results may arrive
+  let uvDraftsAwaitingMoreResults = false; // First page was empty, but pagination indicates more drafts are still arriving.
   let uvDraftsJustSeenIds = new Set(); // Drafts marked seen this session (stay visible until refresh/filter change)
   let uvDraftsInitRunId = 0;
   let uvDraftsWorkspaceModalEl = null;
@@ -2204,18 +1071,8 @@
   let uvDraftsMarkAllState = loadPersistedMarkAllState();
   let uvDraftsPendingData = [];
   let uvDraftsPendingIds = new Set();
-  let uvDraftsPendingEndpointIds = new Set();
   let uvDraftsPendingPollTimerId = null;
   let uvDraftsPendingFailures = 0;
-  let uvDraftsPendingMinPolls = 0; // minimum polls before auto-stop (for newly submitted tasks)
-  let uvDraftsGridResizeObserver = null;
-  let uvDraftsWindowResizeHandler = null;
-  let uvDraftsVisualViewportResizeHandler = null;
-  let uvDraftsResponsiveLayoutTimerId = 0;
-  let uvDraftsLastGridColumnCapacity = 0;
-  // Auto-tag: map task_id → workspace_id for drafts created from within a workspace
-  const uvDraftsPendingWorkspaceTags = new Map();
-  let uvDraftsSyncConfirmedIds = new Set(); // IDs confirmed by the API in this session
   let uvDraftsTopRefreshInFlight = null;
   const UV_DRAFTS_PENDING_ENDPOINT = 'https://sora.chatgpt.com/backend/nf/pending/v2';
   const UV_DRAFTS_PENDING_POLL_MS = 5000;
@@ -2224,6 +1081,8 @@
   const UV_DRAFTS_COMPOSER_KEY = 'SORA_UV_DRAFTS_COMPOSER_V1';
   const UV_PENDING_COMPOSE_KEY = 'SORA_UV_PENDING_COMPOSE_V1';
   const UV_PENDING_CREATE_OVERRIDES_KEY = 'SORA_UV_PENDING_CREATE_OVERRIDES_V1';
+  const UV_PENDING_CREATE_QUEUE_KEY = 'SORA_UV_PENDING_CREATE_QUEUE_V1';
+  const UV_PENDING_CREATE_BATCH_KEY = 'SORA_UV_PENDING_CREATE_BATCH_V1';
 
   const uvDraftsLogic = window.SoraUVDraftsLogic || null;
 
@@ -2497,21 +1356,21 @@
   }
 
   function computeUVDraftsStats() {
-    const workspaceScopedDrafts = filterDraftsByWorkspace(uvDraftsData, uvDraftsWorkspaceFilter);
     const bookmarks = getBookmarks();
     if (uvDraftsLogic && typeof uvDraftsLogic.computeDraftStats === 'function') {
-      return uvDraftsLogic.computeDraftStats(workspaceScopedDrafts, bookmarks, uvDraftsJustSeenIds);
+      return uvDraftsLogic.computeDraftStats(uvDraftsData, bookmarks, uvDraftsJustSeenIds);
     }
     return {
-      total: workspaceScopedDrafts.length,
-      bookmarked: workspaceScopedDrafts.filter((d) => bookmarks.has(d.id)).length,
-      hidden: workspaceScopedDrafts.filter((d) => d.hidden).length,
-      newCount: workspaceScopedDrafts.filter((d) => d?.is_unsynced !== true && isDraftUnreadState(d) && !uvDraftsJustSeenIds.has(d.id)).length,
+      total: uvDraftsData.length,
+      bookmarked: uvDraftsData.filter((d) => bookmarks.has(d.id)).length,
+      hidden: uvDraftsData.filter((d) => d.hidden).length,
+      newCount: uvDraftsData.filter((d) => isDraftUnreadState(d) && !uvDraftsJustSeenIds.has(d.id)).length,
     };
   }
 
   const UV_DRAFTS_VIEW_STATE_KEY = 'SORA_UV_DRAFTS_VIEW_STATE_V1';
   const UV_DRAFTS_FILTER_VALUES = new Set(['all', 'bookmarked', 'hidden', 'violations', 'new', 'unsynced']);
+  const UV_DRAFTS_SORT_VALUES = new Set(['newest', 'oldest']);
   let uvDraftsViewStateLoaded = false;
 
   function normalizeUVDraftsViewState(raw) {
@@ -2520,12 +1379,23 @@
     }
     const out = {
       filterState: 'all',
+      sortState: 'newest',
       workspaceFilter: null,
       searchQuery: '',
     };
     if (!raw || typeof raw !== 'object') return out;
     if (typeof raw.filterState === 'string' && UV_DRAFTS_FILTER_VALUES.has(raw.filterState)) {
       out.filterState = raw.filterState;
+    }
+    if (typeof raw.sortState === 'string') {
+      const normalizedRawSortState = raw.sortState.trim().toLowerCase();
+      const legacyMappedSortState =
+        normalizedRawSortState === 'api' || normalizedRawSortState === 'duration'
+          ? 'newest'
+          : normalizedRawSortState;
+      if (UV_DRAFTS_SORT_VALUES.has(legacyMappedSortState)) {
+        out.sortState = legacyMappedSortState;
+      }
     }
     if (typeof raw.workspaceFilter === 'string' && raw.workspaceFilter.trim()) {
       out.workspaceFilter = raw.workspaceFilter.trim();
@@ -2543,6 +1413,7 @@
       const raw = JSON.parse(localStorage.getItem(UV_DRAFTS_VIEW_STATE_KEY) || '{}');
       const viewState = normalizeUVDraftsViewState(raw);
       uvDraftsFilterState = viewState.filterState;
+      uvDraftsSortState = viewState.sortState;
       uvDraftsWorkspaceFilter = viewState.workspaceFilter;
       uvDraftsSearchQuery = viewState.searchQuery;
     } catch {}
@@ -2554,6 +1425,7 @@
         UV_DRAFTS_VIEW_STATE_KEY,
         JSON.stringify({
           filterState: uvDraftsFilterState,
+          sortState: uvDraftsSortState,
           workspaceFilter: uvDraftsWorkspaceFilter,
           searchQuery: uvDraftsSearchQuery,
         })
@@ -2563,57 +1435,38 @@
 
   function defaultUVDraftsComposerState() {
     return {
-      prompt: loadStoredComposerPromptValue() ?? '',
+      prompt: '',
       model: getDefaultComposerModel(),
       durationSeconds: 10,
       gensCount: loadStoredGensCount(),
       orientation: 'portrait',
-      size: 'small',
-      style_id: '',
+      resolution: 'standard',
+      style: '',
+      seed: '',
     };
   }
 
-  function snapToValidDuration(seconds) {
-    const s = Math.round(Number(seconds) || 10);
-    let best = VALID_DURATIONS[0];
-    let bestDist = Math.abs(s - best);
-    for (let i = 1; i < VALID_DURATIONS.length; i++) {
-      const dist = Math.abs(s - VALID_DURATIONS[i]);
-      if (dist < bestDist) { best = VALID_DURATIONS[i]; bestDist = dist; }
-    }
-    return best;
-  }
-
-  function normalizeUVDraftsComposerState(raw, options = {}) {
+  function normalizeUVDraftsComposerState(raw) {
     const out = defaultUVDraftsComposerState();
-    const storedGensCount = Object.prototype.hasOwnProperty.call(options, 'storedGensCount')
-      ? options.storedGensCount
-      : loadStoredGensCountValue();
-    const preferStoredGensCount = options.preferStoredGensCount === true;
-    const storedPrompt = Object.prototype.hasOwnProperty.call(options, 'storedPrompt')
-      ? options.storedPrompt
-      : loadStoredComposerPromptValue();
-    const preferStoredPrompt = options.preferStoredPrompt === true;
     if (!raw || typeof raw !== 'object') return out;
-    const preferredPrompt = resolvePreferredComposerPromptValue(raw.prompt, storedPrompt, preferStoredPrompt);
-    if (typeof preferredPrompt === 'string') out.prompt = preferredPrompt;
+    if (typeof raw.prompt === 'string') out.prompt = raw.prompt;
     if (typeof raw.model === 'string') out.model = normalizeComposerModel(raw.model) || out.model;
     if (typeof raw.durationSeconds === 'number' && Number.isFinite(raw.durationSeconds) && raw.durationSeconds > 0) {
-      out.durationSeconds = snapToValidDuration(raw.durationSeconds);
+      out.durationSeconds = Math.min(30, Math.max(4, Math.round(raw.durationSeconds)));
     }
-    const preferredGensCount = resolvePreferredComposerGensCountValue(
-      raw.gensCount,
-      storedGensCount,
-      preferStoredGensCount
-    );
-    if (preferredGensCount != null) {
-      out.gensCount = clampGensCount(preferredGensCount);
+    if (typeof raw.gensCount === 'number' && Number.isFinite(raw.gensCount)) {
+      out.gensCount = clampGensCount(raw.gensCount);
+    } else if (typeof raw.gensCount === 'string' && raw.gensCount.trim()) {
+      out.gensCount = clampGensCount(raw.gensCount);
     }
-    if (raw.orientation === 'portrait' || raw.orientation === 'landscape') {
+    if (raw.orientation === 'portrait' || raw.orientation === 'landscape' || raw.orientation === 'square') {
       out.orientation = raw.orientation;
     }
-    out.size = normalizeComposerSizeForModel(raw.size, out.model, loadUltraModeEnabledFromStorage());
-    if (typeof raw.style_id === 'string') out.style_id = raw.style_id;
+    if (raw.resolution === 'standard' || raw.resolution === 'high') {
+      out.resolution = raw.resolution;
+    }
+    if (typeof raw.style === 'string') out.style = raw.style;
+    if (typeof raw.seed === 'string') out.seed = raw.seed.replace(/[^\d]/g, '').slice(0, 10);
     return out;
   }
 
@@ -2621,10 +1474,7 @@
     if (uvDraftsComposerState) return uvDraftsComposerState;
     try {
       const raw = JSON.parse(localStorage.getItem(UV_DRAFTS_COMPOSER_KEY) || '{}');
-      uvDraftsComposerState = normalizeUVDraftsComposerState(raw, {
-        preferStoredGensCount: true,
-        preferStoredPrompt: true,
-      });
+      uvDraftsComposerState = normalizeUVDraftsComposerState(raw);
     } catch {
       uvDraftsComposerState = defaultUVDraftsComposerState();
     }
@@ -2637,8 +1487,72 @@
     try {
       localStorage.setItem(UV_DRAFTS_COMPOSER_KEY, JSON.stringify(uvDraftsComposerState || defaultUVDraftsComposerState()));
     } catch {}
-    persistComposerPrompt(uvDraftsComposerState?.prompt || '');
-    persistComposerGensCount(uvDraftsComposerState?.gensCount);
+  }
+
+  function refreshComposerModelSelect() {
+    if (!uvDraftsComposerEl) return;
+    const modelEl = uvDraftsComposerEl.querySelector('[data-uvd-compose-model="1"]');
+    if (!modelEl) return;
+    const preferredValue =
+      normalizeComposerModel(uvDraftsComposerState?.model) ||
+      normalizeComposerModel(modelOverride) ||
+      normalizeComposerModel(modelEl.value);
+    modelEl.innerHTML = composerModels
+      .map((model) => `<option value="${escapeHtml(model.value)}">${escapeHtml(model.label)}</option>`)
+      .join('');
+    modelEl.value = preferredValue || composerModels[0]?.value || '';
+    if (uvDraftsComposerState) {
+      uvDraftsComposerState.model = modelEl.value || getDefaultComposerModel();
+      persistUVDraftsComposerState();
+    }
+    if (modelEl.value) modelOverride = modelEl.value;
+    modelEl.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  function refreshComposerStyleSuggestions() {
+    if (!uvDraftsComposerEl) return;
+    const styleListEl = uvDraftsComposerEl.querySelector('[data-uvd-compose-style-list="1"]');
+    if (!styleListEl) return;
+    styleListEl.innerHTML = composerStyles
+      .map((style) => `<option value="${escapeHtml(style.value)}">${escapeHtml(style.label)}</option>`)
+      .join('');
+  }
+
+  async function fetchComposerModels() {
+    if (!capturedAuthToken) return;
+    try {
+      const res = await fetch('https://sora.chatgpt.com/backend/models?nf2=true', {
+        headers: { Authorization: capturedAuthToken },
+      });
+      if (!res.ok) return;
+      const json = await res.json();
+      if (Array.isArray(json.data) && json.data.length) {
+        composerModels = json.data.map((model) => ({
+          value: model.id,
+          label: model.label || model.id,
+        }));
+        composerModelValues = new Set(composerModels.map((model) => model.value));
+        refreshComposerModelSelect();
+      }
+    } catch {}
+  }
+
+  async function fetchComposerStyles() {
+    if (!capturedAuthToken) return;
+    try {
+      const res = await fetch('https://sora.chatgpt.com/backend/project_y/initialize_async', {
+        headers: { Authorization: capturedAuthToken },
+      });
+      if (!res.ok) return;
+      const json = await res.json();
+      if (Array.isArray(json.styles) && json.styles.length) {
+        composerStyles = json.styles.map((style) => ({
+          value: style.id,
+          label: style.display_name || style.id,
+        }));
+        refreshComposerStyleSuggestions();
+      }
+    } catch {}
   }
 
   function loadPendingCreateOverrides() {
@@ -2674,6 +1588,320 @@
     } catch {}
   }
 
+  function normalizePromptQueueState(raw) {
+    if (uvDraftsLogic && typeof uvDraftsLogic.normalizePromptQueueState === 'function') {
+      return uvDraftsLogic.normalizePromptQueueState(raw);
+    }
+    const promptsRaw = Array.isArray(raw)
+      ? raw
+      : (Array.isArray(raw && raw.prompts) ? raw.prompts : []);
+    const prompts = promptsRaw
+      .map((item) => (typeof item === 'string' ? item.trim() : ''))
+      .filter(Boolean);
+    const total = prompts.length;
+    const rawIndex = Number(raw && raw.index);
+    let index = Number.isFinite(rawIndex) ? Math.floor(rawIndex) : 0;
+    if (index < 0) index = 0;
+    if (index > total) index = total;
+    const rawSelectedIndex = Number(raw && raw.selectedIndex);
+    const selectedDefault = total > 0 ? Math.min(index, total - 1) : 0;
+    let selectedIndex = Number.isFinite(rawSelectedIndex)
+      ? Math.floor(rawSelectedIndex)
+      : selectedDefault;
+    if (total <= 0) {
+      selectedIndex = 0;
+    } else {
+      if (selectedIndex < 0) selectedIndex = 0;
+      if (selectedIndex > total - 1) selectedIndex = total - 1;
+    }
+    const createdAtRaw = Number(raw && raw.createdAt);
+    const createdAt = Number.isFinite(createdAtRaw) && createdAtRaw > 0
+      ? Math.floor(createdAtRaw)
+      : Date.now();
+    const remaining = Math.max(0, total - index);
+    return {
+      prompts,
+      index,
+      selectedIndex,
+      total,
+      remaining,
+      createdAt,
+      exhausted: remaining === 0,
+    };
+  }
+
+  function parsePromptJsonl(text, options) {
+    if (uvDraftsLogic && typeof uvDraftsLogic.parsePromptJsonl === 'function') {
+      return uvDraftsLogic.parsePromptJsonl(text, options);
+    }
+    const maxPrompts = Math.max(1, Math.floor(Number(options && options.maxPrompts) || 20));
+    const lines = String(text || '').split(/\r?\n/);
+    const prompts = [];
+    const errors = [];
+    let invalidCount = 0;
+    let truncatedCount = 0;
+    let nonEmptyLines = 0;
+    for (let i = 0; i < lines.length; i += 1) {
+      const line = String(lines[i] || '');
+      if (!line.trim()) continue;
+      nonEmptyLines += 1;
+      let parsed = null;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        invalidCount += 1;
+        errors.push({ line: i + 1, reason: 'Invalid JSON' });
+        continue;
+      }
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        invalidCount += 1;
+        errors.push({ line: i + 1, reason: 'Line must be a JSON object' });
+        continue;
+      }
+      const prompt = typeof parsed.prompt === 'string' ? parsed.prompt.trim() : '';
+      if (!prompt) {
+        invalidCount += 1;
+        errors.push({ line: i + 1, reason: 'Missing non-empty "prompt" string' });
+        continue;
+      }
+      if (prompts.length >= maxPrompts) {
+        truncatedCount += 1;
+        continue;
+      }
+      prompts.push(prompt);
+    }
+    return {
+      maxPrompts,
+      prompts,
+      acceptedCount: prompts.length,
+      invalidCount,
+      truncatedCount,
+      nonEmptyLines,
+      errors,
+    };
+  }
+
+  function loadPendingCreateQueue() {
+    try {
+      const raw = sessionStorage.getItem(UV_PENDING_CREATE_QUEUE_KEY);
+      if (!raw) return normalizePromptQueueState(null);
+      const parsed = JSON.parse(raw);
+      return normalizePromptQueueState(parsed);
+    } catch {
+      return normalizePromptQueueState(null);
+    }
+  }
+
+  function savePendingCreateQueue(queueState) {
+    const normalized = normalizePromptQueueState(queueState);
+    if (normalized.total <= 0 || normalized.remaining <= 0) {
+      try {
+        sessionStorage.removeItem(UV_PENDING_CREATE_QUEUE_KEY);
+      } catch {}
+      return normalized;
+    }
+    try {
+      sessionStorage.setItem(UV_PENDING_CREATE_QUEUE_KEY, JSON.stringify({
+        prompts: normalized.prompts,
+        index: normalized.index,
+        selectedIndex: normalized.selectedIndex,
+        createdAt: normalized.createdAt,
+      }));
+    } catch {}
+    return normalized;
+  }
+
+  function clearPendingCreateQueue() {
+    try {
+      sessionStorage.removeItem(UV_PENDING_CREATE_QUEUE_KEY);
+    } catch {}
+    return normalizePromptQueueState(null);
+  }
+
+  function peekPendingCreateQueuePrompt() {
+    const current = loadPendingCreateQueue();
+    const hasPeeker = uvDraftsLogic && typeof uvDraftsLogic.peekCurrentPrompt === 'function';
+    const out = hasPeeker
+      ? uvDraftsLogic.peekCurrentPrompt(current)
+      : (() => {
+          if (current.remaining <= 0) {
+            return { prompt: '', queue: current, index: current.index, remaining: 0, hasPrompt: false };
+          }
+          return {
+            prompt: current.prompts[current.index],
+            queue: current,
+            index: current.index,
+            remaining: current.remaining,
+            hasPrompt: true,
+          };
+        })();
+    const queue = normalizePromptQueueState(out && out.queue);
+    return {
+      prompt: String(out && out.prompt || ''),
+      queue,
+      index: Number.isFinite(Number(out && out.index)) ? Math.floor(Number(out.index)) : queue.index,
+      hasPrompt: !!(out && out.hasPrompt),
+      remaining: queue.remaining,
+    };
+  }
+
+  function advancePendingCreateQueuePrompt() {
+    const current = loadPendingCreateQueue();
+    const hasAdvancer = uvDraftsLogic && typeof uvDraftsLogic.advancePromptQueue === 'function';
+    const out = hasAdvancer
+      ? uvDraftsLogic.advancePromptQueue(current)
+      : (() => {
+          if (current.remaining <= 0) {
+            return { prompt: '', queue: current, consumed: false, remaining: 0 };
+          }
+          const nextQueue = normalizePromptQueueState({
+            prompts: current.prompts,
+            index: current.index + 1,
+            selectedIndex: current.selectedIndex,
+            createdAt: current.createdAt,
+          });
+          return {
+            prompt: current.prompts[current.index],
+            queue: nextQueue,
+            consumed: true,
+            remaining: nextQueue.remaining,
+          };
+        })();
+    const queue = normalizePromptQueueState(out && out.queue);
+    if (queue.remaining > 0) savePendingCreateQueue(queue);
+    else clearPendingCreateQueue();
+    return {
+      prompt: String(out && out.prompt || ''),
+      queue,
+      consumed: !!(out && out.consumed),
+      remaining: queue.remaining,
+    };
+  }
+
+  function consumePendingCreateQueuePrompt() {
+    return advancePendingCreateQueuePrompt();
+  }
+
+  function setPendingCreateQueueSelection(nextSelectedIndex) {
+    const current = loadPendingCreateQueue();
+    const hasSetter = uvDraftsLogic && typeof uvDraftsLogic.setPromptQueueSelection === 'function';
+    const queue = normalizePromptQueueState(
+      hasSetter
+        ? uvDraftsLogic.setPromptQueueSelection(current, nextSelectedIndex)
+        : {
+            ...current,
+            selectedIndex: Number(nextSelectedIndex),
+          }
+    );
+    if (queue.remaining > 0) savePendingCreateQueue(queue);
+    else clearPendingCreateQueue();
+    return queue;
+  }
+
+  function removePendingCreateQueueAtIndex(indexToRemove) {
+    const current = loadPendingCreateQueue();
+    const targetIndex = Number.isFinite(Number(indexToRemove))
+      ? Math.floor(Number(indexToRemove))
+      : current.selectedIndex;
+    const hasRemover = uvDraftsLogic && typeof uvDraftsLogic.removePromptAtIndex === 'function';
+    const queue = normalizePromptQueueState(
+      hasRemover
+        ? uvDraftsLogic.removePromptAtIndex(current, targetIndex)
+        : {
+            prompts: current.prompts.filter((_, idx) => idx !== targetIndex),
+            index: current.index,
+            selectedIndex: current.selectedIndex,
+            createdAt: current.createdAt,
+          }
+    );
+    if (queue.remaining > 0) savePendingCreateQueue(queue);
+    else clearPendingCreateQueue();
+    return queue;
+  }
+
+  function normalizePendingCreateBatchState(raw) {
+    const defaultState = {
+      status: 'idle',
+      createdAt: 0,
+      startedAt: 0,
+      completedAt: 0,
+      awaitingRequest: false,
+      settings: null,
+      progress: { submitted: 0, total: 0 },
+      lastError: '',
+    };
+    if (!raw || typeof raw !== 'object') return defaultState;
+    const statusRaw = String(raw.status || '').trim().toLowerCase();
+    const allowedStatus = new Set(['idle', 'armed', 'running', 'paused_error', 'completed']);
+    const status = allowedStatus.has(statusRaw) ? statusRaw : 'idle';
+    const createdAt = Number.isFinite(Number(raw.createdAt)) ? Math.floor(Number(raw.createdAt)) : 0;
+    const startedAt = Number.isFinite(Number(raw.startedAt)) ? Math.floor(Number(raw.startedAt)) : 0;
+    const completedAt = Number.isFinite(Number(raw.completedAt)) ? Math.floor(Number(raw.completedAt)) : 0;
+    const awaitingRequest = raw.awaitingRequest === true;
+    const settings = raw.settings && typeof raw.settings === 'object'
+      ? {
+          model: typeof raw.settings.model === 'string' ? raw.settings.model : '',
+          durationSeconds: Number.isFinite(Number(raw.settings.durationSeconds)) ? Math.max(0, Math.floor(Number(raw.settings.durationSeconds))) : 0,
+          gensCount: Number.isFinite(Number(raw.settings.gensCount)) ? Math.max(0, Math.floor(Number(raw.settings.gensCount))) : 0,
+          orientation: typeof raw.settings.orientation === 'string' ? raw.settings.orientation : '',
+          resolution: typeof raw.settings.resolution === 'string' ? raw.settings.resolution : '',
+          style: typeof raw.settings.style === 'string' ? raw.settings.style : '',
+          seed: typeof raw.settings.seed === 'string' ? raw.settings.seed : '',
+        }
+      : null;
+    const submitted = Number.isFinite(Number(raw.progress && raw.progress.submitted))
+      ? Math.max(0, Math.floor(Number(raw.progress.submitted)))
+      : 0;
+    const total = Number.isFinite(Number(raw.progress && raw.progress.total))
+      ? Math.max(0, Math.floor(Number(raw.progress.total)))
+      : 0;
+    return {
+      status,
+      createdAt,
+      startedAt,
+      completedAt,
+      awaitingRequest,
+      settings,
+      progress: {
+        submitted: Math.min(submitted, total || submitted),
+        total: Math.max(total, submitted),
+      },
+      lastError: typeof raw.lastError === 'string' ? raw.lastError : '',
+    };
+  }
+
+  function loadPendingCreateBatchState() {
+    try {
+      const raw = sessionStorage.getItem(UV_PENDING_CREATE_BATCH_KEY);
+      if (!raw) return normalizePendingCreateBatchState(null);
+      const parsed = JSON.parse(raw);
+      return normalizePendingCreateBatchState(parsed);
+    } catch {
+      return normalizePendingCreateBatchState(null);
+    }
+  }
+
+  function savePendingCreateBatchState(nextState) {
+    const normalized = normalizePendingCreateBatchState(nextState);
+    if (normalized.status === 'idle') {
+      try {
+        sessionStorage.removeItem(UV_PENDING_CREATE_BATCH_KEY);
+      } catch {}
+      return normalized;
+    }
+    try {
+      sessionStorage.setItem(UV_PENDING_CREATE_BATCH_KEY, JSON.stringify(normalized));
+    } catch {}
+    return normalized;
+  }
+
+  function clearPendingCreateBatchState() {
+    try {
+      sessionStorage.removeItem(UV_PENDING_CREATE_BATCH_KEY);
+    } catch {}
+    return normalizePendingCreateBatchState(null);
+  }
+
   function applyComposerOverridesToCreateBody(bodyString, overrides) {
     if (uvDraftsLogic && typeof uvDraftsLogic.applyCreateBodyOverrides === 'function') {
       return uvDraftsLogic.applyCreateBodyOverrides(bodyString, overrides);
@@ -2694,15 +1922,11 @@
     takeString('prompt');
     takeString('model');
     takeString('orientation');
-    takeString('size');
-    takeString('style_id');
-    if (normalized.size) {
-      const effectiveModel = normalizeComposerModel(normalized.model) || getDefaultComposerModel();
-      normalized.size = normalizeComposerSizeForModel(
-        normalized.size,
-        effectiveModel,
-        loadUltraModeEnabledFromStorage()
-      );
+    takeString('resolution');
+    takeString('style');
+    if (typeof overrides.seed === 'string') {
+      const seed = overrides.seed.replace(/[^\d]/g, '').slice(0, 10);
+      if (seed) normalized.seed = seed;
     }
     if (!Object.keys(normalized).length) return bodyString;
 
@@ -2744,20 +1968,27 @@
         }
       }
 
-      if (normalized.size) {
-        if (obj.size !== normalized.size) {
-          obj.size = normalized.size;
+      if (normalized.resolution) {
+        if (obj.resolution !== normalized.resolution) {
+          obj.resolution = normalized.resolution;
           changed = true;
         }
-        if (obj.creation_config.size !== normalized.size) {
-          obj.creation_config.size = normalized.size;
+        if (obj.creation_config.resolution !== normalized.resolution) {
+          obj.creation_config.resolution = normalized.resolution;
           changed = true;
         }
       }
 
-      if (normalized.style_id) {
-        if (obj.creation_config.style_id !== normalized.style_id) {
-          obj.creation_config.style_id = normalized.style_id;
+      if (normalized.style) {
+        if (obj.creation_config.style !== normalized.style) {
+          obj.creation_config.style = normalized.style;
+          changed = true;
+        }
+      }
+
+      if (normalized.seed) {
+        if (obj.creation_config.seed !== normalized.seed) {
+          obj.creation_config.seed = normalized.seed;
           changed = true;
         }
       }
@@ -2814,71 +2045,6 @@
     if (!workspaceId) return '';
     const ws = uvWorkspaces.find((item) => item.id === workspaceId);
     return ws?.name || '';
-  }
-
-  function syncWorkspaceSelectValue() {
-    if (!uvWorkspaceSelectEl) return;
-    const optionValues = new Set(Array.from(uvWorkspaceSelectEl.options).map((opt) => opt.value));
-    const nextValue = uvDraftsWorkspaceFilter && optionValues.has(uvDraftsWorkspaceFilter)
-      ? uvDraftsWorkspaceFilter
-      : '';
-    if (uvWorkspaceSelectEl.value !== nextValue) {
-      uvWorkspaceSelectEl.value = nextValue;
-    }
-  }
-
-  function syncCreatortoolsPathToWorkspaceFilter(options = {}) {
-    const currentSlug = extractWorkspaceSlugFromCreatortoolsPath(location.pathname);
-    if (currentSlug == null) return false;
-    const nextPath = buildCreatortoolsPathForWorkspace(uvDraftsWorkspaceFilter, uvWorkspaces);
-    if (location.pathname === nextPath) return false;
-    const nextUrl = `${nextPath}${location.search || ''}${location.hash || ''}`;
-    const historyMode = options.historyMode === 'replace' ? 'replaceState' : 'pushState';
-    history[historyMode]({}, '', nextUrl);
-    return true;
-  }
-
-  function syncWorkspaceFilterFromCreatortoolsPath(options = {}) {
-    const currentSlug = extractWorkspaceSlugFromCreatortoolsPath(location.pathname);
-    if (currentSlug == null) return false;
-
-    let nextWorkspaceFilter = uvDraftsWorkspaceFilter;
-    if (!currentSlug) {
-      nextWorkspaceFilter = null;
-    } else if (uvWorkspaces.length > 0) {
-      nextWorkspaceFilter = findWorkspaceIdByUrlSlug(currentSlug, uvWorkspaces);
-      if (!nextWorkspaceFilter) {
-        nextWorkspaceFilter = null;
-      }
-    } else if (options.allowEmptyWorkspaces === true) {
-      nextWorkspaceFilter = null;
-    } else {
-      return false;
-    }
-
-    const changed = nextWorkspaceFilter !== uvDraftsWorkspaceFilter;
-    if (changed) {
-      uvDraftsWorkspaceFilter = nextWorkspaceFilter;
-      if (options.persist !== false) {
-        persistUVDraftsViewState();
-      }
-    }
-
-    if (options.updateSelect !== false) {
-      syncWorkspaceSelectValue();
-    }
-    updateUVDraftsHeaderTitle();
-
-    const canonicalPath = buildCreatortoolsPathForWorkspace(uvDraftsWorkspaceFilter, uvWorkspaces);
-    if (options.updateUrl !== false && location.pathname !== canonicalPath) {
-      const nextUrl = `${canonicalPath}${location.search || ''}${location.hash || ''}`;
-      history.replaceState({}, '', nextUrl);
-    }
-
-    if (changed && options.render !== false && uvDraftsGridEl && isUVDraftsPageVisible()) {
-      renderUVDraftsGrid();
-    }
-    return changed;
   }
 
   function parseSearchTerms(query) {
@@ -3019,7 +2185,7 @@
     try {
       uvWorkspaces = await uvDBGetAll(UV_DRAFTS_STORES.workspaces);
     } catch (err) {
-      console.error('[UV Drafts] Load workspaces error:', err);
+      console.error('[Creator Tools] Load workspaces error:', err);
       uvWorkspaces = [];
     }
     return uvWorkspaces;
@@ -3061,47 +2227,21 @@
     }
 
     updateWorkspaceSelect();
-    rerenderUVDraftsGridForLocalMutation();
+    renderUVDraftsGrid();
     updateUVDraftsStats();
   }
 
-  async function addDraftToWorkspace(draftId, workspaceId, options = {}) {
-    const normalizedDraftId = typeof draftId === 'string' ? draftId.trim() : '';
-    const normalizedWorkspaceId = workspaceId ? String(workspaceId).trim() : null;
-    const normalizedTaskId = typeof options?.taskId === 'string' ? options.taskId.trim() : '';
-
-    const draft = normalizedDraftId ? await uvDBGet(UV_DRAFTS_STORES.drafts, normalizedDraftId) : null;
+  async function addDraftToWorkspace(draftId, workspaceId) {
+    const draft = await uvDBGet(UV_DRAFTS_STORES.drafts, draftId);
     if (draft) {
-      draft.workspace_id = normalizedWorkspaceId;
+      draft.workspace_id = workspaceId;
       await uvDBPut(UV_DRAFTS_STORES.drafts, draft);
     }
 
-    const updateDraftCollection = (drafts) => {
-      const matchedTaskIds = new Set();
-      if (!Array.isArray(drafts)) return matchedTaskIds;
-      for (const item of drafts) {
-        const itemId = typeof item?.id === 'string' ? item.id.trim() : '';
-        const itemTaskId = typeof item?.task_id === 'string' ? item.task_id.trim() : '';
-        if ((normalizedDraftId && itemId === normalizedDraftId) || (normalizedTaskId && itemTaskId === normalizedTaskId)) {
-          item.workspace_id = normalizedWorkspaceId;
-          if (itemTaskId) matchedTaskIds.add(itemTaskId);
-        }
-      }
-      return matchedTaskIds;
-    };
-
-    const matchedTaskIds = new Set([
-      ...updateDraftCollection(uvDraftsData),
-      ...updateDraftCollection(uvDraftsPendingData),
-    ]);
-    if (normalizedTaskId) matchedTaskIds.add(normalizedTaskId);
-
-    for (const taskId of matchedTaskIds) {
-      if (normalizedWorkspaceId) {
-        uvDraftsPendingWorkspaceTags.set(taskId, normalizedWorkspaceId);
-      } else {
-        uvDraftsPendingWorkspaceTags.delete(taskId);
-      }
+    // Update local data
+    const localDraft = uvDraftsData.find(d => d.id === draftId);
+    if (localDraft) {
+      localDraft.workspace_id = workspaceId;
     }
   }
 
@@ -3135,17 +2275,6 @@
         persistUVDraftsViewState();
       }
     }
-    syncWorkspaceSelectValue();
-    syncCreatortoolsPathToWorkspaceFilter({ historyMode: 'replace' });
-    updateUVDraftsHeaderTitle();
-  }
-
-  function updateUVDraftsHeaderTitle() {
-    if (!uvDraftsTitleEl) return;
-    uvDraftsTitleEl.textContent = getUVDraftsPageTitle(uvDraftsWorkspaceFilter, getWorkspaceNameById);
-    try {
-      document.title = getUVDraftsDocumentTitle(uvDraftsWorkspaceFilter, getWorkspaceNameById, location.pathname);
-    } catch {}
   }
 
   function closeDraftWorkspacePicker() {
@@ -3286,7 +2415,7 @@
         renderWorkspaceOptions();
         setStatus('Workspace created.', 'ok');
       } catch (err) {
-        console.error('[UV Drafts] Create workspace error:', err);
+        console.error('[Creator Tools] Create workspace error:', err);
         setStatus('Failed to create workspace.', 'error');
       } finally {
         createBtn.disabled = false;
@@ -3319,13 +2448,13 @@
         saveBtn.disabled = true;
         const nextWorkspaceId = selectedWorkspaceId || null;
         if (String(draft.workspace_id || '') !== String(nextWorkspaceId || '')) {
-          await addDraftToWorkspace(draft.id, nextWorkspaceId, { taskId: draft.task_id });
-          rerenderUVDraftsGridForLocalMutation();
+          await addDraftToWorkspace(draft.id, nextWorkspaceId);
+          renderUVDraftsGrid();
           updateUVDraftsStats();
         }
         closeDraftWorkspacePicker();
       } catch (err) {
-        console.error('[UV Drafts] Failed to update workspace:', err);
+        console.error('[Creator Tools] Failed to update workspace:', err);
         setStatus('Failed to update workspace.', 'error');
         saveBtn.disabled = false;
       }
@@ -3358,47 +2487,65 @@
 
   function showWorkspaceManager() {
     const modal = document.createElement('div');
-    modal.className = 'uvd-modal-backdrop';
+    Object.assign(modal.style, {
+      position: 'fixed',
+      inset: '0',
+      zIndex: '2147483647',
+      background: 'rgba(0,0,0,0.8)',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+    });
 
     const panel = document.createElement('div');
-    panel.className = 'uvd-modal uvd-modal--workspace-manager';
+    Object.assign(panel.style, {
+      background: '#1e1e1e',
+      borderRadius: '16px',
+      padding: '24px',
+      minWidth: '400px',
+      maxWidth: '500px',
+      maxHeight: '80vh',
+      overflow: 'auto',
+    });
 
-    const head = document.createElement('div');
-    head.className = 'uvd-modal-head';
-
-    const title = document.createElement('h3');
+    const title = document.createElement('h2');
     title.textContent = 'Manage Workspaces';
-    head.appendChild(title);
-
-    const subtitle = document.createElement('p');
-    subtitle.textContent = 'Create and organize workspace buckets for your drafts.';
-    head.appendChild(subtitle);
-    panel.appendChild(head);
+    Object.assign(title.style, { margin: '0 0 16px 0', fontSize: '20px', fontWeight: '600' });
+    panel.appendChild(title);
 
     // New workspace form
     const form = document.createElement('div');
-    form.className = 'uvd-ws-create';
+    Object.assign(form.style, { display: 'flex', gap: '8px', marginBottom: '16px' });
 
     const input = document.createElement('input');
     input.type = 'text';
     input.placeholder = 'New workspace name...';
-    input.className = 'uvd-modal-input';
+    Object.assign(input.style, {
+      flex: '1',
+      padding: '10px 12px',
+      borderRadius: '8px',
+      border: '1px solid #333',
+      background: '#2a2a2a',
+      color: '#fff',
+      fontSize: '14px',
+    });
 
     const addBtn = document.createElement('button');
-    addBtn.type = 'button';
-    addBtn.className = 'uvd-modal-btn is-primary';
     addBtn.textContent = '+ Create';
-    const createWorkspaceFromInput = async () => {
+    Object.assign(addBtn.style, {
+      padding: '10px 16px',
+      borderRadius: '8px',
+      border: 'none',
+      background: '#3b82f6',
+      color: '#fff',
+      cursor: 'pointer',
+      fontWeight: '600',
+    });
+    addBtn.addEventListener('click', async () => {
       if (!input.value.trim()) return;
       await createWorkspace(input.value.trim());
       input.value = '';
       renderWorkspaceList();
-    };
-    addBtn.addEventListener('click', createWorkspaceFromInput);
-    input.addEventListener('keydown', (event) => {
-      if (event.key !== 'Enter') return;
-      event.preventDefault();
-      createWorkspaceFromInput();
     });
 
     form.appendChild(input);
@@ -3407,29 +2554,45 @@
 
     // Workspace list
     const list = document.createElement('div');
-    list.className = 'uvd-ws-manage-list';
+    list.className = 'workspace-list';
+    Object.assign(list.style, { display: 'flex', flexDirection: 'column', gap: '8px' });
 
     function renderWorkspaceList() {
       list.innerHTML = '';
       for (const ws of uvWorkspaces) {
         const row = document.createElement('div');
-        row.className = 'uvd-ws-manage-row';
+        Object.assign(row.style, {
+          display: 'flex',
+          alignItems: 'center',
+          gap: '12px',
+          padding: '12px',
+          background: '#2a2a2a',
+          borderRadius: '8px',
+        });
 
-        const colorDot = document.createElement('span');
-        colorDot.className = 'uvd-ws-dot';
-        colorDot.style.background = ws.color || '#3b82f6';
+        const colorDot = document.createElement('div');
+        Object.assign(colorDot.style, {
+          width: '12px',
+          height: '12px',
+          borderRadius: '50%',
+          background: ws.color,
+        });
         row.appendChild(colorDot);
 
         const name = document.createElement('div');
-        name.className = 'uvd-ws-manage-name';
         name.textContent = ws.name;
+        Object.assign(name.style, { flex: '1', fontWeight: '500' });
         row.appendChild(name);
 
         const delBtn = document.createElement('button');
-        delBtn.type = 'button';
-        delBtn.className = 'uvd-ws-manage-delete';
-        delBtn.textContent = '✕';
-        delBtn.title = `Delete ${ws.name}`;
+        delBtn.textContent = '🗑';
+        Object.assign(delBtn.style, {
+          background: 'none',
+          border: 'none',
+          color: '#ef4444',
+          cursor: 'pointer',
+          fontSize: '16px',
+        });
         delBtn.addEventListener('click', async () => {
           if (!confirm(`Delete workspace "${ws.name}"?`)) return;
           await deleteWorkspace(ws.id);
@@ -3442,8 +2605,8 @@
 
       if (uvWorkspaces.length === 0) {
         const empty = document.createElement('div');
-        empty.className = 'uvd-ws-manage-empty';
         empty.textContent = 'No workspaces yet. Create one above!';
+        Object.assign(empty.style, { color: '#888', textAlign: 'center', padding: '20px' });
         list.appendChild(empty);
       }
     }
@@ -3451,16 +2614,22 @@
     panel.appendChild(list);
     renderWorkspaceList();
 
-    const footer = document.createElement('div');
-    footer.className = 'uvd-modal-footer';
-
+    // Close button
     const closeBtn = document.createElement('button');
-    closeBtn.type = 'button';
-    closeBtn.className = 'uvd-modal-btn';
     closeBtn.textContent = 'Done';
+    Object.assign(closeBtn.style, {
+      marginTop: '16px',
+      width: '100%',
+      padding: '12px',
+      borderRadius: '8px',
+      border: 'none',
+      background: 'rgba(255,255,255,0.1)',
+      color: '#fff',
+      cursor: 'pointer',
+      fontWeight: '600',
+    });
     closeBtn.addEventListener('click', () => modal.remove());
-    footer.appendChild(closeBtn);
-    panel.appendChild(footer);
+    panel.appendChild(closeBtn);
 
     modal.appendChild(panel);
     modal.addEventListener('click', (e) => {
@@ -3507,8 +2676,6 @@
       }
       if (retries < 30) {
         setTimeout(() => attemptFill(retries + 1), 120);
-      } else {
-        sessionStorage.removeItem(UV_PENDING_COMPOSE_KEY);
       }
     };
     setTimeout(() => attemptFill(), 250);
@@ -3528,96 +2695,15 @@
       thumbnail_url: draft.thumbnail_url || '',
       orientation: draft.orientation || '',
       duration_seconds: draft.duration_seconds || 0,
-      cameo_profiles: draft.cameo_profiles || [],
       label: `${draft.title || draft.prompt || draft.id}`.slice(0, 90),
     };
-  }
-
-  async function fetchPublishedPostById(postId) {
-    const id = typeof postId === 'string' ? postId.trim() : '';
-    if (!id) return null;
-    if (!capturedAuthToken) throw new Error('Browse Sora first so published source lookup can authenticate.');
-    const headers = { accept: '*/*', Authorization: capturedAuthToken };
-    const res = await fetch(`https://sora.chatgpt.com/backend/project_y/post/${encodeURIComponent(id)}`, {
-      credentials: 'include',
-      headers,
-    });
-    const json = await res.json().catch(() => null);
-    if (!res.ok) {
-      const detail = extractErrorMessage(json, `HTTP ${res.status}`);
-      throw new Error(`Published source lookup failed: ${detail}`);
-    }
-    return extractPublishedPost(json);
-  }
-
-  async function fetchDraftDetailById(draftId) {
-    const id = typeof draftId === 'string' ? draftId.trim() : '';
-    if (!id) return null;
-    if (!capturedAuthToken) throw new Error('Browse Sora first so draft source lookup can authenticate.');
-    const headers = { accept: '*/*', Authorization: capturedAuthToken };
-    const res = await fetch(`https://sora.chatgpt.com/backend/project_y/profile/drafts/${encodeURIComponent(id)}`, {
-      credentials: 'include',
-      headers,
-    });
-    const json = await res.json().catch(() => null);
-    if (!res.ok) {
-      const detail = extractErrorMessage(json, `HTTP ${res.status}`);
-      throw new Error(`Draft source lookup failed: ${detail}`);
-    }
-    if (json && typeof json === 'object') {
-      return json.draft || json.item?.draft || json.item || json.data?.draft || json.data || json;
-    }
-    return null;
-  }
-
-  async function resolveRetryComposerSource(draft) {
-    const parentDraftId = typeof draft?.remix_target_draft_id === 'string'
-      ? draft.remix_target_draft_id.trim()
-      : '';
-    if (parentDraftId) {
-      const inMemoryParent = [...(uvDraftsData || []), ...(uvDraftsPendingData || [])]
-        .find((item) => String(item?.id || '').trim() === parentDraftId);
-      if (inMemoryParent) return buildComposerSourceFromDraft(inMemoryParent);
-
-      try {
-        const storedParent = await uvDBGet(UV_DRAFTS_STORES.drafts, parentDraftId);
-        if (storedParent) return buildComposerSourceFromDraft(storedParent);
-      } catch {}
-    }
-
-    const parentPostId = typeof draft?.remix_target_post_id === 'string'
-      ? draft.remix_target_post_id.trim()
-      : '';
-    if (!parentPostId) return null;
-    if (isGenerationDraftId(parentPostId)) {
-      const existingDraft = [...(uvDraftsData || []), ...(uvDraftsPendingData || [])]
-        .find((item) => String(item?.id || '').trim() === parentPostId);
-      const existingStoredDraft = existingDraft || await uvDBGet(UV_DRAFTS_STORES.drafts, parentPostId).catch(() => null);
-      if (existingStoredDraft) return buildComposerSourceFromDraft(existingStoredDraft);
-
-      const fetchedDraft = await fetchDraftDetailById(parentPostId);
-      const transformedDraft = transformDraftForStorage(fetchedDraft || {}, fetchedDraft || {});
-      if (transformedDraft?.id) {
-        try {
-          await uvDBPut(UV_DRAFTS_STORES.drafts, transformedDraft);
-        } catch {}
-      }
-      return buildComposerSourceFromDraft(transformedDraft);
-    }
-    const post = await fetchPublishedPostById(parentPostId);
-    const source = buildComposerSourceFromPublishedPost(post, parentPostId);
-    if (!source?.id) {
-      throw new Error('Published source did not expose a remix target.');
-    }
-    return source;
   }
 
   function getComposerSourceHint(source) {
     if (!source || typeof source !== 'object') return '';
     if (source.type === 'url' && source.url) return `Source URL: ${source.url}`;
-    if (source.type === 'file' && source.fileName) return `Local file: ${source.fileName}`;
+    if (source.type === 'file' && source.fileName) return `Local file: ${source.fileName} (attach manually in composer)`;
     if (source.type === 'draft' && source.id) return `Source draft: ${source.id}`;
-    if (source.type === 'post' && source.post_id) return `Source post: ${source.post_id}`;
     if (source.url) return `Source: ${source.url}`;
     return '';
   }
@@ -3637,7 +2723,6 @@
     const normalized = {
       type: String(source.type || '').trim().toLowerCase(),
       id: String(source.id || '').trim(),
-      post_id: String(source.post_id || '').trim(),
       storyboard_id: String(source.storyboard_id || '').trim(),
       can_storyboard: source.can_storyboard !== false,
       prompt: String(source.prompt || '').trim(),
@@ -3649,24 +2734,16 @@
       object_url: String(source.object_url || '').trim(),
       orientation: String(source.orientation || '').trim(),
       duration_seconds: Number(source.duration_seconds) > 0 ? Number(source.duration_seconds) : 0,
-      cameo_profiles: Array.isArray(source.cameo_profiles) ? source.cameo_profiles : [],
       label: String(source.label || '').trim(),
     };
 
     const hasDraftIdentity = !!(normalized.id || normalized.storyboard_id);
-    const hasPostIdentity = !!normalized.post_id;
     const hasPlayableMedia = !!(normalized.url || normalized.preview_url || normalized.object_url);
     const hasFileIdentity = !!(normalized.fileName || normalized.object_url);
 
     let valid = false;
     if (normalized.type === 'draft') valid = hasDraftIdentity || hasPlayableMedia;
-    else if (normalized.type === 'post') valid = hasPostIdentity || hasPlayableMedia;
-    else if (normalized.type === 'url') {
-      try {
-        const parsed = new URL(normalized.url);
-        valid = parsed.protocol === 'http:' || parsed.protocol === 'https:';
-      } catch { valid = false; }
-    }
+    else if (normalized.type === 'url') valid = /^https?:\/\//i.test(normalized.url);
     else if (normalized.type === 'file') valid = hasFileIdentity;
     else valid = hasDraftIdentity || hasPlayableMedia || hasFileIdentity;
     if (!valid) return null;
@@ -3676,7 +2753,6 @@
         normalized.title ||
         normalized.prompt ||
         normalized.fileName ||
-        normalized.post_id ||
         normalized.id ||
         normalized.url ||
         'Source video'
@@ -3692,9 +2768,6 @@
       releaseComposerSource(uvDraftsComposerSource);
     }
     uvDraftsComposerSource = nextSource;
-
-    // Auto-populate cameos from source draft
-    populateCameosFromSource(nextSource);
 
     if (uvDraftsComposerEl) {
       const sourcePanelEl = uvDraftsComposerEl.querySelector('[data-uvd-compose-source-panel="1"]');
@@ -3736,7 +2809,6 @@
         } else {
           const subtitleParts = [];
           if (nextSource.type === 'draft' && nextSource.id) subtitleParts.push(`Draft ${nextSource.id}`);
-          if (nextSource.type === 'post' && nextSource.post_id) subtitleParts.push(`Post ${nextSource.post_id}`);
           if (nextSource.type === 'url') subtitleParts.push('URL source');
           if (nextSource.type === 'file') subtitleParts.push('Local file');
           if (Number(nextSource.duration_seconds) > 0) {
@@ -3799,21 +2871,18 @@
       }
     }
     if (statusEl) {
-      if (nextSource) {
-        statusEl.textContent = 'Source ready. Use Remix or Extend.';
-        statusEl.dataset.tone = 'ok';
-      } else {
-        statusEl.textContent = '';
-        delete statusEl.dataset.tone;
-      }
+      statusEl.textContent = nextSource
+        ? 'Source ready. Use Remix or Extend.'
+        : 'No source selected. Use Create, or drop a draft card for Remix/Extend.';
+      statusEl.dataset.tone = nextSource ? 'ok' : '';
     }
   }
 
   function persistComposerDurationOverride(seconds) {
     const s = Number(seconds);
     if (!Number.isFinite(s) || s <= 0) return;
-    const safeSeconds = snapToValidDuration(s);
-    const frames = SECONDS_TO_FRAMES[safeSeconds] || safeSeconds * SORA_DEFAULT_FPS;
+    const safeSeconds = Math.min(30, Math.max(4, Math.round(s)));
+    const frames = safeSeconds * SORA_DEFAULT_FPS;
     try {
       localStorage.setItem(
         'SCT_DURATION_OVERRIDE_V1',
@@ -3822,398 +2891,33 @@
     } catch {}
   }
 
-  // ---- Sentinel SDK ----
-
-  let sentinelInitPromise = null;
-
-  async function ensureSentinelSDK() {
-    if (typeof globalScope.SentinelSDK !== 'undefined') return;
-    await new Promise((resolve, reject) => {
-      const s = document.createElement('script');
-      s.src = 'https://chatgpt.com/sentinel/20260219f9f6/sdk.js';
-      s.onload = resolve;
-      s.onerror = () => reject(new Error('Failed to load Sentinel SDK'));
-      document.head.appendChild(s);
-    });
-    const deadline = Date.now() + 10000;
-    while (typeof globalScope.SentinelSDK === 'undefined') {
-      if (Date.now() > deadline) throw new Error('SentinelSDK load timeout');
-      await new Promise(r => setTimeout(r, 100));
-    }
-  }
-
-  async function getSentinelToken() {
-    if (cachedSentinelToken && Date.now() < cachedSentinelExpiry) {
-      return cachedSentinelToken;
-    }
-    if (!sentinelInitPromise) {
-      sentinelInitPromise = (async () => {
-        await ensureSentinelSDK();
-        if (!sentinelInitialized) {
-          await globalScope.SentinelSDK.init('sora_init');
-          sentinelInitialized = true;
-        }
-      })().catch(err => {
-        sentinelInitPromise = null;
-        throw err;
-      });
-    }
-    await sentinelInitPromise;
-    const token = await globalScope.SentinelSDK.token('sora_2_create_task');
-    if (!token) throw new Error('Sentinel SDK returned null token');
-    cachedSentinelToken = token;
-    cachedSentinelExpiry = Date.now() + 8 * 60 * 1000; // 8 min TTL
-    return token;
-  }
-
-  function setComposerStatus(text, tone = '') {
-    const statusEl = uvDraftsComposerEl?.querySelector?.('[data-uvd-compose-status="1"]');
-    if (!statusEl) return;
-    statusEl.textContent = typeof text === 'string' ? text : '';
-    if (tone) statusEl.dataset.tone = tone;
-    else delete statusEl.dataset.tone;
-  }
-
-  function normalizeCameoUsername(value) {
-    return typeof value === 'string' ? value.trim().replace(/^@/, '') : '';
-  }
-
-  function rememberComposerCameoIdentity(userId, username = '') {
-    const id = typeof userId === 'string' ? userId.trim() : '';
-    const normalizedUsername = normalizeCameoUsername(username);
-    if (!id || !normalizedUsername) return;
-    composerCameoUsernames[id] = normalizedUsername;
-  }
-
-  function getComposerCameoLabel(userId) {
-    const id = typeof userId === 'string' ? userId.trim() : '';
-    if (!id) return '';
-    const username = composerCameoUsernames[id];
-    return username ? `@${username}` : id;
-  }
-
-  function getComposerCameoPromptValue(userId) {
-    const id = typeof userId === 'string' ? userId.trim() : '';
-    if (!id) return '';
-    const username = composerCameoUsernames[id];
-    return username ? `@${username}` : id;
-  }
-
-  async function resolveComposerCameoInput(rawInput) {
-    const trimmed = typeof rawInput === 'string' ? rawInput.trim() : '';
-    if (!trimmed) throw new Error('Enter a cameo username or user ID.');
-    const directId = trimmed.replace(/^@/, '');
-    if (/^(user-|ch_)/i.test(directId)) {
-      return { userId: directId, username: composerCameoUsernames[directId] || '' };
-    }
-    if (!capturedAuthToken) {
-      throw new Error('Browse Sora first so cameo username lookup can authenticate.');
-    }
-
-    const username = normalizeCameoUsername(trimmed);
-    const params = new URLSearchParams({
-      username,
-      intent: 'cameo',
-      limit: '10',
-    });
-    const res = await fetch(`https://sora.chatgpt.com/backend/project_y/profile/search_mentions?${params.toString()}`, {
-      headers: { Authorization: capturedAuthToken },
-      credentials: 'include',
-    });
-    if (!res.ok) {
-      throw new Error(`Cameo lookup failed (HTTP ${res.status}).`);
-    }
-    const json = await res.json();
-    const items = Array.isArray(json?.items) ? json.items : [];
-    const normalizedNeedle = username.toLowerCase();
-    const picked = items.find((item) => normalizeCameoUsername(item?.profile?.username).toLowerCase() === normalizedNeedle) || items[0];
-    const userId = picked?.profile?.user_id || picked?.profile?.id || picked?.user_id || '';
-    const foundUsername = normalizeCameoUsername(picked?.profile?.username || picked?.username || username);
-    if (!userId) {
-      throw new Error(`No cameo match found for @${username}.`);
-    }
-    return { userId: String(userId).trim(), username: foundUsername };
-  }
-
-  function buildPendingRingMarkup(progressPct) {
-    const pct = Number(progressPct);
-    const pctNorm = Number.isFinite(pct) && pct > 0 ? Math.min(pct, 100) : 0;
-    const indeterminate = pctNorm === 0;
-    const radius = 22;
-    const circumference = 2 * Math.PI * radius;
-    const dashArray = indeterminate
-      ? `${circumference * 0.25} ${circumference * 0.75}`
-      : `${circumference}`;
-    const dashOffset = indeterminate
-      ? circumference * 0.125
-      : circumference - (pctNorm / 100) * circumference;
-    const spinner = indeterminate
-      ? '<animateTransform attributeName="transform" type="rotate" from="0 28 28" to="360 28 28" dur="1.4s" repeatCount="indefinite" />'
-      : '';
-    const text = pctNorm > 0 ? `${Math.round(pctNorm)}%` : '';
-    return `<svg width="56" height="56" viewBox="0 0 56 56">
-      <circle cx="28" cy="28" r="${radius}" fill="none" stroke="rgba(255,255,255,0.1)" stroke-width="3"/>
-      <g data-pending-ring-spinner="1">
-        <circle data-pending-ring-progress="1" cx="28" cy="28" r="${radius}" fill="none" stroke="#89b6ff" stroke-width="3"
-          stroke-linecap="round" stroke-dasharray="${dashArray}" stroke-dashoffset="${dashOffset}"
-          transform="rotate(-90 28 28)" style="transition:stroke-dashoffset 0.6s ease;"/>
-        ${spinner}
-      </g>
-      <text x="28" y="28" dy="0.35em" text-anchor="middle"
-        fill="#89b6ff" font-size="13" font-weight="600" font-family="system-ui,sans-serif">${text}</text>
-    </svg>`;
-  }
-
-  async function createPublicPostForDraft(draft, caption) {
-    if (!draft?.id) throw new Error('Missing draft ID');
-    if (!capturedAuthToken) throw new Error('Not authenticated. Browse Sora first to capture auth token.');
-    const sentinel = await getSentinelToken();
-    const headers = {
-      Authorization: capturedAuthToken,
-      'Content-Type': 'application/json',
-      'openai-sentinel-token': sentinel,
-    };
-    const res = await fetch('https://sora.chatgpt.com/backend/project_y/post', {
-      method: 'POST',
-      credentials: 'include',
-      headers,
-      body: JSON.stringify(buildPublicPostPayload(draft.id, caption)),
-      __sctDirect: true,
-    });
-    const json = await res.json().catch(() => null);
-    if (!res.ok) {
-      const detail = extractErrorMessage(json, `HTTP ${res.status}`);
-      throw new Error(detail);
-    }
-    return extractPublishedPost(json);
-  }
-
-  async function deleteScheduledPostsForDraft(draftId) {
-    const id = typeof draftId === 'string' ? draftId.trim() : '';
-    if (!id) return;
-    const scheduledPosts = await uvDBGetAll(UV_DRAFTS_STORES.scheduledPosts);
-    for (const scheduledPost of scheduledPosts) {
-      if (scheduledPost?.draft_id === id) {
-        await uvDBDelete(UV_DRAFTS_STORES.scheduledPosts, scheduledPost.id);
-      }
-    }
-  }
-
-  async function persistDraftRecord(draft) {
-    if (!draft?.id) return;
-    await uvDBPut(UV_DRAFTS_STORES.drafts, draft);
-  }
-
-  async function setDraftScheduledState(draft, scheduledPost = null) {
-    if (!draft || typeof draft !== 'object') return;
-    if (scheduledPost && typeof scheduledPost === 'object') {
-      draft.scheduled_post_id = scheduledPost.id || draft.scheduled_post_id || null;
-      draft.scheduled_post_at = Number(scheduledPost.scheduled_at) > 0 ? Number(scheduledPost.scheduled_at) : null;
-      draft.scheduled_post_status = typeof scheduledPost.status === 'string' ? scheduledPost.status : 'pending';
-      draft.scheduled_post_caption = typeof scheduledPost.caption === 'string' ? scheduledPost.caption : '';
-    } else {
-      delete draft.scheduled_post_id;
-      delete draft.scheduled_post_at;
-      delete draft.scheduled_post_status;
-      delete draft.scheduled_post_caption;
-    }
-    await persistDraftRecord(draft);
-  }
-
-  // ---- API: Fetch models & styles ----
-
-  async function fetchComposerModels() {
-    if (!capturedAuthToken) return;
-    try {
-      const res = await fetch('https://sora.chatgpt.com/backend/models?nf2=true', {
-        headers: { 'Authorization': capturedAuthToken },
-      });
-      if (!res.ok) return;
-      const json = await res.json();
-      if (Array.isArray(json.data) && json.data.length) {
-        composerModels = json.data.map(m => ({ value: m.id, label: m.label || m.id }));
-        composerModelValues = new Set(composerModels.map(m => m.value));
-        refreshComposerModelSelect();
-      }
-    } catch {}
-  }
-
-  async function fetchComposerStyles() {
-    if (!capturedAuthToken) return;
-    try {
-      const res = await fetch('https://sora.chatgpt.com/backend/project_y/initialize_async', {
-        headers: { 'Authorization': capturedAuthToken },
-      });
-      if (!res.ok) return;
-      const json = await res.json();
-      if (Array.isArray(json.styles) && json.styles.length) {
-        composerStyles = json.styles.map(s => ({ value: s.id, label: s.display_name || s.id }));
-        refreshComposerStyleSelect();
-      }
-    } catch {}
-  }
-
-  function refreshComposerModelSelect() {
-    if (!uvDraftsComposerEl) return;
-    const sel = uvDraftsComposerEl.querySelector('[data-uvd-compose-model="1"]');
-    if (!sel) return;
-    const preferredValue =
-      normalizeComposerModel(uvDraftsComposerState?.model) ||
-      normalizeComposerModel(modelOverride) ||
-      normalizeComposerModel(sel.value);
-    sel.innerHTML = composerModels.map(m =>
-      `<option value="${escapeHtml(m.value)}">${escapeHtml(m.label)}</option>`
-    ).join('');
-    sel.value = preferredValue || composerModels[0]?.value || '';
-    if (uvDraftsComposerState) {
-      uvDraftsComposerState.model = sel.value || getDefaultComposerModel();
-      persistUVDraftsComposerState();
-    }
-    if (sel.value) modelOverride = sel.value;
-    sel.dispatchEvent(new Event('change', { bubbles: true }));
-  }
-
-  function refreshComposerStyleSelect() {
-    if (!uvDraftsComposerEl) return;
-    const sel = uvDraftsComposerEl.querySelector('[data-uvd-compose-style="1"]');
-    if (!sel) return;
-    const current = sel.value;
-    sel.innerHTML = '<option value="">None</option>' + composerStyles.map(s =>
-      `<option value="${escapeHtml(s.value)}">${escapeHtml(s.label)}</option>`
-    ).join('');
-    if (current && composerStyles.some(s => s.value === current)) sel.value = current;
-    else sel.value = '';
-  }
-
-  // ---- File upload for first frame ----
-
-  async function uploadFirstFrame(file) {
-    if (!capturedAuthToken) throw new Error('Not authenticated');
-    const formData = new FormData();
-    formData.append('file', file);
-    formData.append('use_case', FIRST_FRAME_UPLOAD_USE_CASE);
-    const res = await fetch('https://sora.chatgpt.com/backend/project_y/file/upload', {
-      method: 'POST',
-      headers: { 'Authorization': capturedAuthToken },
-      body: formData,
-    });
-    if (!res.ok) throw new Error(`Upload failed: HTTP ${res.status}`);
-    const json = await res.json();
-    if (json.user_error_message) throw new Error(json.user_error_message);
-    if (!json.file_id) throw new Error('Upload returned no file_id');
-    return json.file_id;
-  }
-
-  // ---- Cameo UI helpers ----
-
-  function renderCameoList() {
-    if (!uvDraftsComposerEl) return;
-    const listEl = uvDraftsComposerEl.querySelector('[data-uvd-cameo-list="1"]');
-    if (!listEl) return;
-    listEl.innerHTML = '';
-    composerCameoIds.forEach((userId, idx) => {
-      const canSwap = !!uvDraftsComposerSource && composerSourceCameoIds.has(userId);
-      const chip = document.createElement('div');
-      chip.className = 'uvd-cameo-chip';
-      const replacement = composerCameoReplacements[userId];
-      const labelEl = document.createElement('span');
-      labelEl.className = 'uvd-cameo-label';
-      labelEl.textContent = replacement ? `${getComposerCameoLabel(userId)} → ${getComposerCameoLabel(replacement)}` : getComposerCameoLabel(userId);
-      const swapBtn = document.createElement('button');
-      swapBtn.type = 'button';
-      swapBtn.className = 'uvd-cameo-swap';
-      swapBtn.title = 'Swap cameo';
-      swapBtn.textContent = '⇄';
-      const removeBtn = document.createElement('button');
-      removeBtn.type = 'button';
-      removeBtn.className = 'uvd-cameo-remove';
-      removeBtn.title = 'Remove cameo';
-      removeBtn.textContent = '×';
-      chip.append(labelEl);
-      if (canSwap) chip.append(swapBtn);
-      chip.append(removeBtn);
-      removeBtn.addEventListener('click', () => {
-        composerCameoIds.splice(idx, 1);
-        delete composerCameoReplacements[userId];
-        delete composerCameoUsernames[userId];
-        composerSourceCameoIds.delete(userId);
-        renderCameoList();
-      });
-      swapBtn.addEventListener('click', async () => {
-        const input = globalScope.prompt(
-          'Replace with username or user ID:',
-          getComposerCameoPromptValue(composerCameoReplacements[userId] || '')
-        );
-        if (input === null) return;
-        if (input.trim() === '') {
-          delete composerCameoReplacements[userId];
-          renderCameoList();
-          setComposerStatus(`Removed replacement for ${getComposerCameoLabel(userId)}.`, 'ok');
-          return;
-        }
-        try {
-          swapBtn.disabled = true;
-          setComposerStatus(`Looking up ${input.trim()}...`);
-          const resolved = await resolveComposerCameoInput(input);
-          composerCameoReplacements[userId] = resolved.userId;
-          rememberComposerCameoIdentity(resolved.userId, resolved.username);
-          renderCameoList();
-          setComposerStatus(`Replacement set to ${getComposerCameoLabel(resolved.userId)}.`, 'ok');
-        } catch (err) {
-          setComposerStatus(err?.message || 'Failed to resolve cameo username.', 'error');
-        } finally {
-          swapBtn.disabled = false;
-        }
-      });
-      listEl.appendChild(chip);
-    });
-  }
-
-  function populateCameosFromSource(source) {
-    composerCameoIds = [];
-    composerCameoReplacements = {};
-    composerSourceCameoIds = new Set();
-    if (source?.cameo_profiles && Array.isArray(source.cameo_profiles)) {
-      for (const cp of source.cameo_profiles) {
-        const rawId = typeof cp === 'string'
-          ? cp
-          : cp?.user_id || cp?.id || cp?.user?.id || cp?.username || cp?.handle || cp?.name || cp?.user?.username || cp?.user?.handle || '';
-        const userId = String(rawId || '').trim().replace(/^@/, '');
-        const username = normalizeCameoUsername(
-          typeof cp === 'string'
-            ? ''
-            : cp?.username || cp?.handle || cp?.name || cp?.user?.username || cp?.user?.handle || ''
-        );
-        rememberComposerCameoIdentity(userId, username);
-        if (userId && !composerCameoIds.includes(userId)) {
-          composerCameoIds.push(userId);
-          composerSourceCameoIds.add(userId);
-        }
-      }
-    }
-    renderCameoList();
-  }
-
-  // ---- Direct API: startComposerFlow ----
-
-  async function startComposerFlow(mode, statusEl) {
+  function startComposerFlow(mode, statusEl) {
     const state = normalizeUVDraftsComposerState(uvDraftsComposerState || defaultUVDraftsComposerState());
     uvDraftsComposerState = state;
     persistUVDraftsComposerState();
 
-    const prompt = state.prompt.trim();
+    const manualPrompt = state.prompt.trim();
+    const style = state.style.trim();
+    const seed = state.seed.trim();
     const source = uvDraftsComposerSource;
+    const queueState = mode === 'compose' ? loadPendingCreateQueue() : normalizePromptQueueState(null);
+    const batchState = mode === 'compose'
+      ? loadPendingCreateBatchState()
+      : normalizePendingCreateBatchState(null);
+    const queueBatchActive = mode === 'compose' && ['running', 'armed'].includes(batchState.status);
+    const selectedQueuePrompt = mode === 'compose' && queueState.total > 0
+      ? String(queueState.prompts[queueState.selectedIndex] || '').trim()
+      : '';
+    const useSingleQueuedPrompt = mode === 'compose' && queueState.remaining > 0 && !queueBatchActive;
+    const prompt = useSingleQueuedPrompt
+      ? (selectedQueuePrompt || manualPrompt)
+      : manualPrompt;
 
     const setStatus = (text, tone = 'info') => {
       if (!statusEl) return;
       statusEl.textContent = text;
       statusEl.dataset.tone = tone;
     };
-
-    if (!capturedAuthToken) {
-      setStatus('Not authenticated. Browse Sora first to capture auth token.', 'error');
-      return;
-    }
 
     const requiresSource = uvDraftsLogic?.modeRequiresComposerSource
       ? uvDraftsLogic.modeRequiresComposerSource(mode)
@@ -4222,138 +2926,112 @@
       setStatus('Drop a draft/video source first.', 'error');
       return;
     }
-
-    if (!prompt && mode === 'compose') {
-      setStatus('Enter a prompt.', 'error');
+    if (mode === 'compose' && useSingleQueuedPrompt && !prompt) {
+      setStatus('Selected queued prompt is empty.', 'error');
       return;
     }
 
-    // Update model override for api.js compatibility
+    const createOverrides = {
+      prompt: prompt || null,
+      model: normalizeComposerModel(state.model) || null,
+      orientation: state.orientation || null,
+      resolution: state.resolution || null,
+      style: style || null,
+      seed: seed || null,
+      mode: mode !== 'compose' ? mode : null,
+      durationSeconds: Number(state.durationSeconds) || null,
+      nFrames: Number(state.durationSeconds) > 0 ? Math.round(Number(state.durationSeconds) * SORA_DEFAULT_FPS) : null,
+      gensCount: clampGensCount(state.gensCount),
+      firstFrameImage: uvDraftsComposerFirstFrame?.object_url || null,
+    };
+    savePendingCreateOverrides(createOverrides);
     if (state.model) modelOverride = normalizeComposerModel(state.model) || modelOverride;
     persistComposerDurationOverride(state.durationSeconds);
     persistComposerGensCount(state.gensCount);
 
-    // Build the /nf/create request body
-    const nFrames = SECONDS_TO_FRAMES[state.durationSeconds] || 300;
-    const remixTargetId = String(source?.id || '').trim();
-    const body = {
-      kind: 'video',
-      prompt: prompt || source?.prompt || source?.title || '',
-      model: normalizeComposerModel(state.model) || composerModels[0]?.value || 'sy_8',
-      orientation: state.orientation || 'portrait',
-      size: normalizeComposerSizeForModel(state.size, state.model, loadUltraModeEnabledFromStorage()),
-      n_frames: nFrames,
+    const sourceHint = getComposerSourceHint(source);
+    const makePromptWithSource = (basePrompt, includeSource = false) => {
+      const trimmed = (basePrompt || '').trim();
+      if (includeSource && sourceHint) {
+        return trimmed ? `${trimmed}\n\n${sourceHint}` : sourceHint;
+      }
+      return trimmed;
     };
 
-    // Style
-    if (state.style_id) body.style_id = state.style_id;
-
-    // Cameos
-    if (composerCameoIds.length) body.cameo_ids = [...composerCameoIds];
-    if (Object.keys(composerCameoReplacements).length) {
-      body.cameo_replacements = { ...composerCameoReplacements };
-    }
-
-    // Remix
-    if (mode === 'remix') {
-      if (!remixTargetId) {
-        setStatus('Source video could not be prepared for remix.', 'error');
-        return;
-      }
-      body.remix_target_id = remixTargetId;
-    }
-
-    // Extend (storyboard)
+    let promptForRemix = prompt || source?.prompt || source?.title || '';
     if (mode === 'extend') {
-      if (source?.storyboard_id) {
-        body.storyboard_id = source.storyboard_id;
-      } else if (remixTargetId) {
-        // Fallback: use remix with extend-style prompt
-        body.remix_target_id = remixTargetId;
-        if (!prompt) {
-          body.prompt = 'Extend this video seamlessly with matching style, motion, and framing.';
-        }
-      } else {
-        setStatus('Source video could not be prepared for extend.', 'error');
-        return;
-      }
+      promptForRemix = promptForRemix
+        ? `Extend this video seamlessly. ${promptForRemix}`
+        : 'Extend this video seamlessly with matching style, motion, and framing.';
     }
 
-    setStatus('Preparing generation…', 'ok');
-
-    try {
-      // Upload first frame if present
-      let firstFrameFileId = null;
-      if (uvDraftsComposerFirstFrame) {
-        const file = uvDraftsComposerFirstFrame._file;
-        if (file) {
-          setStatus('Uploading first frame…', 'ok');
-          firstFrameFileId = await uploadFirstFrame(file);
-        }
-      }
-      if (firstFrameFileId) {
-        body.inpaint_items = buildFirstFrameInpaintItems(firstFrameFileId);
-      }
-
-      // Get sentinel token
-      setStatus('Generating sentinel token…', 'ok');
-      const sentinel = await getSentinelToken();
-
-      const headers = {
-        'Authorization': capturedAuthToken,
-        'Content-Type': 'application/json',
-        'openai-sentinel-token': sentinel,
-      };
-
-      // Send N parallel generation requests
-      const gensCount = clampGensCount(state.gensCount || 1);
-      setStatus(`Starting ${gensCount} generation(s)…`, 'ok');
-
-      const tasks = [];
-      for (let i = 0; i < gensCount; i++) {
-        tasks.push(
-          fetch('https://sora.chatgpt.com/backend/nf/create', {
-            method: 'POST',
-            headers,
-            body: JSON.stringify(body),
-            __sctDirect: true,
-          }).then(r => r.json())
+    if (mode === 'compose') {
+      const composePrompt = makePromptWithSource(
+        useSingleQueuedPrompt
+          ? prompt
+          : (prompt || source?.prompt || source?.title || ''),
+        !!source && source.type !== 'draft'
+      );
+      if (composePrompt) {
+        sessionStorage.setItem(
+          UV_PENDING_COMPOSE_KEY,
+          JSON.stringify({ prompt: composePrompt, createdAt: Date.now() })
         );
       }
-      const results = await Promise.allSettled(tasks);
-
-      // Extract task IDs and feed into pending draft polling
-      const taskIds = [];
-      const errors = [];
-      for (const r of results) {
-        if (r.status === 'fulfilled' && r.value?.id) {
-          taskIds.push(r.value.id);
-        } else {
-          const errMsg = r.status === 'rejected'
-            ? extractErrorMessage(r.reason, 'Request failed')
-            : extractErrorMessage(r.value, 'Unknown error');
-          errors.push(errMsg);
-        }
-      }
-
-      if (taskIds.length) {
-        // Auto-tag: remember workspace for these tasks so completed drafts inherit it
-        if (uvDraftsWorkspaceFilter) {
-          for (const taskId of taskIds) {
-            uvDraftsPendingWorkspaceTags.set(taskId, uvDraftsWorkspaceFilter);
-          }
-        }
-        // Start continuous polling for the new tasks. The v2 endpoint may not
-        // list them immediately, so set a minimum poll count to prevent the
-        // poller from stopping before the backend registers the tasks.
-        uvDraftsPendingMinPolls = 3;
-        continuePendingDraftsPolling();
-        setStatus(`Started ${taskIds.length} generation(s).` + (errors.length ? ` ${errors.length} failed.` : ''), 'ok');
+      if (useSingleQueuedPrompt) {
+        setStatus('Opening native composer with selected queued prompt…', 'ok');
       } else {
-        setStatus('All generations failed: ' + (errors[0] || 'Unknown error'), 'error');
+        setStatus('Opening native composer…', 'ok');
       }
-    } catch (err) {
-      setStatus('Error: ' + extractErrorMessage(err, 'Generation failed'), 'error');
+      window.location.href = 'https://sora.chatgpt.com/drafts';
+      return;
+    }
+
+    if (mode === 'remix') {
+      if (source?.id) {
+        if (promptForRemix) {
+          sessionStorage.setItem('SORA_UV_REDO_PROMPT', promptForRemix);
+        }
+        setStatus('Opening remix…', 'ok');
+        window.location.href = `https://sora.chatgpt.com/d/${source.id}?remix=`;
+        return;
+      }
+      const manualRemixPrompt = makePromptWithSource(
+        promptForRemix || 'Remix this source video with high fidelity to motion and style.',
+        true
+      );
+      if (manualRemixPrompt) {
+        sessionStorage.setItem(
+          UV_PENDING_COMPOSE_KEY,
+          JSON.stringify({ prompt: manualRemixPrompt, createdAt: Date.now() })
+        );
+      }
+      setStatus('Opening composer for manual remix with dropped source…', 'ok');
+      window.location.href = 'https://sora.chatgpt.com/drafts';
+      return;
+    }
+
+    if (mode === 'extend') {
+      if (source?.storyboard_id) {
+        setStatus('Opening storyboard for extension…', 'ok');
+        window.location.href = `https://sora.chatgpt.com/storyboard/${source.storyboard_id}`;
+      } else if (source?.id) {
+        if (promptForRemix) {
+          sessionStorage.setItem('SORA_UV_REDO_PROMPT', promptForRemix);
+        }
+        setStatus('Opening remix as fallback extend flow…', 'ok');
+        window.location.href = `https://sora.chatgpt.com/d/${source.id}?remix=`;
+      } else {
+        const manualExtendPrompt = makePromptWithSource(promptForRemix, true);
+        if (manualExtendPrompt) {
+          sessionStorage.setItem(
+            UV_PENDING_COMPOSE_KEY,
+            JSON.stringify({ prompt: manualExtendPrompt, createdAt: Date.now() })
+          );
+        }
+        setStatus('Opening composer for manual extend with dropped source…', 'ok');
+        window.location.href = 'https://sora.chatgpt.com/drafts';
+      }
     }
   }
 
@@ -4366,20 +3044,45 @@
     const modelOptionsHtml = composerModels
       .map((model) => `<option value="${escapeHtml(model.value)}">${escapeHtml(model.label)}</option>`)
       .join('');
-    const styleOptionsHtml = '<option value="">None</option>' + composerStyles
-      .map((s) => `<option value="${escapeHtml(s.value)}">${escapeHtml(s.label)}</option>`)
+    const styleOptionsHtml = composerStyles
+      .map((style) => `<option value="${escapeHtml(style.value)}">${escapeHtml(style.label)}</option>`)
       .join('');
     const composer = document.createElement('aside');
     composer.className = 'uvd-composer';
     composer.innerHTML = `
       <div class="uvd-composer-head">
         <h2>Compose</h2>
-        <p></p>
+        <p>Create from prompt, or drop a draft card to remix or extend.</p>
+      </div>
+      <div class="uvd-jsonl-upload">
+        <div class="uvd-jsonl-upload-actions">
+          <button type="button" data-uvd-jsonl-upload-btn="1">Upload JSONL</button>
+          <button type="button" data-uvd-jsonl-clear-btn="1">Clear Queue</button>
+        </div>
+        <input type="file" accept=".jsonl,application/json,text/plain" data-uvd-jsonl-input="1" hidden />
+        <div class="uvd-jsonl-upload-summary" data-uvd-jsonl-summary="1"></div>
+        <div class="uvd-jsonl-queue-panel" data-uvd-jsonl-queue-panel="1" hidden>
+          <div class="uvd-jsonl-queue-meta" data-uvd-jsonl-queue-meta="1"></div>
+          <div class="uvd-jsonl-queue-controls">
+            <button type="button" data-uvd-jsonl-prev="1">Prev</button>
+            <button type="button" data-uvd-jsonl-next="1">Next</button>
+            <button type="button" data-uvd-jsonl-remove="1">Remove Selected</button>
+          </div>
+          <div class="uvd-jsonl-queue-list" data-uvd-jsonl-list="1"></div>
+          <label class="uvd-field uvd-jsonl-preview-field">
+            <span>Selected Prompt Preview</span>
+            <textarea data-uvd-jsonl-preview="1" readonly></textarea>
+          </label>
+          <div class="uvd-jsonl-batch-actions">
+            <button type="button" data-uvd-jsonl-review="1">Review Batch</button>
+            <button type="button" data-uvd-jsonl-resume="1">Resume Batch</button>
+          </div>
+        </div>
       </div>
       <div class="uvd-dropzone" data-uvd-dropzone="1">
         <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:.45"><rect x="2" y="2" width="20" height="20" rx="2"/><polygon points="10,8 16,12 10,16"/></svg>
-        <strong>Drag Draft Here</strong>
-        <span>Drag and drop a draft to remix or extend</span>
+        <strong>Drop Source Video</strong>
+        <span>Drag a draft card here to remix or extend</span>
       </div>
       <div class="uvd-compose-source-card" data-uvd-compose-source-panel="1" hidden>
         <div class="uvd-compose-source-preview" data-uvd-compose-source-preview="1"></div>
@@ -4389,7 +3092,7 @@
         </div>
         <button type="button" class="uvd-compose-source-clear" data-uvd-compose-source-clear="1">Remove</button>
       </div>
-      <div class="uvd-compose-source-empty" data-uvd-compose-source-empty="1"></div>
+      <div class="uvd-compose-source-empty" data-uvd-compose-source-empty="1">No source selected.</div>
       <div class="uvd-firstframe-zone" data-uvd-firstframe-zone="1">
         <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:.45"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
         <strong>First Frame Image</strong>
@@ -4407,7 +3110,7 @@
         <span>Prompt</span>
         <textarea data-uvd-compose-prompt="1" placeholder="Describe your video..."></textarea>
       </label>
-      <div class="uvd-field-grid">
+      <div class="uvd-field-grid uvd-field-grid-3">
         <label class="uvd-field">
           <span>Model</span>
           <select data-uvd-compose-model="1">
@@ -4420,45 +3123,42 @@
             <option value="5">5s</option>
             <option value="10">10s</option>
             <option value="15">15s</option>
+            <option value="20">20s</option>
             <option value="25">25s</option>
           </select>
         </label>
-      </div>
-      <div class="uvd-field-grid">
         <label class="uvd-field">
-          <span>Gens</span>
+          <span>Generations</span>
           <input type="number" data-uvd-compose-gens="1" min="1" step="1" />
         </label>
+      </div>
+      <div class="uvd-field-grid">
         <label class="uvd-field">
           <span>Orientation</span>
           <select data-uvd-compose-orientation="1">
             <option value="portrait">Portrait</option>
             <option value="landscape">Landscape</option>
+            <option value="square">Square</option>
+          </select>
+        </label>
+        <label class="uvd-field">
+          <span>Resolution</span>
+          <select data-uvd-compose-resolution="1">
+            <option value="standard">Standard</option>
+            <option value="high">High</option>
           </select>
         </label>
       </div>
       <div class="uvd-field-grid">
         <label class="uvd-field">
           <span>Style</span>
-          <select data-uvd-compose-style="1">
-            ${styleOptionsHtml}
-          </select>
+          <input type="text" data-uvd-compose-style="1" list="uvd-compose-style-list" placeholder="cinematic, anime, gritty..." />
+          <datalist id="uvd-compose-style-list" data-uvd-compose-style-list="1">${styleOptionsHtml}</datalist>
         </label>
         <label class="uvd-field">
-          <span>Size</span>
-          <select data-uvd-compose-size="1">
-            <option value="small">Standard</option>
-            <option value="large">High</option>
-          </select>
+          <span>Seed</span>
+          <input type="text" data-uvd-compose-seed="1" placeholder="optional seed" inputmode="numeric" />
         </label>
-      </div>
-      <div class="uvd-cameo-section" data-uvd-cameo-section="1">
-        <span class="uvd-field-label">Cameos</span>
-        <div class="uvd-cameo-list" data-uvd-cameo-list="1"></div>
-        <div class="uvd-cameo-add-row">
-          <input type="text" data-uvd-cameo-input="1" placeholder="@username or user-xxx" class="uvd-cameo-input" />
-          <button type="button" data-uvd-cameo-add="1" class="uvd-cameo-add-btn">Add</button>
-        </div>
       </div>
       <div class="uvd-compose-actions">
         <button type="button" data-uvd-compose-create="1">Create</button>
@@ -4474,10 +3174,24 @@
     const durationEl = composer.querySelector('[data-uvd-compose-duration="1"]');
     const gensEl = composer.querySelector('[data-uvd-compose-gens="1"]');
     const orientationEl = composer.querySelector('[data-uvd-compose-orientation="1"]');
-    const sizeEl = composer.querySelector('[data-uvd-compose-size="1"]');
+    const resolutionEl = composer.querySelector('[data-uvd-compose-resolution="1"]');
     const styleEl = composer.querySelector('[data-uvd-compose-style="1"]');
+    const seedEl = composer.querySelector('[data-uvd-compose-seed="1"]');
     const dropzone = composer.querySelector('[data-uvd-dropzone="1"]');
     const clearSourceBtn = composer.querySelector('[data-uvd-compose-source-clear="1"]');
+    const jsonlUploadBtn = composer.querySelector('[data-uvd-jsonl-upload-btn="1"]');
+    const jsonlClearBtn = composer.querySelector('[data-uvd-jsonl-clear-btn="1"]');
+    const jsonlInputEl = composer.querySelector('[data-uvd-jsonl-input="1"]');
+    const jsonlSummaryEl = composer.querySelector('[data-uvd-jsonl-summary="1"]');
+    const jsonlQueuePanelEl = composer.querySelector('[data-uvd-jsonl-queue-panel="1"]');
+    const jsonlQueueMetaEl = composer.querySelector('[data-uvd-jsonl-queue-meta="1"]');
+    const jsonlQueueListEl = composer.querySelector('[data-uvd-jsonl-list="1"]');
+    const jsonlPreviewEl = composer.querySelector('[data-uvd-jsonl-preview="1"]');
+    const jsonlPrevBtn = composer.querySelector('[data-uvd-jsonl-prev="1"]');
+    const jsonlNextBtn = composer.querySelector('[data-uvd-jsonl-next="1"]');
+    const jsonlRemoveBtn = composer.querySelector('[data-uvd-jsonl-remove="1"]');
+    const jsonlReviewBtn = composer.querySelector('[data-uvd-jsonl-review="1"]');
+    const jsonlResumeBtn = composer.querySelector('[data-uvd-jsonl-resume="1"]');
 
     const syncGensFieldLimits = () => {
       if (!gensEl) return;
@@ -4486,118 +3200,417 @@
       gensEl.value = String(clampGensCount(gensEl.value || uvDraftsComposerState.gensCount));
     };
 
-    const syncComposerSizeField = () => {
-      if (!sizeEl || !modelEl) return;
-      const ultraModeEnabled = loadUltraModeEnabledFromStorage();
-      const allowLarge = isLargeComposerSizeAllowed(modelEl.value, ultraModeEnabled);
-      const normalizedSize = normalizeComposerSizeForModel(
-        sizeEl.value || uvDraftsComposerState?.size,
-        modelEl.value || uvDraftsComposerState?.model,
-        ultraModeEnabled
-      );
-      if (sizeEl.value !== normalizedSize) sizeEl.value = normalizedSize;
-      sizeEl.disabled = !allowLarge;
-    };
-
-    const syncStateFromFields = (options = {}) => {
-      const commitGensValue = options.commitGensValue !== false;
-      syncComposerSizeField();
-      const parsedGensCount = parseComposerGensInputValue(gensEl?.value);
+    const syncStateFromFields = () => {
       uvDraftsComposerState = normalizeUVDraftsComposerState({
         prompt: promptEl.value,
         model: modelEl.value,
         durationSeconds: Number(durationEl.value),
-        gensCount: parsedGensCount == null ? uvDraftsComposerState?.gensCount : parsedGensCount,
+        gensCount: clampGensCount(gensEl?.value),
         orientation: orientationEl.value,
-        size: sizeEl.value,
-        style_id: styleEl.value,
+        resolution: resolutionEl.value,
+        style: styleEl.value,
+        seed: seedEl.value,
       });
       persistUVDraftsComposerState();
       persistComposerGensCount(uvDraftsComposerState.gensCount);
-      if (gensEl && commitGensValue) gensEl.value = String(uvDraftsComposerState.gensCount);
-      if (sizeEl) sizeEl.value = uvDraftsComposerState.size;
+      if (gensEl) gensEl.value = String(uvDraftsComposerState.gensCount);
+    };
+
+    const setPromptFieldValue = (text) => {
+      if (!promptEl) return;
+      const nextText = String(text || '');
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
+      if (setter) setter.call(promptEl, nextText);
+      else promptEl.value = nextText;
+      promptEl.dispatchEvent(new Event('input', { bubbles: true }));
+      promptEl.dispatchEvent(new Event('change', { bubbles: true }));
+    };
+
+    const getBatchSettingsSnapshot = () => {
+      const composerState = normalizeUVDraftsComposerState(uvDraftsComposerState || defaultUVDraftsComposerState());
+      return {
+        model: normalizeComposerModel(modelEl?.value || composerState.model || '') || '',
+        durationSeconds: Number(durationEl?.value || composerState.durationSeconds || 0) || 0,
+        gensCount: clampGensCount(gensEl?.value || composerState.gensCount || 1),
+        orientation: String(orientationEl?.value || composerState.orientation || '').trim(),
+        resolution: String(resolutionEl?.value || composerState.resolution || '').trim(),
+        style: String(styleEl?.value || composerState.style || '').trim(),
+        seed: String(seedEl?.value || composerState.seed || '').trim(),
+      };
+    };
+
+    const setJsonlSummary = (message = '') => {
+      if (!jsonlSummaryEl) return;
+      const queue = loadPendingCreateQueue();
+      const batch = loadPendingCreateBatchState();
+      if (jsonlClearBtn) jsonlClearBtn.disabled = queue.total <= 0;
+
+      if (message) {
+        jsonlSummaryEl.textContent = message;
+        return;
+      }
+
+      if (batch.status === 'running' || batch.status === 'armed') {
+        const submitted = Number(batch.progress?.submitted || 0);
+        const total = Number(batch.progress?.total || queue.total || submitted);
+        jsonlSummaryEl.textContent = `Batch ${batch.status === 'armed' ? 'armed' : 'running'}: ${submitted}/${total} submitted.`;
+        return;
+      }
+      if (batch.status === 'paused_error') {
+        const submitted = Number(batch.progress?.submitted || 0);
+        const total = Number(batch.progress?.total || queue.total || submitted);
+        const reason = batch.lastError ? ` Error: ${batch.lastError}` : '';
+        jsonlSummaryEl.textContent = `Batch paused at ${submitted}/${total}.${reason}`;
+        return;
+      }
+      if (batch.status === 'completed') {
+        const submitted = Number(batch.progress?.submitted || 0);
+        const total = Number(batch.progress?.total || submitted);
+        jsonlSummaryEl.textContent = `Batch completed (${submitted}/${total} submitted).`;
+        return;
+      }
+
+      if (queue.total <= 0) {
+        jsonlSummaryEl.textContent = 'Queue empty. Upload a JSONL file with one {"prompt":"..."} per line.';
+        return;
+      }
+
+      jsonlSummaryEl.textContent = `Queue ready: ${queue.remaining}/${queue.total} prompts remaining.`;
+    };
+
+    const syncPromptFromSelectedQueue = (queueState = null) => {
+      const queue = normalizePromptQueueState(queueState || loadPendingCreateQueue());
+      if (queue.total <= 0) return;
+      const selectedPrompt = String(queue.prompts[queue.selectedIndex] || '').trim();
+      if (!selectedPrompt) return;
+      setPromptFieldValue(selectedPrompt);
+    };
+
+    const renderJsonlQueue = () => {
+      const queue = loadPendingCreateQueue();
+      const batch = loadPendingCreateBatchState();
+      const hasQueue = queue.total > 0;
+
+      if (jsonlQueuePanelEl) jsonlQueuePanelEl.hidden = !hasQueue;
+      if (!hasQueue) {
+        if (jsonlQueueListEl) jsonlQueueListEl.textContent = '';
+        if (jsonlQueueMetaEl) jsonlQueueMetaEl.textContent = '';
+        if (jsonlPreviewEl) jsonlPreviewEl.value = '';
+        if (jsonlPrevBtn) jsonlPrevBtn.disabled = true;
+        if (jsonlNextBtn) jsonlNextBtn.disabled = true;
+        if (jsonlRemoveBtn) jsonlRemoveBtn.disabled = true;
+        if (jsonlReviewBtn) jsonlReviewBtn.disabled = true;
+        if (jsonlResumeBtn) jsonlResumeBtn.disabled = true;
+        return;
+      }
+
+      const selectedPrompt = String(queue.prompts[queue.selectedIndex] || '');
+      const currentLabel = queue.remaining > 0
+        ? `${queue.index + 1}/${queue.total}`
+        : `done/${queue.total}`;
+      if (jsonlQueueMetaEl) {
+        jsonlQueueMetaEl.textContent = `Current ${currentLabel} • Selected ${queue.selectedIndex + 1}/${queue.total}`;
+      }
+      if (jsonlPreviewEl) {
+        jsonlPreviewEl.value = selectedPrompt;
+      }
+      if (jsonlPrevBtn) jsonlPrevBtn.disabled = queue.selectedIndex <= 0;
+      if (jsonlNextBtn) jsonlNextBtn.disabled = queue.selectedIndex >= queue.total - 1;
+      if (jsonlRemoveBtn) jsonlRemoveBtn.disabled = queue.total <= 0;
+      if (jsonlReviewBtn) jsonlReviewBtn.disabled = queue.remaining <= 0;
+      if (jsonlResumeBtn) jsonlResumeBtn.disabled = !(batch.status === 'paused_error' && queue.remaining > 0);
+
+      if (jsonlQueueListEl) {
+        jsonlQueueListEl.textContent = '';
+        const fragment = document.createDocumentFragment();
+        for (let i = 0; i < queue.prompts.length; i += 1) {
+          const item = document.createElement('button');
+          item.type = 'button';
+          item.className = 'uvd-jsonl-item';
+          item.dataset.selected = i === queue.selectedIndex ? 'true' : 'false';
+          item.dataset.current = i === queue.index ? 'true' : 'false';
+          const promptText = String(queue.prompts[i] || '');
+          const clipped = promptText.length > 140 ? `${promptText.slice(0, 140)}...` : promptText;
+          item.textContent = `${i + 1}. ${clipped}`;
+          item.addEventListener('click', () => {
+            setPendingCreateQueueSelection(i);
+            syncPromptFromSelectedQueue();
+            renderJsonlQueue();
+          });
+          fragment.appendChild(item);
+        }
+        jsonlQueueListEl.appendChild(fragment);
+      }
+    };
+
+    const openBatchReviewModal = () => {
+      const queue = loadPendingCreateQueue();
+      if (queue.remaining <= 0) {
+        setJsonlSummary('No queued prompts left to review.');
+        renderJsonlQueue();
+        return;
+      }
+
+      syncStateFromFields();
+      const settings = getBatchSettingsSnapshot();
+      const pendingPrompts = queue.prompts.slice(queue.index);
+      const totalJobs = pendingPrompts.length * Math.max(1, Number(settings.gensCount || 1));
+
+      const backdrop = document.createElement('div');
+      backdrop.className = 'uvd-modal-backdrop';
+      const modal = document.createElement('div');
+      modal.className = 'uvd-modal';
+      modal.innerHTML = `
+        <div class="uvd-modal-head">
+          <h3>Review Batch</h3>
+          <p>Confirm queued prompts before launch. Creator Tools batch settings will be applied via create-request overrides.</p>
+        </div>
+        <div class="uvd-jsonl-review-summary">
+          <div><strong>Prompts</strong>: ${pendingPrompts.length}</div>
+          <div><strong>Estimated Generations / Prompt</strong>: ${Math.max(1, Number(settings.gensCount || 1))}</div>
+          <div><strong>Estimated Total Jobs</strong>: ${totalJobs}</div>
+          <div><strong>Override Mode</strong>: Applies Creator Tools model/duration/gens/orientation/resolution/style/seed on each queued create.</div>
+        </div>
+        <div class="uvd-jsonl-review-list"></div>
+        <div class="uvd-modal-footer">
+          <button type="button" class="uvd-modal-btn" data-uvd-review-cancel="1">Cancel</button>
+          <button type="button" class="uvd-modal-btn is-primary" data-uvd-review-start="1">Start Batch</button>
+        </div>
+      `;
+
+      const reviewList = modal.querySelector('.uvd-jsonl-review-list');
+      if (reviewList) {
+        for (let i = 0; i < pendingPrompts.length; i += 1) {
+          const row = document.createElement('div');
+          row.className = 'uvd-jsonl-review-item';
+          const promptText = String(pendingPrompts[i] || '');
+          row.textContent = `${queue.index + i + 1}. ${promptText}`;
+          reviewList.appendChild(row);
+        }
+      }
+
+      const close = () => {
+        try { backdrop.remove(); } catch {}
+      };
+      modal.querySelector('[data-uvd-review-cancel="1"]')?.addEventListener('click', close);
+      modal.querySelector('[data-uvd-review-start="1"]')?.addEventListener('click', () => {
+        const now = Date.now();
+        persistComposerDurationOverride(settings.durationSeconds);
+        persistComposerGensCount(settings.gensCount);
+        savePendingCreateBatchState({
+          status: 'armed',
+          createdAt: now,
+          startedAt: 0,
+          completedAt: 0,
+          awaitingRequest: false,
+          settings,
+          progress: {
+            submitted: 0,
+            total: pendingPrompts.length,
+          },
+          lastError: '',
+        });
+
+        const peek = peekPendingCreateQueuePrompt();
+        if (peek.prompt) {
+          sessionStorage.setItem(
+            UV_PENDING_COMPOSE_KEY,
+            JSON.stringify({ prompt: peek.prompt, createdAt: now })
+          );
+        }
+        if (statusEl) {
+          statusEl.textContent = `Batch armed (${pendingPrompts.length} prompts). Opening native composer with Creator Tools request overrides...`;
+          statusEl.dataset.tone = 'ok';
+        }
+        close();
+        window.location.href = 'https://sora.chatgpt.com/drafts';
+      });
+
+      backdrop.addEventListener('click', (event) => {
+        if (event.target === backdrop) close();
+      });
+      backdrop.appendChild(modal);
+      document.documentElement.appendChild(backdrop);
     };
 
     promptEl.value = uvDraftsComposerState.prompt;
     modelEl.value = normalizeComposerModel(uvDraftsComposerState.model) || getDefaultComposerModel();
-    if (!modelEl.value) modelEl.value = composerModels[0]?.value || 'sy_8';
+    if (!modelEl.value) modelEl.value = composerModels[0]?.value || COMPOSER_MODELS[0].value;
     uvDraftsComposerState.model = modelEl.value;
     modelOverride = modelEl.value;
     durationEl.value = String(uvDraftsComposerState.durationSeconds);
     if (gensEl) gensEl.value = String(clampGensCount(uvDraftsComposerState.gensCount));
     orientationEl.value = uvDraftsComposerState.orientation;
-    sizeEl.value = uvDraftsComposerState.size;
-    styleEl.value = uvDraftsComposerState.style_id;
+    resolutionEl.value = uvDraftsComposerState.resolution;
+    styleEl.value = uvDraftsComposerState.style;
+    seedEl.value = uvDraftsComposerState.seed;
     syncGensFieldLimits();
-    syncComposerSizeField();
-    uvDraftsComposerState.size = sizeEl.value;
     persistUVDraftsComposerState();
     persistComposerGensCount(uvDraftsComposerState.gensCount);
 
-    [promptEl, modelEl, durationEl, orientationEl, sizeEl, styleEl].filter(Boolean).forEach((el) => {
+    [promptEl, modelEl, durationEl, gensEl, orientationEl, resolutionEl, styleEl, seedEl].filter(Boolean).forEach((el) => {
       el.addEventListener('input', syncStateFromFields);
       el.addEventListener('change', syncStateFromFields);
     });
-    if (gensEl) {
-      gensEl.addEventListener('input', () => syncStateFromFields({ commitGensValue: false }));
-      gensEl.addEventListener('change', () => syncStateFromFields({ commitGensValue: true }));
-      gensEl.addEventListener('blur', () => syncStateFromFields({ commitGensValue: true }));
-    }
-    window.addEventListener('sct_ultra_mode', () => {
-      syncGensFieldLimits();
-      syncStateFromFields();
-    });
+    window.addEventListener('sct_ultra_mode', syncGensFieldLimits);
     window.addEventListener('storage', (event) => {
-      if (event.key === ULTRA_MODE_KEY) {
-        syncGensFieldLimits();
-        syncStateFromFields();
-      }
+      if (event.key === ULTRA_MODE_KEY) syncGensFieldLimits();
     });
 
-    composer.querySelector('[data-uvd-compose-create="1"]')?.addEventListener('click', () => {
-      syncStateFromFields({ commitGensValue: true });
-      startComposerFlow('compose', statusEl);
-    });
-    composer.querySelector('[data-uvd-compose-remix="1"]')?.addEventListener('click', () => {
-      syncStateFromFields({ commitGensValue: true });
-      startComposerFlow('remix', statusEl);
-    });
-    composer.querySelector('[data-uvd-compose-extend="1"]')?.addEventListener('click', () => {
-      syncStateFromFields({ commitGensValue: true });
-      startComposerFlow('extend', statusEl);
-    });
+    composer.querySelector('[data-uvd-compose-create="1"]')?.addEventListener('click', () => startComposerFlow('compose', statusEl));
+    composer.querySelector('[data-uvd-compose-remix="1"]')?.addEventListener('click', () => startComposerFlow('remix', statusEl));
+    composer.querySelector('[data-uvd-compose-extend="1"]')?.addEventListener('click', () => startComposerFlow('extend', statusEl));
     clearSourceBtn?.addEventListener('click', () => setComposerSource(null, statusEl));
-
-    // Cameo add button
-    const cameoInput = composer.querySelector('[data-uvd-cameo-input="1"]');
-    const cameoAddBtn = composer.querySelector('[data-uvd-cameo-add="1"]');
-    const addCameoFromInput = async () => {
-      const rawValue = cameoInput?.value || '';
-      if (!rawValue.trim()) return;
-      try {
-        if (cameoAddBtn) cameoAddBtn.disabled = true;
-        setComposerStatus(`Looking up ${rawValue.trim()}...`);
-        const resolved = await resolveComposerCameoInput(rawValue);
-        rememberComposerCameoIdentity(resolved.userId, resolved.username);
-        if (!composerCameoIds.includes(resolved.userId)) {
-          composerCameoIds.push(resolved.userId);
-          renderCameoList();
-        }
-        if (cameoInput) cameoInput.value = '';
-        setComposerStatus(`Added cameo ${getComposerCameoLabel(resolved.userId)}.`, 'ok');
-      } catch (err) {
-        setComposerStatus(err?.message || 'Failed to resolve cameo username.', 'error');
-      } finally {
-        if (cameoAddBtn) cameoAddBtn.disabled = false;
-      }
-    };
-    cameoAddBtn?.addEventListener('click', () => { void addCameoFromInput(); });
-    cameoInput?.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        void addCameoFromInput();
+    jsonlUploadBtn?.addEventListener('click', () => jsonlInputEl?.click());
+    jsonlClearBtn?.addEventListener('click', () => {
+      clearPendingCreateQueue();
+      clearPendingCreateBatchState();
+      setJsonlSummary('Queue cleared.');
+      renderJsonlQueue();
+      if (statusEl) {
+        statusEl.textContent = 'Prompt queue cleared.';
+        statusEl.dataset.tone = '';
       }
     });
+    jsonlPrevBtn?.addEventListener('click', () => {
+      const queue = loadPendingCreateQueue();
+      const updated = setPendingCreateQueueSelection(queue.selectedIndex - 1);
+      syncPromptFromSelectedQueue(updated);
+      renderJsonlQueue();
+      setJsonlSummary();
+    });
+    jsonlNextBtn?.addEventListener('click', () => {
+      const queue = loadPendingCreateQueue();
+      const updated = setPendingCreateQueueSelection(queue.selectedIndex + 1);
+      syncPromptFromSelectedQueue(updated);
+      renderJsonlQueue();
+      setJsonlSummary();
+    });
+    jsonlRemoveBtn?.addEventListener('click', () => {
+      const queue = loadPendingCreateQueue();
+      if (queue.total <= 0) return;
+      const updated = removePendingCreateQueueAtIndex(queue.selectedIndex);
+      const batch = loadPendingCreateBatchState();
+      if (batch.status !== 'idle') {
+        if (updated.total <= 0 || updated.remaining <= 0) {
+          clearPendingCreateBatchState();
+        } else {
+          const submitted = Number(batch.progress?.submitted || 0);
+          savePendingCreateBatchState({
+            ...batch,
+            progress: {
+              submitted,
+              total: Math.max(submitted, submitted + updated.remaining),
+            },
+          });
+        }
+      }
+      syncPromptFromSelectedQueue(updated);
+      renderJsonlQueue();
+      setJsonlSummary(updated.total > 0 ? 'Removed selected prompt from queue.' : 'Queue cleared.');
+    });
+    jsonlReviewBtn?.addEventListener('click', () => {
+      openBatchReviewModal();
+    });
+    jsonlResumeBtn?.addEventListener('click', () => {
+      const batch = loadPendingCreateBatchState();
+      const queue = loadPendingCreateQueue();
+      if (batch.status !== 'paused_error' || queue.remaining <= 0) {
+        setJsonlSummary();
+        renderJsonlQueue();
+        return;
+      }
+      syncStateFromFields();
+      const settings = getBatchSettingsSnapshot();
+      persistComposerDurationOverride(settings.durationSeconds);
+      persistComposerGensCount(settings.gensCount);
+      const now = Date.now();
+      savePendingCreateBatchState({
+        ...batch,
+        status: 'running',
+        awaitingRequest: false,
+        settings,
+        lastError: '',
+        startedAt: batch.startedAt || now,
+        progress: {
+          submitted: Number(batch.progress?.submitted || 0),
+          total: Math.max(
+            Number(batch.progress?.submitted || 0),
+            Number(batch.progress?.submitted || 0) + Number(queue.remaining || 0)
+          ),
+        },
+      });
+      const peek = peekPendingCreateQueuePrompt();
+      if (peek.prompt) {
+        sessionStorage.setItem(
+          UV_PENDING_COMPOSE_KEY,
+          JSON.stringify({ prompt: peek.prompt, createdAt: now })
+        );
+      }
+      if (statusEl) {
+        statusEl.textContent = 'Resuming batch in native composer with Creator Tools request overrides...';
+        statusEl.dataset.tone = 'ok';
+      }
+      renderJsonlQueue();
+      setJsonlSummary();
+      window.location.href = 'https://sora.chatgpt.com/drafts';
+    });
+    jsonlInputEl?.addEventListener('change', async () => {
+      const file = jsonlInputEl.files && jsonlInputEl.files[0];
+      jsonlInputEl.value = '';
+      if (!file) return;
+      try {
+        const text = await file.text();
+        const parsed = parsePromptJsonl(text, { maxPrompts: 20 });
+        if (parsed.acceptedCount <= 0) {
+          const firstError = parsed.errors && parsed.errors[0];
+          const detail = firstError ? ` First error on line ${firstError.line}: ${firstError.reason}.` : '';
+          setJsonlSummary(`No prompts loaded.${detail}`);
+          renderJsonlQueue();
+          if (statusEl) {
+            statusEl.textContent = 'Upload failed: no valid prompts.';
+            statusEl.dataset.tone = 'error';
+          }
+          return;
+        }
+
+        clearPendingCreateBatchState();
+        const queue = savePendingCreateQueue({
+          prompts: parsed.prompts,
+          index: 0,
+          selectedIndex: 0,
+          createdAt: Date.now(),
+        });
+        const firstPrompt = queue.total > 0
+          ? String(queue.prompts[queue.selectedIndex] || '').trim()
+          : '';
+        if (firstPrompt) setPromptFieldValue(firstPrompt);
+
+        const pieces = [`Loaded ${parsed.acceptedCount} prompt${parsed.acceptedCount === 1 ? '' : 's'}.`];
+        if (parsed.invalidCount > 0) pieces.push(`${parsed.invalidCount} invalid.`);
+        if (parsed.truncatedCount > 0) pieces.push(`${parsed.truncatedCount} truncated (cap ${parsed.maxPrompts}).`);
+        setJsonlSummary(pieces.join(' '));
+        renderJsonlQueue();
+
+        if (statusEl) {
+          statusEl.textContent = `Prompt queue ready (${queue.remaining} remaining). Use Create for one selected prompt, or Review Batch for full queue run with Creator Tools request overrides.`;
+          statusEl.dataset.tone = 'ok';
+        }
+      } catch (err) {
+        console.error('[Creator Tools] JSONL upload failed:', err);
+        setJsonlSummary('Failed to read file.');
+        renderJsonlQueue();
+        if (statusEl) {
+          statusEl.textContent = 'Upload failed. Use a valid JSONL file.';
+          statusEl.dataset.tone = 'error';
+        }
+      }
+    });
+
+    const initialQueueState = loadPendingCreateQueue();
+    if (initialQueueState.total > 0) {
+      syncPromptFromSelectedQueue(initialQueueState);
+    }
 
     const setDropVisual = (active) => {
       dropzone.classList.toggle('is-active', !!active);
@@ -4627,21 +3640,15 @@
             url: parsed.download_url || parsed.preview_url || '',
             preview_url: parsed.preview_url || '',
             thumbnail_url: parsed.thumbnail_url || '',
-            cameo_profiles: parsed.cameo_profiles || [],
             label: `${parsed.title || parsed.prompt || parsed.id}`.slice(0, 90),
           });
         }
       } catch {}
 
       if (!source) {
-        const uri = (e.dataTransfer?.getData('text/uri-list') || e.dataTransfer?.getData('text/plain') || '').trim();
-        if (uri) {
-          try {
-            const parsed = new URL(uri);
-            if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
-              source = normalizeComposerSource({ type: 'url', url: uri, label: uri.slice(0, 90) });
-            }
-          } catch {}
+        const uri = e.dataTransfer?.getData('text/uri-list') || e.dataTransfer?.getData('text/plain') || '';
+        if (uri && /^https?:\/\//i.test(uri)) {
+          source = normalizeComposerSource({ type: 'url', url: uri.trim(), label: uri.trim().slice(0, 90) });
         }
       }
 
@@ -4684,7 +3691,7 @@
         return;
       }
       const objectUrl = URL.createObjectURL(file);
-      uvDraftsComposerFirstFrame = { object_url: objectUrl, fileName: file.name, _file: file };
+      uvDraftsComposerFirstFrame = { object_url: objectUrl, fileName: file.name };
       if (firstFrameImg) firstFrameImg.src = objectUrl;
       if (firstFrameName) firstFrameName.textContent = file.name;
       if (firstFramePreview) firstFramePreview.classList.add('is-visible');
@@ -4721,6 +3728,8 @@
       }
     });
 
+    renderJsonlQueue();
+    setJsonlSummary();
     setComposerSource(uvDraftsComposerSource, statusEl);
     return composer;
   }
@@ -4730,7 +3739,7 @@
       const drafts = await uvDBGetAll(UV_DRAFTS_STORES.drafts);
       return drafts;
     } catch (err) {
-      console.error('[UV Drafts] Cache load error:', err);
+      console.error('[Creator Tools] Cache load error:', err);
       return [];
     }
   }
@@ -4760,7 +3769,7 @@
 
       return transformedDrafts;
     } catch (err) {
-      console.error('[UV Drafts] API sync error:', err);
+      console.error('[Creator Tools] API sync error:', err);
       throw err;
     }
   }
@@ -4769,10 +3778,7 @@
     if (!(idSet instanceof Set) || !Array.isArray(drafts)) return;
     for (const draft of drafts) {
       const id = String(draft?.id || '').trim();
-      if (id) {
-        idSet.add(id);
-        uvDraftsSyncConfirmedIds.add(id);
-      }
+      if (id) idSet.add(id);
     }
   }
 
@@ -4846,11 +3852,6 @@
       transformed.is_pending = true;
       transformed.pending_status = String(item.pending_status || item.status || 'pending').toLowerCase();
       transformed.pending_task_status = String(item.pending_task_status || '').toLowerCase();
-      // v2 API may provide progress as 0-1 fraction or 0-100 percentage
-      const rawPct = item.progress_pct ?? item.progress ?? null;
-      transformed.progress_pct = rawPct != null && Number.isFinite(Number(rawPct))
-        ? (Number(rawPct) <= 1 && Number(rawPct) > 0 ? Number(rawPct) * 100 : Number(rawPct))
-        : null;
       transformed.is_read = true;
       const createdAt = Number(transformed.created_at);
       if (!Number.isFinite(createdAt) || createdAt <= 0) {
@@ -4880,7 +3881,6 @@
     uvDraftsTopRefreshInFlight = (async () => {
       const runId = uvDraftsInitRunId;
       const isStaleRun = () => runId !== uvDraftsInitRunId;
-      const suppressUiRender = reason === 'pending_dropped';
       const fullSyncIds = new Set();
       setUVDraftsSyncUiState({ syncing: true, processed: uvDraftsData.length, page: 1 });
       const firstBatch = await fetchFirstUVDrafts(30);
@@ -4892,34 +3892,22 @@
         transformDraftForStorage(draft, existingMap.get(draft.id) || {}, { apiOrder: idx, fromDraftsApi: true })
       );
       addDraftIdsToSet(transformed, fullSyncIds);
-      // Clean up consumed workspace tags
-      for (const draft of transformed) {
-        if (draft.task_id && uvDraftsPendingWorkspaceTags.has(draft.task_id)) {
-          uvDraftsPendingWorkspaceTags.delete(draft.task_id);
-        }
-      }
       await uvDBPutAll(UV_DRAFTS_STORES.drafts, transformed);
       if (isStaleRun()) return;
       uvDraftsData = mergeDraftListById(transformed, uvDraftsData);
-      if (!suppressUiRender && isUVDraftsPageVisible()) {
+      if (isUVDraftsPageVisible()) {
         renderUVDraftsGrid();
         updateUVDraftsStats();
       }
       if (firstBatch.cursor) {
-        const syncSucceeded = await syncRemainingDrafts(
-          firstBatch.cursor,
-          null,
-          runId,
-          firstBatch.items.length,
-          fullSyncIds,
-          3,
-          { suppressUiRender }
-        );
+        const syncSucceeded = await syncRemainingDrafts(firstBatch.cursor, null, runId, firstBatch.items.length, fullSyncIds);
         if (!syncSucceeded || isStaleRun()) return;
       }
+      await archiveUnsyncedDraftsAfterFullSync(fullSyncIds, runId);
+      if (isStaleRun()) return;
     })()
       .catch((err) => {
-        console.error('[UV Drafts] Top refresh failed after pending change:', reason, err);
+        console.error('[Creator Tools] Top refresh failed after pending change:', reason, err);
       })
       .finally(() => {
         setUVDraftsSyncUiState({ syncing: false, processed: uvDraftsData.length, page: 0 });
@@ -4936,120 +3924,37 @@
     if (runId !== uvDraftsInitRunId) return;
 
     const pendingDrafts = buildPendingDraftsFromPayload(payload);
-    const previousPendingDrafts = Array.isArray(uvDraftsPendingData) ? uvDraftsPendingData : [];
-    const previousPendingIds = uvDraftsPendingIds;
-    const pendingState = resolvePendingPollState(
-      previousPendingDrafts,
-      uvDraftsPendingEndpointIds,
-      pendingDrafts,
-      uvDraftsData,
-      uvDraftsLogic
-    );
-    const nextIds = pendingState.visibleIds;
+    const nextIds = new Set(pendingDrafts.map((draft) => String(draft?.id || '')).filter(Boolean));
+    const droppedIds = uvDraftsLogic && typeof uvDraftsLogic.getDroppedIds === 'function'
+      ? uvDraftsLogic.getDroppedIds(uvDraftsPendingIds, nextIds)
+      : [...uvDraftsPendingIds].filter((id) => !nextIds.has(id));
 
-    // Re-render if IDs changed OR if progress/status/completion data updated
-    const idsChanged = nextIds.size !== previousPendingIds.size ||
-      [...nextIds].some((id) => !previousPendingIds.has(id));
-    const dataChanged = !idsChanged && didPendingPollStateChange(
-      previousPendingDrafts,
-      previousPendingIds,
-      pendingState.visibleDrafts,
-      nextIds
-    );
-    const pendingChanged = idsChanged || dataChanged;
-
-    uvDraftsPendingEndpointIds = pendingState.endpointIds;
     uvDraftsPendingIds = nextIds;
-    uvDraftsPendingData = pendingState.visibleDrafts;
+    uvDraftsPendingData = pendingDrafts;
     uvDraftsPendingFailures = 0;
 
-    if (pendingChanged && isUVDraftsPageVisible()) {
-      if (idsChanged) {
-        // IDs added/removed — full rebuild needed
-        renderUVDraftsGrid(true);
-      } else {
-        // Only progress/status changed — update pending cards in-place
-        updatePendingCardsInPlace(uvDraftsPendingData);
-      }
+    if (isUVDraftsPageVisible()) {
+      renderUVDraftsGrid();
     }
 
-    if (pendingState.requiresTopRefresh) {
+    if (droppedIds.length > 0) {
       await refreshTopUVDraftsFromAPI('pending_dropped');
-      if (runId !== uvDraftsInitRunId) return;
-
-      const previousRefreshPendingDrafts = Array.isArray(uvDraftsPendingData) ? uvDraftsPendingData : [];
-      const previousRefreshPendingIds = uvDraftsPendingIds;
-      const refreshedPendingState = resolvePendingPollState(
-        previousRefreshPendingDrafts,
-        uvDraftsPendingEndpointIds,
-        pendingDrafts,
-        uvDraftsData,
-        uvDraftsLogic
-      );
-      const refreshIdsChanged = refreshedPendingState.visibleIds.size !== previousRefreshPendingIds.size ||
-        [...refreshedPendingState.visibleIds].some((id) => !previousRefreshPendingIds.has(id));
-      const refreshDataChanged = !refreshIdsChanged && didPendingPollStateChange(
-        previousRefreshPendingDrafts,
-        previousRefreshPendingIds,
-        refreshedPendingState.visibleDrafts,
-        refreshedPendingState.visibleIds
-      );
-      const completionHandoffs = buildPendingCompletionHandoffPlan(
-        previousRefreshPendingDrafts,
-        refreshedPendingState.visibleIds,
-        uvDraftsData
-      );
-
-      uvDraftsPendingEndpointIds = refreshedPendingState.endpointIds;
-      uvDraftsPendingIds = refreshedPendingState.visibleIds;
-      uvDraftsPendingData = refreshedPendingState.visibleDrafts;
-
-      if (isUVDraftsPageVisible()) {
-        const handoffApplied = completionHandoffs.length > 0
-          ? applyPendingCompletionHandoffsInPlace(completionHandoffs)
-          : false;
-        if (!handoffApplied && (refreshIdsChanged || refreshDataChanged)) {
-          if (refreshIdsChanged) {
-            renderUVDraftsGrid(true);
-          } else {
-            updatePendingCardsInPlace(uvDraftsPendingData);
-          }
-        } else if (refreshDataChanged) {
-          updatePendingCardsInPlace(uvDraftsPendingData);
-        }
-        updateUVDraftsStats();
-      }
     }
   }
 
   function startPendingDraftsPolling() {
     if (uvDraftsPendingPollTimerId || !capturedAuthToken) return;
     uvDraftsPendingFailures = 0;
-    // Poll once immediately — only start the interval if there are pending items
-    pollPendingDraftsOnce().then(() => {
-      if (uvDraftsPendingIds.size > 0 && !uvDraftsPendingPollTimerId) {
-        continuePendingDraftsPolling();
-      }
-    }).catch((err) => {
+    pollPendingDraftsOnce().catch((err) => {
       uvDraftsPendingFailures += 1;
-      console.error('[UV Drafts] Initial pending poll failed:', err);
+      console.error('[Creator Tools] Initial pending poll failed:', err);
     });
-  }
-
-  function continuePendingDraftsPolling() {
-    if (uvDraftsPendingPollTimerId || !capturedAuthToken) return;
     uvDraftsPendingPollTimerId = setInterval(() => {
-      pollPendingDraftsOnce().then(() => {
-        if (uvDraftsPendingMinPolls > 0) uvDraftsPendingMinPolls--;
-        // Stop polling once all pending items are gone and min polls exhausted
-        if (uvDraftsPendingIds.size === 0 && uvDraftsPendingMinPolls <= 0) {
-          stopPendingDraftsPolling(false);
-        }
-      }).catch((err) => {
+      pollPendingDraftsOnce().catch((err) => {
         uvDraftsPendingFailures += 1;
-        console.error('[UV Drafts] Pending poll failed:', err);
+        console.error('[Creator Tools] Pending poll failed:', err);
         if (uvDraftsPendingFailures >= UV_DRAFTS_PENDING_MAX_FAILURES) {
-          console.error('[UV Drafts] Stopping pending polling after repeated failures');
+          console.error('[Creator Tools] Stopping pending polling after repeated failures');
           stopPendingDraftsPolling(false);
         }
       });
@@ -5061,20 +3966,25 @@
       clearInterval(uvDraftsPendingPollTimerId);
       uvDraftsPendingPollTimerId = null;
     }
-    uvDraftsPendingMinPolls = 0;
     if (clearState) {
       uvDraftsPendingData = [];
       uvDraftsPendingIds = new Set();
-      uvDraftsPendingEndpointIds = new Set();
       uvDraftsPendingFailures = 0;
     }
   }
 
-  // ---- Filtering (no sorting) ----
+  function getRenderableUVDrafts() {
+    const mainDrafts = filterAndSortUVDrafts(uvDraftsData);
+    if (!Array.isArray(uvDraftsPendingData) || uvDraftsPendingData.length === 0) return mainDrafts;
+    const filteredPending = filterAndSortUVDrafts(uvDraftsPendingData, { skipSort: true });
+    if (filteredPending.length === 0) return mainDrafts;
+    return mergeDraftListById(filteredPending, mainDrafts);
+  }
 
-  function applyDraftFilters(drafts, options = {}) {
+  function filterAndSortUVDrafts(drafts, options = {}) {
     let filtered = [...drafts];
     const bookmarks = getBookmarks();
+    const skipSort = !!options?.skipSort;
 
     // Optional diagnostics for bookmark mismatch investigation.
     const _bmIds = [...bookmarks];
@@ -5085,20 +3995,20 @@
       const d = filtered.find(x => x?.id === id);
       return d?.is_unsynced === true;
     });
-    debugLog('[UV Drafts DEBUG] filterState:', uvDraftsFilterState,
+    debugLog('[Creator Tools DEBUG] filterState:', uvDraftsFilterState,
       '| bookmarks in storage:', _bmIds.length,
       '| drafts in data:', filtered.length,
       '| found in data:', _bmInData.length,
       '| missing from data:', _bmMissing.length,
       '| unsynced:', _bmUnsynced.length);
     if (_bmIds.length > 0) {
-      debugLog('[UV Drafts DEBUG] bookmark IDs:', _bmIds);
+      debugLog('[Creator Tools DEBUG] bookmark IDs:', _bmIds);
     }
     if (_bmMissing.length > 0) {
-      debugLog('[UV Drafts DEBUG] missing IDs:', _bmMissing);
+      debugLog('[Creator Tools DEBUG] missing IDs:', _bmMissing);
     }
     // Also log raw localStorage value for format check
-    debugLog('[UV Drafts DEBUG] raw localStorage:', localStorage.getItem(BOOKMARKS_KEY));
+    debugLog('[Creator Tools DEBUG] raw localStorage:', localStorage.getItem(BOOKMARKS_KEY));
 
     // Apply search filter
     if (uvDraftsSearchQuery) {
@@ -5120,55 +4030,62 @@
       }
     }
 
-    filtered = filterDraftsByWorkspace(filtered, uvDraftsWorkspaceFilter);
+    // Apply workspace filter
+    if (uvDraftsWorkspaceFilter) {
+      filtered = filtered.filter(d => d.workspace_id === uvDraftsWorkspaceFilter);
+    }
 
-    filtered = filtered.filter((d) => isDraftVisibleInFilterState(d, uvDraftsFilterState));
-
-    if (uvDraftsFilterState === 'bookmarked') {
-      filtered = filtered.filter((d) => isDraftVisibleInBookmarkedFilter(d, bookmarks, uvDraftsJustSeenIds, isDraftUnreadState(d)));
-    } else if (uvDraftsFilterState === 'hidden') {
-      filtered = filtered.filter((d) => d.hidden);
-    } else if (uvDraftsFilterState === 'unsynced') {
+    // Unsynced cards are archived by default and only shown in the dedicated filter.
+    // Exception: bookmarked items survive when viewing the bookmarked filter.
+    if (uvDraftsFilterState === 'unsynced') {
       filtered = filtered.filter((d) => d?.is_unsynced === true);
+    } else if (uvDraftsFilterState === 'bookmarked') {
+      filtered = filtered.filter((d) => d?.is_unsynced !== true || bookmarks.has(d.id));
+    } else {
+      filtered = filtered.filter((d) => d?.is_unsynced !== true);
+    }
+
+    // Apply state filter (but always include "new" drafts when filtering by bookmarked)
+    if (uvDraftsFilterState === 'bookmarked') {
+      filtered = filtered.filter(d => {
+        const isNew = d?.is_unsynced !== true && isDraftUnreadState(d) && !uvDraftsJustSeenIds.has(d.id);
+        const justSeen = d?.is_unsynced !== true && uvDraftsJustSeenIds.has(d.id);
+        return bookmarks.has(d.id) || isNew || justSeen;
+      });
+    } else if (uvDraftsFilterState === 'hidden') {
+      filtered = filtered.filter(d => d?.is_unsynced !== true && d.hidden);
     } else if (uvDraftsFilterState === 'violations') {
-      filtered = filtered.filter((d) => isContentViolationDraft(d) || isContextViolationDraft(d));
+      filtered = filtered.filter(d => d?.is_unsynced !== true && (isContentViolationDraft(d) || isContextViolationDraft(d)));
     } else if (uvDraftsFilterState === 'new') {
-      // Only show drafts confirmed by the API this session to avoid ghost drafts from stale cache
-      const requireConfirmed = uvDraftsSyncConfirmedIds.size > 0;
-      filtered = filtered.filter((d) =>
-        isDraftUnreadState(d) &&
-        !uvDraftsJustSeenIds.has(d.id) &&
-        (!requireConfirmed || uvDraftsSyncConfirmedIds.has(d.id))
-      );
+      filtered = filtered.filter(d => d?.is_unsynced !== true && isDraftUnreadState(d) && !uvDraftsJustSeenIds.has(d.id));
+    } else if (uvDraftsFilterState === 'unsynced') {
+      // Already handled above.
+    }
+    // 'all' shows everything
+
+    // Apply sort — purely by api_order (position in paginated API results).
+    // "Newest" = API order (ascending api_order), "Oldest" = reverse.
+    if (!skipSort) {
+      const withOrder = filtered.map((draft, order) => ({ draft, order }));
+      withOrder.sort((a, b) => {
+        const aOrd = Number(a.draft?.api_order);
+        const bOrd = Number(b.draft?.api_order);
+        const aHas = Number.isFinite(aOrd) && aOrd >= 0;
+        const bHas = Number.isFinite(bOrd) && bOrd >= 0;
+
+        if (!aHas && !bHas) return a.order - b.order;
+        if (!aHas) return 1;
+        if (!bHas) return -1;
+
+        if (uvDraftsSortState === 'oldest') {
+          return (bOrd - aOrd) || (b.order - a.order);
+        }
+        return (aOrd - bOrd) || (a.order - b.order);
+      });
+      filtered = withOrder.map((entry) => entry.draft);
     }
 
     return filtered;
-  }
-
-  // Build the final ordered list: pending first, then API-ordered, then cached without api_order.
-  function getRenderableUVDrafts() {
-    const mainFiltered = applyDraftFilters(uvDraftsData);
-
-    // Separate API-ordered drafts from cached ones without an order
-    const apiOrdered = [];
-    const noOrder = [];
-    for (const d of mainFiltered) {
-      const ord = Number(d?.api_order);
-      if (Number.isFinite(ord) && ord >= 0) apiOrdered.push(d);
-      else noOrder.push(d);
-    }
-    // Sort API-ordered drafts by their api_order value (page 1 = 0..N, page 2 = N+1..M, etc)
-    apiOrdered.sort((a, b) => a.api_order - b.api_order);
-    const ordered = apiOrdered.concat(noOrder);
-
-    // Prepend pending drafts
-    if (Array.isArray(uvDraftsPendingData) && uvDraftsPendingData.length > 0) {
-      const filteredPending = applyDraftFilters(uvDraftsPendingData);
-      if (filteredPending.length > 0) {
-        return mergeDraftListById(filteredPending, ordered);
-      }
-    }
-    return ordered;
   }
 
   function createUVDraftCard(draft) {
@@ -5178,29 +4095,24 @@
     const isContextViolation = isContextViolationDraft(draft);
     const isProcessingError = isProcessingErrorDraft(draft);
     const isSpecialError = isContentViolation || isContextViolation || isProcessingError;
-    const hasBlockedDraftActions = isPendingDraft || isSpecialError;
     const usePlaceholderThumb = isSpecialError || isPendingDraft;
     const isNew = isDraftUnreadState(draft) && !uvDraftsJustSeenIds.has(draft.id);
+    const remixSource = getDraftRemixSource(draft);
     const draftUrl = `https://sora.chatgpt.com/d/${encodeURIComponent(draft.id)}`;
-    const draftOrientation = getDraftOrientationForLayout(draft);
-    const draftCardLayoutStyle = getDraftCardLayoutStyle(draft, usePlaceholderThumb);
 
     const card = document.createElement('div');
     card.className = 'uv-draft-card uvd-card';
-    card.style.alignSelf = draftCardLayoutStyle.alignSelf;
-    if (draftOrientation) card.dataset.orientation = draftOrientation;
     if (isContentViolation || isContextViolation) card.classList.add('is-violation');
     if (isProcessingError) card.classList.add('is-processing-error');
     card.dataset.draftId = draft.id;
-    if (hasBlockedDraftActions) card.style.cursor = 'default';
-    card.draggable = !isPendingDraft;
+    card.draggable = true;
     let suppressCardNavUntil = 0;
     const blockCardNavigation = (ms = 180) => {
       suppressCardNavUntil = Date.now() + ms;
     };
     const shouldIgnoreCardNavigationTarget = (target) => (
       target instanceof Element && !!target.closest(
-        'a,button,input,textarea,select,video,label,[role="button"],[contenteditable="true"],.uv-play-btn'
+        'a,button,input,textarea,select,video,label,[role="button"],[contenteditable="true"],.uv-play-btn,.uvd-actions-row,.uvd-actions-row2'
       )
     );
     card.addEventListener('dragstart', (e) => {
@@ -5217,7 +4129,6 @@
           thumbnail_url: draft.thumbnail_url || '',
           orientation: draft.orientation || '',
           duration_seconds: draft.duration_seconds || 0,
-          cameo_profiles: draft.cameo_profiles || [],
         };
         e.dataTransfer?.setData('application/x-sora-uv-draft', JSON.stringify(payload));
         const uri = draft.download_url || draft.preview_url || '';
@@ -5237,12 +4148,24 @@
     Object.assign(thumbContainer.style, {
       position: 'relative',
       width: '100%',
-      paddingTop: draftCardLayoutStyle.paddingTop,
+      paddingTop: draft.height > draft.width ? '177.78%' : '56.25%', // 9:16 or 16:9
       background: isPendingDraft
         ? '#182435'
         : (isContentViolation || isContextViolation ? '#2a1515' : (isProcessingError ? '#1b2235' : '#1a1a1a')),
-      cursor: hasBlockedDraftActions ? 'default' : 'pointer',
     });
+    const topBadgeRail = document.createElement('div');
+    topBadgeRail.className = 'uv-top-badge-rail';
+    Object.assign(topBadgeRail.style, {
+      position: 'absolute',
+      top: '8px',
+      left: '8px',
+      display: 'flex',
+      gap: '6px',
+      alignItems: 'center',
+      zIndex: '4',
+      pointerEvents: 'auto',
+    });
+    thumbContainer.appendChild(topBadgeRail);
 
     // For violations/processing errors, show a placeholder instead of blank/broken media.
     if (usePlaceholderThumb) {
@@ -5259,28 +4182,17 @@
       });
 
       const warningIcon = document.createElement('div');
-      if (isPendingDraft) {
-        const pctVal = Number(draft.progress_pct);
-        const pctNorm = Number.isFinite(pctVal) && pctVal > 0 ? Math.min(pctVal, 100) : 0;
-        warningIcon.dataset.pendingRing = '1';
-        warningIcon.innerHTML = buildPendingRingMarkup(pctNorm);
-      } else {
-        warningIcon.textContent = isProcessingError ? '⚙️' : '⚠️';
-        warningIcon.style.fontSize = '48px';
-      }
+      warningIcon.textContent = isPendingDraft ? '⏳' : (isProcessingError ? '⚙️' : '⚠️');
+      warningIcon.style.fontSize = '48px';
       warningIcon.style.marginBottom = '12px';
       violationPlaceholder.appendChild(warningIcon);
 
       const violationLabel = document.createElement('div');
-      if (isPendingDraft) {
-        violationLabel.dataset.pendingStatus = '1';
-        const status = String(draft.pending_status || draft.pending_task_status || 'generating').replace(/_/g, ' ');
-        violationLabel.textContent = status.charAt(0).toUpperCase() + status.slice(1);
-      } else {
-        violationLabel.textContent = isProcessingError
-          ? 'Processing Error'
-          : (isContextViolation ? 'Context Violation' : 'Content Violation');
-      }
+      violationLabel.textContent = isPendingDraft
+        ? 'Generating...'
+        : (isProcessingError
+        ? 'Processing Error'
+        : (isContextViolation ? 'Context Violation' : 'Content Violation'));
       Object.assign(violationLabel.style, {
         color: isPendingDraft ? '#89b6ff' : (isProcessingError ? '#ffb86b' : '#ff6b6b'),
         fontSize: '14px',
@@ -5338,7 +4250,17 @@
         violationPlaceholder.appendChild(promptText);
       }
 
-      if (isProcessingError) {
+      if (isPendingDraft) {
+        const helpText = document.createElement('div');
+        helpText.textContent = 'This draft is still in progress. It will move into drafts when complete.';
+        Object.assign(helpText.style, {
+          color: '#9eb8ff',
+          fontSize: '10px',
+          lineHeight: '1.35',
+          marginTop: '8px',
+        });
+        violationPlaceholder.appendChild(helpText);
+      } else if (isProcessingError) {
         const helpText = document.createElement('div');
         helpText.textContent = 'Try Retry or Use as Composer Source to adjust prompt/settings.';
         Object.assign(helpText.style, {
@@ -5368,11 +4290,10 @@
       // Video element (hidden by default, shown on hover)
       // NOTE: Don't set src here to avoid memory issues with 500+ drafts
       const video = document.createElement('video');
-      video.className = 'uvd-thumb-video';
       video.dataset.src = draft.preview_url || ''; // Store for lazy loading
       video.playsInline = true;
       video.preload = 'none';
-      video.controls = false; // Enabled once playing — prevents native controls from stealing clicks
+      video.controls = true; // Show controls for volume/seeking
       video.draggable = false; // Prevent drag interfering with scrubber
       Object.assign(video.style, {
         position: 'absolute',
@@ -5384,13 +4305,6 @@
         transition: 'opacity 0.2s ease',
         zIndex: '1',
       });
-      applyDraftCardVideoFullscreenPresentation(video);
-      const syncVideoFullscreenPresentation = () => {
-        applyDraftCardVideoFullscreenPresentation(video);
-      };
-      video.addEventListener('fullscreenchange', syncVideoFullscreenPresentation);
-      video.addEventListener('webkitbeginfullscreen', syncVideoFullscreenPresentation);
-      video.addEventListener('webkitendfullscreen', syncVideoFullscreenPresentation);
       thumbContainer.appendChild(video);
 
       // Play button overlay
@@ -5415,34 +4329,28 @@
       playBtn.innerHTML = `<svg width="24" height="24" viewBox="0 0 24 24" fill="white">
         <path d="M8 5v14l11-7z"/>
       </svg>`;
-      // Hover anywhere on the thumbnail triggers play button hover state
-      thumbContainer.addEventListener('mouseenter', () => {
-        if (playBtn.style.display !== 'none') {
-          playBtn.style.transform = 'translate(-50%, -50%) scale(1.1)';
-          playBtn.style.background = 'rgba(0,0,0,0.9)';
-        }
+      playBtn.addEventListener('mouseenter', () => {
+        playBtn.style.transform = 'translate(-50%, -50%) scale(1.1)';
+        playBtn.style.background = 'rgba(0,0,0,0.9)';
       });
-      thumbContainer.addEventListener('mouseleave', () => {
+      playBtn.addEventListener('mouseleave', () => {
         playBtn.style.transform = 'translate(-50%, -50%)';
         playBtn.style.background = 'rgba(0,0,0,0.7)';
       });
-      thumbContainer.appendChild(playBtn);
-
-      // Unified click handler — whole thumbnail area acts as play button
-      thumbContainer.addEventListener('click', (e) => {
+      playBtn.addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
+        // Mark that user has interacted - enable hover-to-play
         uvDraftsVideoInteracted = true;
         // Pause any other playing video
         if (uvDraftsCurrentlyPlayingVideo && uvDraftsCurrentlyPlayingVideo !== video) {
           uvDraftsCurrentlyPlayingVideo.pause();
           uvDraftsCurrentlyPlayingVideo.currentTime = 0;
           uvDraftsCurrentlyPlayingVideo.style.opacity = '0';
-          uvDraftsCurrentlyPlayingVideo.controls = false;
           const otherPlayBtn = uvDraftsCurrentlyPlayingVideo.parentElement?.querySelector('.uv-play-btn');
           if (otherPlayBtn) otherPlayBtn.style.display = 'flex';
         }
-        // Mark as seen
+        // Mark as seen when clicking play
         if (!uvDraftsJustSeenIds.has(draft.id) && isDraftUnreadState(draft)) {
           uvDraftsJustSeenIds.add(draft.id);
           draft.is_read = true;
@@ -5451,18 +4359,37 @@
           if (badge) badge.style.display = 'none';
           updateUVDraftsStats();
         }
-        // Play
+        // Lazy load video src
+        if (!video.src && video.dataset.src) {
+          video.src = video.dataset.src;
+        }
+        video.style.opacity = '1';
         playBtn.style.display = 'none';
         uvDraftsCurrentlyPlayingVideo = video;
-        uvDraftsCurrentlyPlayingDraftId = draft.id;
-        if (!video.src && video.dataset.src) {
-          video.addEventListener('loadeddata', () => { video.style.opacity = '1'; video.controls = true; }, { once: true });
-          video.src = video.dataset.src;
-        } else {
+        video.play().catch((err) => {
+          console.log('[Creator Tools] Play button click failed:', err);
+        });
+      });
+      thumbContainer.appendChild(playBtn);
+
+      // Click on video to toggle play/pause
+      video.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (video.paused) {
+          uvDraftsVideoInteracted = true; // Re-enable hover-to-play
+          uvDraftsCurrentlyPlayingVideo = video;
+          playBtn.style.display = 'none';
           video.style.opacity = '1';
-          video.controls = true;
+          video.play();
+        } else {
+          uvDraftsVideoInteracted = false; // Disable hover-to-play when paused
+          uvDraftsCurrentlyPlayingVideo = null;
+          video.pause();
+          video.style.opacity = '0';
+          video.currentTime = 0;
+          playBtn.style.display = 'flex';
         }
-        video.play().catch(() => {});
       });
 
       // Duration badge
@@ -5485,72 +4412,53 @@
       }
     }
 
-    // NEW badge
-    const workspaceBadgeLabel = getDraftWorkspaceBadgeLabel(draft, uvDraftsWorkspaceFilter, getWorkspaceNameById);
-    let topLeftBadges = null;
-    let bottomLeftBadges = null;
-    const ensureTopLeftBadges = () => {
-      if (topLeftBadges) return topLeftBadges;
-      topLeftBadges = document.createElement('div');
-      topLeftBadges.className = 'uvd-card-badges-top-left';
-      Object.assign(topLeftBadges.style, {
-        position: 'absolute',
-        top: '8px',
-        left: '8px',
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'flex-start',
-        gap: '6px',
-        zIndex: '3',
-        pointerEvents: 'none',
-        maxWidth: 'calc(100% - 16px)',
-      });
-      thumbContainer.appendChild(topLeftBadges);
-      return topLeftBadges;
-    };
-
-    const ensureBottomLeftBadges = () => {
-      if (bottomLeftBadges) return bottomLeftBadges;
-      bottomLeftBadges = document.createElement('div');
-      bottomLeftBadges.className = 'uvd-card-badges-bottom-left';
-      Object.assign(bottomLeftBadges.style, {
-        position: 'absolute',
-        bottom: '8px',
-        left: '8px',
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'flex-start',
-        gap: '6px',
-        zIndex: '3',
-        pointerEvents: 'none',
-        maxWidth: 'calc(100% - 16px)',
-      });
-      thumbContainer.appendChild(bottomLeftBadges);
-      return bottomLeftBadges;
-    };
-
-    if (workspaceBadgeLabel) {
-      const workspaceBadge = document.createElement('div');
-      workspaceBadge.className = 'uvd-workspace-badge';
-      workspaceBadge.textContent = workspaceBadgeLabel;
-      Object.assign(workspaceBadge.style, {
-        maxWidth: '180px',
-        background: 'rgba(8,12,18,0.82)',
-        border: '1px solid rgba(255,255,255,0.16)',
-        color: '#f4f7fb',
-        fontSize: '10px',
-        fontWeight: '700',
-        padding: '4px 8px',
+    // Remix indicator
+    if (remixSource.isRemix) {
+      const remixHref = remixSource.sourceType === 'post' && remixSource.sourcePostId
+        ? `https://sora.chatgpt.com/p/${encodeURIComponent(remixSource.sourcePostId)}`
+        : remixSource.sourceType === 'draft' && remixSource.sourceDraftId
+          ? `https://sora.chatgpt.com/d/${encodeURIComponent(remixSource.sourceDraftId)}`
+          : '';
+      const remixBadge = document.createElement(remixHref ? 'a' : 'span');
+      remixBadge.className = 'uv-remix-badge';
+      remixBadge.innerHTML = REMIX_ICON_SVG;
+      Object.assign(remixBadge.style, {
+        minWidth: '24px',
+        height: '24px',
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
         borderRadius: '999px',
-        whiteSpace: 'nowrap',
-        overflow: 'hidden',
-        textOverflow: 'ellipsis',
-        boxShadow: '0 6px 18px rgba(0,0,0,0.24)',
-        backdropFilter: 'blur(8px)',
+        background: 'rgba(0,0,0,0.75)',
+        color: '#fff',
+        boxShadow: '0 2px 8px rgba(0,0,0,0.35)',
+        backdropFilter: 'blur(4px)',
+        WebkitBackdropFilter: 'blur(4px)',
+        textDecoration: 'none',
+        border: 'none',
       });
-      ensureTopLeftBadges().appendChild(workspaceBadge);
+      if (remixHref) {
+        remixBadge.href = remixHref;
+        remixBadge.title = remixSource.sourceType === 'post'
+          ? 'Watch parent video'
+          : 'Watch seed video';
+        remixBadge.addEventListener('click', (e) => {
+          e.stopPropagation();
+        });
+      } else {
+        remixBadge.title = 'Parent/seed video unavailable';
+        remixBadge.setAttribute('aria-disabled', 'true');
+        remixBadge.style.opacity = '0.7';
+        remixBadge.style.cursor = 'not-allowed';
+        remixBadge.addEventListener('click', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+        });
+      }
+      topBadgeRail.appendChild(remixBadge);
     }
 
+    // NEW badge
     if (isNew) {
       const newBadge = document.createElement('div');
       newBadge.className = 'uv-new-badge';
@@ -5566,7 +4474,11 @@
         letterSpacing: '0.5px',
         boxShadow: '0 2px 8px rgba(59,130,246,0.5)',
       });
-      ensureBottomLeftBadges().appendChild(newBadge);
+      topBadgeRail.appendChild(newBadge);
+    }
+
+    if (topBadgeRail.childElementCount === 0) {
+      topBadgeRail.style.display = 'none';
     }
 
     let bookmarkIndicator = null;
@@ -5593,17 +4505,9 @@
     // Wrap thumbnail in anchor for right-click "open in new tab" support
     const thumbLink = document.createElement('a');
     thumbLink.className = 'uvd-thumb-link';
-    thumbLink.href = hasBlockedDraftActions ? '#' : draftUrl;
-    if (!hasBlockedDraftActions) {
-      thumbLink.target = '_blank';
-      thumbLink.rel = 'noopener';
-    }
+    thumbLink.href = draftUrl;
     thumbLink.draggable = false; // Prevent drag interfering with video scrubber
     thumbLink.addEventListener('dragstart', (e) => e.preventDefault());
-    if (hasBlockedDraftActions) {
-      thumbLink.addEventListener('click', (e) => e.preventDefault());
-      thumbLink.style.cursor = 'default';
-    }
     thumbLink.appendChild(thumbContainer);
     card.appendChild(thumbLink);
 
@@ -5639,6 +4543,9 @@
       metaParts.push('Processing failed');
     } else if (isContentViolation || isContextViolation) {
       metaParts.push('Policy blocked');
+    }
+    if (Number(draft.duration_seconds) > 0) {
+      metaParts.push(formatDurationShort(Number(draft.duration_seconds)));
     }
     timeEl.textContent = metaParts.filter(Boolean).join(' • ');
     info.appendChild(timeEl);
@@ -5695,7 +4602,7 @@
         statusEl.dataset.tone = 'ok';
       }
     });
-    sourceBtn.disabled = hasBlockedDraftActions;
+    sourceBtn.disabled = isPendingDraft;
     actionsRow.appendChild(sourceBtn);
 
     // Bookmark button
@@ -5707,10 +4614,9 @@
       syncBookmarkIndicator(newState);
       updateUVDraftsStats();
       if (uvDraftsFilterState === 'bookmarked' || searchDependsOnBookmark(uvDraftsSearchQuery)) {
-        rerenderUVDraftsGridForLocalMutation([draft.id]);
+        renderUVDraftsGrid();
       }
     });
-    bookmarkBtn.disabled = isPendingDraft;
     if (isBookmarkedNow) bookmarkBtn.style.color = '#fbbf24';
     actionsRow.appendChild(bookmarkBtn);
 
@@ -5722,26 +4628,17 @@
         await Promise.resolve(navigator?.clipboard?.writeText?.(prompt));
         flashIconSuccess(copyBtn, icons.copy);
       } catch (err) {
-        console.warn('[UV Drafts] Clipboard copy failed:', err);
+        console.warn('[Creator Tools] Clipboard copy failed:', err);
       }
     });
     copyBtn.disabled = !String(draft.prompt || '').trim();
     actionsRow.appendChild(copyBtn);
 
-    const retryBtn = createActionBtn(icons.retry, 'Retry (copy prompt to composer)', async () => {
+    const retryBtn = createActionBtn(icons.retry, 'Retry (copy prompt to composer)', () => {
       const prompt = String(draft.prompt || '').trim();
       if (!prompt) return;
 
-      const isRemixDraft = !!String(draft?.remix_target_draft_id || draft?.remix_target_post_id || '').trim();
-      let source = null;
-      let sourceError = '';
-      if (isRemixDraft) {
-        try {
-          source = await resolveRetryComposerSource(draft);
-        } catch (err) {
-          sourceError = err?.message || 'Parent source was not found.';
-        }
-      }
+      const source = buildComposerSourceFromDraft(draft);
       setComposerSource(source);
 
       const promptField = uvDraftsComposerEl?.querySelector('[data-uvd-compose-prompt="1"]');
@@ -5761,18 +4658,8 @@
 
       const statusEl = uvDraftsComposerEl?.querySelector('[data-uvd-compose-status="1"]');
       if (statusEl) {
-        if (isRemixDraft && source) {
-          statusEl.textContent = 'Retry ready in composer. Parent source loaded.';
-          statusEl.dataset.tone = 'ok';
-        } else if (isRemixDraft) {
-          statusEl.textContent = sourceError
-            ? `Retry ready in composer. ${sourceError}`
-            : 'Retry ready in composer. Parent source was not found.';
-          statusEl.dataset.tone = 'error';
-        } else {
-          statusEl.textContent = 'Retry ready in composer.';
-          statusEl.dataset.tone = 'ok';
-        }
+        statusEl.textContent = 'Retry ready in composer.';
+        statusEl.dataset.tone = 'ok';
       }
       flashIconSuccess(retryBtn, icons.retry);
     });
@@ -5792,10 +4679,10 @@
         a.click();
         setTimeout(() => URL.revokeObjectURL(url), 10000);
       } catch (err) {
-        console.error('[UV Drafts] Download error:', err);
+        console.error('[Creator Tools] Download error:', err);
       }
     });
-    downloadBtn.disabled = hasBlockedDraftActions || !draft.download_url;
+    downloadBtn.disabled = isPendingDraft || !draft.download_url;
     actionsRow.appendChild(downloadBtn);
 
     // Hide button
@@ -5804,20 +4691,18 @@
       hideBtn.innerHTML = draft.hidden ? icons.eyeClosed : icons.eyeOpen;
       hideBtn.title = draft.hidden ? 'Unhide' : 'Hide';
       await uvDBPut(UV_DRAFTS_STORES.drafts, draft);
-      rerenderUVDraftsGridForLocalMutation([draft.id]);
+      renderUVDraftsGrid();
       updateUVDraftsStats();
     });
-    hideBtn.disabled = isPendingDraft;
     actionsRow.appendChild(hideBtn);
 
     // Workspace button
-    const workspaceBtn = createActionBtn(icons.folder, 'Workspace', () => {
+    actionsRow.appendChild(createActionBtn(icons.folder, 'Workspace', () => {
       showDraftWorkspacePicker(draft);
-    });
-    actionsRow.appendChild(workspaceBtn);
+    }));
 
     // Delete button
-    const deleteBtn = createActionBtn(icons.trash, 'Delete', async () => {
+    actionsRow.appendChild(createActionBtn(icons.trash, 'Delete', async () => {
       if (!confirm(`Delete this draft?\n\n"${(draft.prompt || 'Untitled').slice(0, 50)}..."\n\nThis cannot be undone.`)) return;
       try {
         // Call API to delete
@@ -5830,58 +4715,31 @@
         });
         if (res.ok) {
           await uvDBDelete(UV_DRAFTS_STORES.drafts, draft.id);
-          await deleteScheduledPostsForDraft(draft.id);
+          const scheduledPosts = await uvDBGetAll(UV_DRAFTS_STORES.scheduledPosts);
+          for (const scheduledPost of scheduledPosts) {
+            if (scheduledPost?.draft_id === draft.id) {
+              await uvDBDelete(UV_DRAFTS_STORES.scheduledPosts, scheduledPost.id);
+            }
+          }
           uvDraftsData = removeDraftById(uvDraftsData, draft.id);
           uvDraftsJustSeenIds.delete(draft.id);
           removeBookmark(draft.id);
-          rerenderUVDraftsGridForLocalMutation([draft.id]);
+          renderUVDraftsGrid();
           updateUVDraftsStats();
         } else {
           alert('Failed to delete draft');
         }
       } catch (err) {
-        console.error('[UV Drafts] Delete error:', err);
+        console.error('[Creator Tools] Delete error:', err);
         alert('Failed to delete draft');
       }
-    });
-    deleteBtn.disabled = isPendingDraft;
-    actionsRow.appendChild(deleteBtn);
+    }));
 
     card.appendChild(actionsRow);
 
     // Second row for post/schedule actions
     const actionsRow2 = document.createElement('div');
     actionsRow2.className = 'uvd-actions-row2';
-    const isDraftScheduled = () => String(draft?.scheduled_post_status || '').toLowerCase() === 'pending'
-      && Number(draft?.scheduled_post_at) > 0;
-
-    let scheduleBtn = null;
-    const syncScheduleButtonState = () => {
-      if (!scheduleBtn) return;
-      if (isDraftPubliclyPosted(draft)) {
-        scheduleBtn.textContent = 'Posted ✓';
-        scheduleBtn.disabled = true;
-        scheduleBtn.dataset.tone = 'success';
-        return;
-      }
-      if (isPendingDraft) {
-        scheduleBtn.textContent = 'Schedule';
-        scheduleBtn.disabled = true;
-        delete scheduleBtn.dataset.tone;
-        return;
-      }
-      if (hasBlockedDraftActions) {
-        scheduleBtn.textContent = isDraftScheduled() ? 'Scheduled' : 'Schedule';
-        scheduleBtn.disabled = true;
-        if (isDraftScheduled()) scheduleBtn.dataset.tone = 'info';
-        else delete scheduleBtn.dataset.tone;
-        return;
-      }
-      scheduleBtn.textContent = isDraftScheduled() ? 'Scheduled' : 'Schedule';
-      scheduleBtn.disabled = false;
-      if (isDraftScheduled()) scheduleBtn.dataset.tone = 'info';
-      else delete scheduleBtn.dataset.tone;
-    };
 
     // Post button
     const postBtn = document.createElement('button');
@@ -5893,8 +4751,7 @@
       postBtn.disabled = true;
       postBtn.dataset.tone = 'success';
     } else if (isPendingDraft) {
-      postBtn.disabled = true;
-    } else if (hasBlockedDraftActions) {
+      postBtn.textContent = 'Pending...';
       postBtn.disabled = true;
     }
     postBtn.addEventListener('click', async (e) => {
@@ -5907,28 +4764,56 @@
       try {
         postBtn.textContent = 'Posting...';
         postBtn.disabled = true;
-        const publishedPost = await createPublicPostForDraft(draft, caption);
-        await deleteScheduledPostsForDraft(draft.id);
-        applyPublishedPostToDraftData(draft, publishedPost);
-        await persistDraftRecord(draft);
-        postBtn.textContent = 'Posted ✓';
-        postBtn.dataset.tone = 'success';
-        syncScheduleButtonState();
+
+        // Post the draft (this is a simplified version - actual API may differ)
+        const postHeaders = { 'Content-Type': 'application/json' };
+        if (capturedAuthToken) postHeaders['Authorization'] = capturedAuthToken;
+        const res = await fetch('https://sora.chatgpt.com/backend/project_y/posts', {
+          method: 'POST',
+          credentials: 'include',
+          headers: postHeaders,
+          body: JSON.stringify({
+            draft_id: draft.id,
+            caption: caption,
+            visibility: 'public'
+          })
+        });
+
+        if (res.ok) {
+          draft.post_visibility = 'public';
+          draft.posted_to_public = true;
+          draft.post_meta = {
+            ...(draft.post_meta || {}),
+            id: draft.post_id || draft.post_meta?.id || null,
+            visibility: 'public',
+            posted_to_public: true,
+            permalink: draft.post_permalink || draft.post_meta?.permalink || null,
+          };
+          await uvDBPut(UV_DRAFTS_STORES.drafts, draft);
+          postBtn.textContent = 'Posted ✓';
+          postBtn.dataset.tone = 'success';
+        } else {
+          postBtn.textContent = 'Post';
+          postBtn.disabled = false;
+          postBtn.dataset.tone = '';
+          alert('Failed to post draft. The API may have changed.');
+        }
       } catch (err) {
-        console.error('[UV Drafts] Post error:', err);
+        console.error('[Creator Tools] Post error:', err);
         postBtn.textContent = 'Post';
-        postBtn.disabled = hasBlockedDraftActions;
-        delete postBtn.dataset.tone;
-        alert(`Failed to post draft${err?.message ? `: ${err.message}` : ''}`);
+        postBtn.disabled = false;
+        postBtn.dataset.tone = '';
+        alert('Failed to post draft');
       }
     });
     actionsRow2.appendChild(postBtn);
 
     // Schedule button
-    scheduleBtn = document.createElement('button');
+    const scheduleBtn = document.createElement('button');
     scheduleBtn.className = 'uvd-action-pill';
     scheduleBtn.type = 'button';
-    syncScheduleButtonState();
+    scheduleBtn.textContent = '📅 Schedule';
+    scheduleBtn.disabled = isPendingDraft;
     scheduleBtn.addEventListener('click', async (e) => {
       e.stopPropagation();
       if (isDraftPubliclyPosted(draft)) {
@@ -5936,7 +4821,7 @@
         return;
       }
 
-      const dateStr = prompt(`${isDraftScheduled() ? 'Reschedule' : 'Schedule'} post for (YYYY-MM-DD HH:MM):`,
+      const dateStr = prompt('Schedule post for (YYYY-MM-DD HH:MM):',
         new Date(Date.now() + 3600000).toISOString().slice(0, 16).replace('T', ' '));
       if (!dateStr) return;
 
@@ -5950,23 +4835,21 @@
       if (caption === null) return;
 
       try {
-        await deleteScheduledPostsForDraft(draft.id);
-        const scheduledPost = {
-          id: `schedule_${draft.id}`,
+        await uvDBPut(UV_DRAFTS_STORES.scheduledPosts, {
+          id: `schedule_${Date.now()}`,
           draft_id: draft.id,
           scheduled_at: scheduledTime,
-          caption,
+          caption: caption,
           visibility: 'public',
-          status: 'pending',
-        };
-        await uvDBPut(UV_DRAFTS_STORES.scheduledPosts, scheduledPost);
-        await setDraftScheduledState(draft, scheduledPost);
-        syncScheduleButtonState();
+          status: 'pending'
+        });
+
+        scheduleBtn.textContent = '📅 Scheduled';
+        scheduleBtn.dataset.tone = 'info';
         alert(`Post scheduled for ${new Date(scheduledTime).toLocaleString()}`);
       } catch (err) {
-        console.error('[UV Drafts] Schedule error:', err);
-        syncScheduleButtonState();
-        alert(`Failed to schedule post${err?.message ? `: ${err.message}` : ''}`);
+        console.error('[Creator Tools] Schedule error:', err);
+        alert('Failed to schedule post');
       }
     });
     actionsRow2.appendChild(scheduleBtn);
@@ -5975,7 +4858,7 @@
     trimBtn.className = 'uvd-action-pill';
     trimBtn.type = 'button';
     trimBtn.textContent = 'Trim';
-    trimBtn.disabled = hasBlockedDraftActions || !canTrimDraft(draft);
+    trimBtn.disabled = isPendingDraft || !canTrimDraft(draft);
     trimBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       const trimUrl = getDraftTrimUrl(draft);
@@ -5987,17 +4870,21 @@
     card.appendChild(actionsRow2);
 
     card.addEventListener('click', (e) => {
-      if (hasBlockedDraftActions) return;
       if (e.defaultPrevented) return;
       if (Date.now() < suppressCardNavUntil) return;
       if (shouldIgnoreCardNavigationTarget(e.target)) return;
       if (e.button !== 0) return;
-      e.preventDefault();
-      window.open(draftUrl, '_blank', 'noopener');
+
+      if (e.metaKey || e.ctrlKey) {
+        e.preventDefault();
+        window.open(draftUrl, '_blank', 'noopener');
+        return;
+      }
+
+      window.location.href = draftUrl;
     });
 
     card.addEventListener('auxclick', (e) => {
-      if (hasBlockedDraftActions) return;
       if (e.defaultPrevented) return;
       if (Date.now() < suppressCardNavUntil) return;
       if (shouldIgnoreCardNavigationTarget(e.target)) return;
@@ -6033,17 +4920,13 @@
           if (badge) badge.style.display = 'none';
           updateUVDraftsStats();
         }
-        // Lazy load and play this video — defer opacity until first frame to avoid grey flash
+        // Lazy load and play this video
+        if (!video.src && video.dataset.src) {
+          video.src = video.dataset.src;
+        }
+        video.style.opacity = '1';
         if (playBtn) playBtn.style.display = 'none';
         uvDraftsCurrentlyPlayingVideo = video;
-        uvDraftsCurrentlyPlayingDraftId = draft.id;
-        if (!video.src && video.dataset.src) {
-          video.addEventListener('loadeddata', () => { video.style.opacity = '1'; video.controls = true; }, { once: true });
-          video.src = video.dataset.src;
-        } else {
-          video.style.opacity = '1';
-          video.controls = true;
-        }
         video.play().catch(() => {});
       }
     });
@@ -6052,25 +4935,19 @@
       card.style.transform = '';
       card.style.boxShadow = '';
       if (video) {
-        setTimeout(() => {
-          if (applyDraftCardVideoFullscreenPresentation(video)) return;
-          video.pause();
-          video.currentTime = 0;
-          video.style.opacity = '0';
-          video.controls = false;
-          if (uvDraftsCurrentlyPlayingVideo === video) {
-            uvDraftsCurrentlyPlayingVideo = null;
-            uvDraftsCurrentlyPlayingDraftId = null;
-          }
-          if (playBtn) {
-            playBtn.style.display = 'flex';
-          }
-        }, 0);
-      } else if (playBtn) {
+        video.pause();
+        video.currentTime = 0;
+        video.style.opacity = '0';
+        if (uvDraftsCurrentlyPlayingVideo === video) {
+          uvDraftsCurrentlyPlayingVideo = null;
+        }
+      }
+      if (playBtn) {
         playBtn.style.display = 'flex';
       }
     });
 
+    // Track full video playthrough - mark as read on server and locally (only for non-violations)
     if (video) {
       video.addEventListener('ended', () => {
         if (!uvDraftsJustSeenIds.has(draft.id) && isDraftUnreadState(draft)) {
@@ -6087,16 +4964,16 @@
     return card;
   }
 
-  // ---- Grid rendering ----
-  // Three render paths, each purpose-built:
-  //   renderUVDraftsGrid()     — full rebuild (initial load, filter/search change)
-  //   renderUVDraftsSyncUpdate() — append-only (background sync pages, never touches existing cards)
-  //   renderMoreUVDrafts()     — append-only (infinite scroll)
+  function isUVDraftsLoadingIndicatorVisible() {
+    if (!uvDraftsLoadingEl) return false;
+    const display = String(uvDraftsLoadingEl.style.display || '').trim().toLowerCase();
+    return !!display && display !== 'none';
+  }
 
-  function showUVDraftsLoadingIndicator(message = 'Loading...') {
+  function showUVDraftsLoadingIndicator(message = 'Loading drafts...') {
     if (!uvDraftsLoadingEl) return;
-    uvDraftsLoadingEl.style.display = 'flex';
     uvDraftsLoadingEl.textContent = message;
+    uvDraftsLoadingEl.style.display = 'flex';
   }
 
   function hideUVDraftsLoadingIndicator() {
@@ -6104,18 +4981,9 @@
     uvDraftsLoadingEl.style.display = 'none';
   }
 
-  function isUVDraftsLoadingIndicatorVisible() {
-    if (!uvDraftsLoadingEl) return false;
-    const display = String(uvDraftsLoadingEl.style.display || '').trim().toLowerCase();
-    return !!display && display !== 'none';
-  }
-
   function shouldDeferUVDraftsEmptyState() {
-    if (!uvDraftsInitialLoadComplete) return true;
     if (String(uvDraftsSearchQuery || '').trim()) return false;
-    if (uvDraftsAwaitingMoreResults) return true;
-    if (uvDraftsSyncUiState?.syncing === true) return true;
-    return false;
+    return uvDraftsAwaitingMoreResults || uvDraftsSyncUiState?.syncing === true;
   }
 
   function shouldRerenderUVDraftsEmptyStateAfterSync() {
@@ -6123,302 +4991,27 @@
     return !Array.isArray(renderableDrafts) || renderableDrafts.length === 0;
   }
 
-  function restoreUVDraftsPlaybackState() {
-    if (!uvDraftsCurrentlyPlayingDraftId || !uvDraftsGridEl) return;
-    const card = uvDraftsGridEl.querySelector(`[data-draft-id="${CSS.escape(uvDraftsCurrentlyPlayingDraftId)}"]`);
-    if (!card) return;
-    const video = card.querySelector('video');
-    const playBtn = card.querySelector('.uv-play-btn');
-    if (!video) return;
-    if (playBtn) playBtn.style.display = 'none';
-    uvDraftsCurrentlyPlayingVideo = video;
-    if (!video.src && video.dataset.src) {
-      video.addEventListener('loadeddata', () => { video.style.opacity = '1'; video.controls = true; }, { once: true });
-      video.src = video.dataset.src;
-    } else {
-      video.style.opacity = '1';
-      video.controls = true;
-    }
-    video.play().catch(() => {});
-  }
-
-  function clearUVDraftsEmptyState() {
-    if (!uvDraftsGridEl) return;
-    const empty = uvDraftsGridEl.querySelector('.uvd-empty-state');
-    if (empty) empty.remove();
-  }
-
-  // Append cards from uvDraftsFilteredCache[start..end) to the grid.
-  // Never touches existing DOM — just creates and appends new cards.
-  function appendCardsToGrid(start, end, options = {}) {
-    if (!uvDraftsGridEl || start >= end) return;
-    const loadMore = uvDraftsGridEl.querySelector('.uv-drafts-load-more');
-    if (loadMore) loadMore.remove();
-    clearUVDraftsEmptyState();
-    hideUVDraftsLoadingIndicator();
-    const fragment = document.createDocumentFragment();
-    const maxLandscapeColumns = Math.max(1, Math.floor(Number(options.maxLandscapeColumns) || getLandscapeRunGridColumnCapacity(uvDraftsGridEl)));
-    uvDraftsLastGridColumnCapacity = maxLandscapeColumns;
-    const draftSlice = uvDraftsFilteredCache.slice(start, end);
-    const plannedRows = planDraftGridRows(draftSlice, maxLandscapeColumns);
-    let draftOffset = 0;
-
-    for (const row of plannedRows) {
-      const rowEl = document.createElement('div');
-      rowEl.className = 'uvd-grid-row';
-      rowEl.style.gridTemplateColumns = `repeat(${maxLandscapeColumns}, minmax(0, 1fr))`;
-
-      for (const item of row) {
-        const itemDraftCount = Array.isArray(item?.draftIds) ? item.draftIds.length : 0;
-        const itemDrafts = draftSlice.slice(draftOffset, draftOffset + itemDraftCount);
-        draftOffset += itemDraftCount;
-
-        if (item.kind === 'landscape-run' && itemDrafts.length > 1) {
-          const landscapeRunEl = document.createElement('div');
-          landscapeRunEl.className = 'uvd-landscape-run-grid';
-          landscapeRunEl.style.gridColumn = `span ${item.span}`;
-          landscapeRunEl.style.gridTemplateColumns = `repeat(${item.span}, minmax(0, 1fr))`;
-          landscapeRunEl.style.alignSelf = 'start';
-          for (const itemDraft of itemDrafts) {
-            landscapeRunEl.appendChild(createUVDraftCard(itemDraft));
-          }
-          rowEl.appendChild(landscapeRunEl);
-          continue;
-        }
-
-        if (itemDrafts[0]) {
-          rowEl.appendChild(createUVDraftCard(itemDrafts[0]));
-        }
-      }
-
-      if (rowEl.children.length > 0) fragment.appendChild(rowEl);
-    }
-    uvDraftsGridEl.appendChild(fragment);
-    uvDraftsRenderedCount = end;
-    updateLoadMoreIndicator();
-  }
-
-  function rerenderUVDraftsGridPreservingViewport(anchor = null) {
-    if (!uvDraftsGridEl) return;
-    uvDraftsFilteredCache = getRenderableUVDrafts();
-    if (uvDraftsFilteredCache.length === 0) {
-      renderUVDraftsGrid();
-      return;
-    }
-
-    const preservedAnchor = anchor || captureUVDraftsScrollAnchor();
-    const targetCount = getUVDraftsViewportRerenderTargetCount(uvDraftsFilteredCache.length, uvDraftsRenderedCount);
-    const maxLandscapeColumns = getLandscapeRunGridColumnCapacity(uvDraftsGridEl);
-    uvDraftsLastGridColumnCapacity = maxLandscapeColumns;
-    const end = extendDraftRenderEndToRowBoundary(
-      uvDraftsFilteredCache,
-      targetCount,
-      maxLandscapeColumns
-    );
-
-    uvDraftsGridEl.innerHTML = '';
-    uvDraftsRenderedCount = 0;
-    appendCardsToGrid(0, end, { maxLandscapeColumns });
-    setupUVDraftsInfiniteScroll();
-    restoreUVDraftsScrollAnchor(preservedAnchor);
-    restoreUVDraftsPlaybackState();
-  }
-
-  function rerenderUVDraftsGridForLocalMutation(excludedDraftIds = null) {
-    const anchor = captureUVDraftsScrollAnchor(excludedDraftIds);
-    rerenderUVDraftsGridPreservingViewport(anchor);
-  }
-
-  function rerenderUVDraftsGridForGeometryChange() {
-    if (!uvDraftsGridEl || !uvDraftsPageEl || uvDraftsPageEl.style.display === 'none') return;
-    uvDraftsFilteredCache = getRenderableUVDrafts();
-    if (uvDraftsFilteredCache.length === 0 || uvDraftsAwaitingMoreResults) {
-      renderUVDraftsGrid();
-      return;
-    }
-
-    const scrollTop = uvDraftsPageEl.scrollTop;
-    const targetCount = getUVDraftsViewportRerenderTargetCount(uvDraftsFilteredCache.length, uvDraftsRenderedCount);
-    const maxLandscapeColumns = getLandscapeRunGridColumnCapacity(uvDraftsGridEl);
-    uvDraftsLastGridColumnCapacity = maxLandscapeColumns;
-    const end = extendDraftRenderEndToRowBoundary(
-      uvDraftsFilteredCache,
-      targetCount,
-      maxLandscapeColumns
-    );
-
-    uvDraftsGridEl.innerHTML = '';
-    uvDraftsRenderedCount = 0;
-    appendCardsToGrid(0, end, { maxLandscapeColumns });
-    setupUVDraftsInfiniteScroll();
-    restoreUVDraftsPlaybackState();
-
-    if (uvDraftsPageEl) {
-      const maxScrollTop = Math.max(0, uvDraftsPageEl.scrollHeight - uvDraftsPageEl.clientHeight);
-      uvDraftsPageEl.scrollTop = Math.min(scrollTop, maxScrollTop);
-    }
-  }
-
-  function scheduleUVDraftsResponsiveLayoutCheck(force = false) {
-    if (!uvDraftsGridEl || !uvDraftsPageEl || uvDraftsPageEl.style.display === 'none') return;
-    if (uvDraftsResponsiveLayoutTimerId) {
-      clearTimeout(uvDraftsResponsiveLayoutTimerId);
-    }
-    uvDraftsResponsiveLayoutTimerId = setTimeout(() => {
-      uvDraftsResponsiveLayoutTimerId = 0;
-      if (!uvDraftsGridEl || !uvDraftsPageEl || uvDraftsPageEl.style.display === 'none') return;
-      const nextCapacity = getLandscapeRunGridColumnCapacity(uvDraftsGridEl);
-      if (!force && nextCapacity === uvDraftsLastGridColumnCapacity) return;
-      rerenderUVDraftsGridForGeometryChange();
-    }, 60);
-  }
-
-  function ensureUVDraftsResponsiveLayoutWatchers() {
-    if (!uvDraftsGridEl) return;
-
-    if (typeof ResizeObserver === 'function') {
-      if (!uvDraftsGridResizeObserver) {
-        uvDraftsGridResizeObserver = new ResizeObserver(() => {
-          scheduleUVDraftsResponsiveLayoutCheck();
-        });
-      } else {
-        uvDraftsGridResizeObserver.disconnect();
-      }
-      uvDraftsGridResizeObserver.observe(uvDraftsGridEl);
-    }
-
-    if (!uvDraftsWindowResizeHandler && typeof globalScope?.addEventListener === 'function') {
-      uvDraftsWindowResizeHandler = () => {
-        scheduleUVDraftsResponsiveLayoutCheck();
-      };
-      globalScope.addEventListener('resize', uvDraftsWindowResizeHandler, { passive: true });
-    }
-
-    if (
-      !uvDraftsVisualViewportResizeHandler
-      && globalScope?.visualViewport
-      && typeof globalScope.visualViewport.addEventListener === 'function'
-    ) {
-      uvDraftsVisualViewportResizeHandler = () => {
-        scheduleUVDraftsResponsiveLayoutCheck();
-      };
-      globalScope.visualViewport.addEventListener('resize', uvDraftsVisualViewportResizeHandler, { passive: true });
-    }
-
-    uvDraftsLastGridColumnCapacity = getLandscapeRunGridColumnCapacity(uvDraftsGridEl);
-  }
-
-  // Background sync: new page arrived. Recalculate cache, append up to one batch of new cards.
+  // Lightweight render for background sync — updates cache and appends new cards
+  // without destroying existing DOM elements (no flicker).
   function renderUVDraftsSyncUpdate() {
     if (!uvDraftsGridEl) return;
     uvDraftsFilteredCache = getRenderableUVDrafts();
-    if (uvDraftsFilteredCache.length <= uvDraftsRenderedCount) return;
-    // Only append one batch beyond what's rendered — infinite scroll handles the rest
-    const maxLandscapeColumns = getLandscapeRunGridColumnCapacity(uvDraftsGridEl);
-    const end = extendDraftRenderEndToRowBoundary(
-      uvDraftsFilteredCache,
-      Math.min(uvDraftsRenderedCount + UV_DRAFTS_BATCH_SIZE, uvDraftsFilteredCache.length),
-      maxLandscapeColumns
-    );
-    appendCardsToGrid(uvDraftsRenderedCount, end, { maxLandscapeColumns });
-  }
-
-  // Update only the status/progress text and ring on pending cards without rebuilding the grid.
-  function updatePendingCardsInPlace(pendingDrafts) {
-    if (!uvDraftsGridEl) return;
-    for (const draft of pendingDrafts) {
-      if (!draft?.id) continue;
-      const card = uvDraftsGridEl.querySelector(`[data-draft-id="${CSS.escape(String(draft.id))}"]`);
-      if (!card) continue;
-      const pct = Number(draft.progress_pct);
-      const pctNorm = Number.isFinite(pct) && pct > 0 ? Math.min(pct, 100) : 0;
-
-      // Update status label
-      const label = card.querySelector('[data-pending-status]');
-      if (label) {
-        const status = String(draft.pending_status || draft.pending_task_status || 'generating').replace(/_/g, ' ');
-        label.textContent = status.charAt(0).toUpperCase() + status.slice(1);
+    if (uvDraftsFilteredCache.length === 0) {
+      if (shouldDeferUVDraftsEmptyState() && !isUVDraftsLoadingIndicatorVisible()) {
+        showUVDraftsLoadingIndicator(uvDraftsAwaitingMoreResults ? 'Syncing drafts...' : 'Loading drafts...');
       }
-
-      // Update progress ring
-      const ring = card.querySelector('[data-pending-ring]');
-      if (ring) {
-        ring.innerHTML = buildPendingRingMarkup(pctNorm);
-      }
+      return;
     }
+    const emptyStateEl = uvDraftsGridEl.querySelector('.uvd-empty-state');
+    if (emptyStateEl) emptyStateEl.remove();
+    hideUVDraftsLoadingIndicator();
+    renderMoreUVDrafts();
   }
 
-  function captureUVDraftsScrollAnchor(excludedDraftIds = null) {
-    if (!uvDraftsPageEl || !uvDraftsGridEl) return null;
-    const excluded = excludedDraftIds instanceof Set
-      ? excludedDraftIds
-      : new Set(
-        (Array.isArray(excludedDraftIds) ? excludedDraftIds : [])
-          .map((id) => String(id || '').trim())
-          .filter(Boolean)
-      );
-    const pageRect = uvDraftsPageEl.getBoundingClientRect();
-    const cards = Array.from(uvDraftsGridEl.querySelectorAll('[data-draft-id]'));
-    for (const card of cards) {
-      const cardId = String(card?.dataset?.draftId || '').trim();
-      if (cardId && excluded.has(cardId)) continue;
-      const rect = card.getBoundingClientRect();
-      if (rect.bottom > pageRect.top && rect.top < pageRect.bottom) {
-        return {
-          draftId: cardId,
-          top: rect.top - pageRect.top,
-        };
-      }
-    }
-    return {
-      scrollTop: uvDraftsPageEl.scrollTop,
-    };
-  }
-
-  function restoreUVDraftsScrollAnchor(anchor) {
-    if (!anchor || !uvDraftsPageEl || !uvDraftsGridEl) return;
-    if (anchor.draftId) {
-      const anchorCard = uvDraftsGridEl.querySelector(`[data-draft-id="${CSS.escape(anchor.draftId)}"]`);
-      if (anchorCard) {
-        const pageRect = uvDraftsPageEl.getBoundingClientRect();
-        const rect = anchorCard.getBoundingClientRect();
-        const nextScrollTop = uvDraftsPageEl.scrollTop + ((rect.top - pageRect.top) - Number(anchor.top || 0));
-        const maxScrollTop = Math.max(0, uvDraftsPageEl.scrollHeight - uvDraftsPageEl.clientHeight);
-        uvDraftsPageEl.scrollTop = Math.max(0, Math.min(nextScrollTop, maxScrollTop));
-        return;
-      }
-    }
-    if (Number.isFinite(Number(anchor.scrollTop))) {
-      const maxScrollTop = Math.max(0, uvDraftsPageEl.scrollHeight - uvDraftsPageEl.clientHeight);
-      uvDraftsPageEl.scrollTop = Math.max(0, Math.min(Number(anchor.scrollTop), maxScrollTop));
-    }
-  }
-
-  function applyPendingCompletionHandoffsInPlace(handoffs) {
-    if (!uvDraftsGridEl || !uvDraftsPageEl) return false;
-    const planned = Array.isArray(handoffs) ? handoffs.filter((handoff) => handoff?.pendingId && handoff?.settledDraft) : [];
-    if (planned.length === 0) return false;
-    const anchor = captureUVDraftsScrollAnchor(planned.map((handoff) => handoff.pendingId));
-    let replacedCount = 0;
-    for (const handoff of planned) {
-      const pendingCard = uvDraftsGridEl.querySelector(`[data-draft-id="${CSS.escape(handoff.pendingId)}"]`);
-      if (!pendingCard || !pendingCard.parentNode) continue;
-      const settledCard = createUVDraftCard(handoff.settledDraft);
-      pendingCard.replaceWith(settledCard);
-      replacedCount += 1;
-    }
-    if (replacedCount > 0) {
-      restoreUVDraftsScrollAnchor(anchor);
-      restoreUVDraftsPlaybackState();
-    }
-    return replacedCount > 0;
-  }
-
-  // Full grid rebuild — clears everything and renders from scratch.
-  // Used on initial load, filter change, search change.
   function renderUVDraftsGrid(resetScroll = true) {
     if (!uvDraftsGridEl) return;
 
+    // Filter and cache results
     uvDraftsFilteredCache = getRenderableUVDrafts();
 
     if (resetScroll) {
@@ -6443,30 +5036,29 @@
       return;
     }
 
-    const maxLandscapeColumns = getLandscapeRunGridColumnCapacity(uvDraftsGridEl);
-    uvDraftsLastGridColumnCapacity = maxLandscapeColumns;
-    const end = extendDraftRenderEndToRowBoundary(
-      uvDraftsFilteredCache,
-      resetScroll
-        ? Math.min(UV_DRAFTS_BATCH_SIZE, uvDraftsFilteredCache.length)
-        : Math.min(Math.max(uvDraftsRenderedCount, UV_DRAFTS_BATCH_SIZE), uvDraftsFilteredCache.length),
-      maxLandscapeColumns
-    );
-    appendCardsToGrid(uvDraftsRenderedCount, end, { maxLandscapeColumns });
+    hideUVDraftsLoadingIndicator();
+    // Render initial batch
+    renderMoreUVDrafts();
+
+    // Setup infinite scroll
     setupUVDraftsInfiniteScroll();
-    restoreUVDraftsPlaybackState();
   }
 
-  // Infinite scroll: append next batch.
   function renderMoreUVDrafts() {
     if (!uvDraftsGridEl || uvDraftsRenderedCount >= uvDraftsFilteredCache.length) return;
-    const maxLandscapeColumns = getLandscapeRunGridColumnCapacity(uvDraftsGridEl);
-    const end = extendDraftRenderEndToRowBoundary(
-      uvDraftsFilteredCache,
-      Math.min(uvDraftsRenderedCount + UV_DRAFTS_BATCH_SIZE, uvDraftsFilteredCache.length),
-      maxLandscapeColumns
-    );
-    appendCardsToGrid(uvDraftsRenderedCount, end, { maxLandscapeColumns });
+
+    const endIndex = Math.min(uvDraftsRenderedCount + UV_DRAFTS_BATCH_SIZE, uvDraftsFilteredCache.length);
+    const fragment = document.createDocumentFragment();
+
+    for (let i = uvDraftsRenderedCount; i < endIndex; i++) {
+      fragment.appendChild(createUVDraftCard(uvDraftsFilteredCache[i]));
+    }
+
+    uvDraftsGridEl.appendChild(fragment);
+    uvDraftsRenderedCount = endIndex;
+
+    // Update load more indicator
+    updateLoadMoreIndicator();
   }
 
   function updateLoadMoreIndicator() {
@@ -6510,9 +5102,8 @@
     const statsEl = uvDraftsPageEl?.querySelector('.uv-drafts-stats');
     if (!statsEl) return;
 
-    const workspaceScopedDrafts = filterDraftsByWorkspace(uvDraftsData, uvDraftsWorkspaceFilter);
     const { total, bookmarked, hidden, newCount } = computeUVDraftsStats();
-    const unsyncedCount = workspaceScopedDrafts.reduce((count, draft) => count + (draft?.is_unsynced === true ? 1 : 0), 0);
+    const unsyncedCount = uvDraftsData.reduce((count, draft) => count + (draft?.is_unsynced === true ? 1 : 0), 0);
     statsEl.textContent = `${total} drafts • ${bookmarked} bookmarked • ${hidden} hidden • ${newCount} new • ${unsyncedCount} unsynced`;
     setUVDraftsSyncUiState({ processed: total });
   }
@@ -6544,17 +5135,13 @@
     uvDraftsSyncButtonEl.disabled = false;
   }
 
-  async function initUVDraftsPage(fullSync = false) {
+  async function initUVDraftsPage() {
     const runId = ++uvDraftsInitRunId;
     const isStaleRun = () => runId !== uvDraftsInitRunId;
     uvDraftsAwaitingMoreResults = false;
-    uvDraftsInitialLoadComplete = false;
 
-    // Only show loading indicator if there's no cached data already rendered
-    if (uvDraftsLoadingEl && (!uvDraftsGridEl || uvDraftsGridEl.children.length === 0)) {
-      uvDraftsLoadingEl.style.display = 'flex';
-      uvDraftsLoadingEl.textContent = 'Loading drafts from cache...';
-    }
+    // Show loading
+    showUVDraftsLoadingIndicator('Loading drafts from cache...');
     const preserveSyncing = uvDraftsSyncUiState.syncing === true && !capturedAuthToken;
     setUVDraftsSyncUiState({
       syncing: preserveSyncing || !!capturedAuthToken,
@@ -6564,19 +5151,13 @@
     // Load from cache first regardless of auth token
     uvDraftsData = await loadUVDraftsFromCache();
     if (isStaleRun()) return;
-    uvDraftsInitialLoadComplete = true;
     setUVDraftsSyncUiState({ processed: uvDraftsData.length });
     resumePersistedMarkAllProgress({ queue: false });
 
     if (uvDraftsData.length > 0) {
-      // Skip redundant full rebuild if the grid already has cards (e.g. re-init after token arrives)
-      if (!uvDraftsGridEl || uvDraftsGridEl.children.length === 0) {
-        renderUVDraftsGrid();
-      }
+      renderUVDraftsGrid();
       updateUVDraftsStats();
-      if (uvDraftsLoadingEl) {
-        uvDraftsLoadingEl.style.display = 'none';
-      }
+      hideUVDraftsLoadingIndicator();
     }
 
     // Check if we have an auth token - if not, show message but don't block
@@ -6588,7 +5169,7 @@
         page: uvDraftsSyncUiState.syncing === true ? uvDraftsSyncUiState.page : 0,
       });
       resumePersistedMarkAllProgress({ queue: false });
-      console.log('[UV Drafts] No auth token yet, will retry on refresh');
+      console.log('[Creator Tools] No auth token yet, will retry on refresh');
       if (uvDraftsLoadingEl) {
         if (uvDraftsData.length === 0) {
           // No cache and no auth - show helpful message
@@ -6625,11 +5206,10 @@
     // Quick first fetch - get 8 drafts instantly for immediate render
     try {
       const fullSyncIds = new Set();
-      uvDraftsSyncConfirmedIds = new Set(); // Reset for new sync session
+      const hadCachedData = uvDraftsData.length > 0;
       const firstBatch = await fetchFirstUVDrafts(8);
       if (isStaleRun()) return;
-
-      const hadCachedData = uvDraftsData.length > 0;
+      const doFullSync = !hadCachedData;
       uvDraftsAwaitingMoreResults = !hadCachedData && firstBatch.items.length === 0 && !!firstBatch.cursor;
 
       if (firstBatch.items.length > 0) {
@@ -6650,43 +5230,37 @@
 
         // Merge with existing cache data (first batch at top, dedupe rest)
         uvDraftsData = mergeDraftListById(transformed, uvDraftsData);
+        uvDraftsAwaitingMoreResults = false;
         setUVDraftsSyncUiState({ processed: uvDraftsData.length, page: 1 });
 
-        // Render — use incremental update if grid already has cards to avoid flash
-        if (hadCachedData && uvDraftsGridEl && uvDraftsGridEl.children.length > 0) {
-          renderUVDraftsSyncUpdate();
-        } else {
-          renderUVDraftsGrid();
-        }
+        // Render immediately
+        renderUVDraftsGrid();
         updateUVDraftsStats();
       }
 
+      // Even when the first batch is empty, leave loading state and show empty view.
+      hideUVDraftsLoadingIndicator();
       if (uvDraftsData.length === 0) {
         renderUVDraftsGrid();
         updateUVDraftsStats();
       }
 
       // Continue fetching rest in background (if there's more)
-      // Full sync: first-ever population (no cache before) or user pressed sync button.
-      // Otherwise quick sync: only 3 pages.
-      const isFirstPopulation = !hadCachedData;
-      const doFullSync = fullSync || isFirstPopulation;
-      const syncMaxPages = doFullSync ? Infinity : 3;
       if (firstBatch.cursor) {
         // Don't await - let it run in background
         syncRemainingDrafts(firstBatch.cursor, (count, page) => {
-          console.log(`[UV Drafts] Background sync: ${count} drafts (page ${page})`);
+          // Optionally show background sync progress in a subtle way
+          console.log(`[Creator Tools] Background sync: ${count} drafts (page ${page})`);
           setUVDraftsSyncUiState({ syncing: true, processed: count, page });
-        }, runId, firstBatch.items.length, fullSyncIds, syncMaxPages)
+        }, runId, firstBatch.items.length, fullSyncIds)
           .then(async (syncSucceeded) => {
             if (!syncSucceeded || isStaleRun()) return;
-            // Only archive unsynced drafts after a full sync
             if (doFullSync) {
               await archiveUnsyncedDraftsAfterFullSync(fullSyncIds, runId);
             }
           })
           .catch((syncErr) => {
-            console.error('[UV Drafts] Background sync failed:', syncErr);
+            console.error('[Creator Tools] Background sync failed:', syncErr);
           })
           .finally(() => {
             if (isStaleRun()) return;
@@ -6701,8 +5275,8 @@
         uvDraftsAwaitingMoreResults = false;
         if (doFullSync) {
           await archiveUnsyncedDraftsAfterFullSync(fullSyncIds, runId);
-          if (isStaleRun()) return;
         }
+        if (isStaleRun()) return;
         setUVDraftsSyncUiState({ syncing: false, processed: uvDraftsData.length, page: 0 });
         if (shouldRerenderUVDraftsEmptyStateAfterSync()) {
           renderUVDraftsGrid();
@@ -6710,7 +5284,7 @@
         }
       }
     } catch (err) {
-      console.error('[UV Drafts] Quick fetch failed, falling back to full sync:', err);
+      console.error('[Creator Tools] Quick fetch failed, falling back to full sync:', err);
       uvDraftsAwaitingMoreResults = false;
       // Fall back to full sync
       try {
@@ -6730,20 +5304,14 @@
         renderUVDraftsGrid();
         updateUVDraftsStats();
         setUVDraftsSyncUiState({ syncing: false, processed: uvDraftsData.length, page: 0 });
-        if (shouldRerenderUVDraftsEmptyStateAfterSync()) {
-          renderUVDraftsGrid();
-          updateUVDraftsStats();
-        }
       } catch (syncErr) {
-        console.error('[UV Drafts] Full sync also failed:', syncErr);
+        console.error('[Creator Tools] Full sync also failed:', syncErr);
         setUVDraftsSyncUiState({ syncing: false, processed: uvDraftsData.length, page: 0 });
-        if (shouldRerenderUVDraftsEmptyStateAfterSync()) {
-          renderUVDraftsGrid();
-          updateUVDraftsStats();
-        }
       }
-      if (uvDraftsLoadingEl) {
-        uvDraftsLoadingEl.style.display = 'none';
+      hideUVDraftsLoadingIndicator();
+      if (shouldRerenderUVDraftsEmptyStateAfterSync()) {
+        renderUVDraftsGrid();
+        updateUVDraftsStats();
       }
     }
   }
@@ -6758,49 +5326,61 @@
       const scheduled = await uvDBGetAll(UV_DRAFTS_STORES.scheduledPosts);
       scheduledPostsFailureCount = 0; // Reset on success
       const now = Date.now();
-      const hasDuePosts = scheduled.some((post) => post?.status === 'pending' && post?.scheduled_at <= now);
-      if (hasDuePosts && !capturedAuthToken) {
-        console.warn('[UV Drafts] Skipping scheduled posts until auth token is available.');
-        return;
-      }
 
       for (const post of scheduled) {
         if (post.status === 'pending' && post.scheduled_at <= now) {
-          console.log('[UV Drafts] Executing scheduled post:', post.draft_id);
+          console.log('[Creator Tools] Executing scheduled post:', post.draft_id);
 
           try {
-            const draft = await uvDBGet(UV_DRAFTS_STORES.drafts, post.draft_id);
-            if (!draft) {
-              post.status = 'failed';
-              await uvDBPut(UV_DRAFTS_STORES.scheduledPosts, post);
-              console.error('[UV Drafts] Scheduled post failed: missing draft', post.draft_id);
-              continue;
-            }
+            // Post the draft
+            const scheduledHeaders = { 'Content-Type': 'application/json' };
+            if (capturedAuthToken) scheduledHeaders['Authorization'] = capturedAuthToken;
+            const res = await fetch('https://sora.chatgpt.com/backend/project_y/posts', {
+              method: 'POST',
+              credentials: 'include',
+              headers: scheduledHeaders,
+              body: JSON.stringify({
+                draft_id: post.draft_id,
+                caption: post.caption,
+                visibility: post.visibility || 'public'
+              })
+            });
 
-            const publishedPost = await createPublicPostForDraft(draft, post.caption || '');
-            if (publishedPost || publishedPost === null) {
+            if (res.ok) {
               post.status = 'posted';
               await uvDBPut(UV_DRAFTS_STORES.scheduledPosts, post);
-              applyPublishedPostToDraftData(draft, publishedPost);
-              await persistDraftRecord(draft);
-              console.log('[UV Drafts] Scheduled post succeeded:', post.draft_id);
+
+              // Update draft status in cache
+              const draft = await uvDBGet(UV_DRAFTS_STORES.drafts, post.draft_id);
+              if (draft) {
+                draft.post_visibility = 'public';
+                draft.posted_to_public = true;
+                draft.post_meta = {
+                  ...(draft.post_meta || {}),
+                  visibility: 'public',
+                  posted_to_public: true,
+                };
+                await uvDBPut(UV_DRAFTS_STORES.drafts, draft);
+              }
+
+              console.log('[Creator Tools] Scheduled post succeeded:', post.draft_id);
+            } else {
+              post.status = 'failed';
+              await uvDBPut(UV_DRAFTS_STORES.scheduledPosts, post);
+              console.error('[Creator Tools] Scheduled post failed:', post.draft_id, res.status);
             }
           } catch (err) {
             post.status = 'failed';
             await uvDBPut(UV_DRAFTS_STORES.scheduledPosts, post);
-            const draft = await uvDBGet(UV_DRAFTS_STORES.drafts, post.draft_id);
-            if (draft) {
-              await setDraftScheduledState(draft, post);
-            }
-            console.error('[UV Drafts] Scheduled post error:', err);
+            console.error('[Creator Tools] Scheduled post error:', err);
           }
         }
       }
     } catch (err) {
-      console.error('[UV Drafts] Check scheduled posts error:', err);
+      console.error('[Creator Tools] Check scheduled posts error:', err);
       scheduledPostsFailureCount++;
       if (scheduledPostsFailureCount >= SCHEDULED_POSTS_MAX_FAILURES) {
-        console.error('[UV Drafts] Too many failures, stopping scheduled post checks');
+        console.error('[Creator Tools] Too many failures, stopping scheduled post checks');
         if (scheduledPostsTimerId) {
           clearInterval(scheduledPostsTimerId);
           scheduledPostsTimerId = null;
@@ -6819,22 +5399,9 @@
 
   function ensureUVDraftsPage() {
     loadUVDraftsViewState();
-    syncWorkspaceFilterFromCreatortoolsPath({
-      render: false,
-      updateSelect: false,
-      updateUrl: false,
-    });
 
     if (uvDraftsPageEl && document.contains(uvDraftsPageEl)) {
       uvDraftsPageEl.style.display = 'block';
-      ensureUVDraftsResponsiveLayoutWatchers();
-      syncWorkspaceFilterFromCreatortoolsPath({
-        render: false,
-        updateSelect: true,
-        updateUrl: true,
-        allowEmptyWorkspaces: true,
-      });
-      updateUVDraftsHeaderTitle();
       startPendingDraftsPolling();
       if (uvDraftsComposerEl) {
         const statusEl = uvDraftsComposerEl.querySelector('[data-uvd-compose-status="1"]');
@@ -6864,7 +5431,6 @@
     // Add custom scrollbar styles
     const style = document.createElement('style');
     style.textContent = `
-      @keyframes uvd-ring-spin { to { transform: rotate(360deg); } }
       .sora-uv-drafts-page {
         --uvd-border: var(--token-border-light, rgba(255,255,255,0.12));
         --uvd-border-strong: var(--token-border-medium, rgba(255,255,255,0.2));
@@ -6884,12 +5450,13 @@
       .uvd-shell { width: 100%; box-sizing: border-box; max-width: 1880px; margin: 0 auto; padding: 20px 22px 28px 455px; }
       .uvd-layout { display: block; }
       .uvd-main { min-width: 0; max-width: 1800px; margin: 0 auto; }
-      .uvd-header { display:flex; align-items:flex-start; justify-content:space-between; gap:14px; margin-bottom:18px; flex-wrap:nowrap; }
-      .uvd-header-controls { display:flex; gap:10px; align-items:center; justify-content:flex-end; flex-shrink: 0; margin-left: auto; }
+      .uvd-header { display:flex; align-items:flex-start; justify-content:space-between; gap:14px; margin-bottom:18px; flex-wrap:wrap; }
+      .uvd-header-controls { display:flex; gap:10px; align-items:center; justify-content:flex-end; flex-wrap: wrap; margin-left: auto; }
       .uvd-title-wrap h1 { font-size: 60px; margin: 8px 0 10px; letter-spacing: -0.035em; line-height: .96; color: var(--uvd-text); font-weight: 700; }
       .uvd-title-wrap .uv-drafts-stats { color: var(--uvd-subtext); font-size: 18px; }
+      .uvd-back-btn { background:none; border:none; color: var(--uvd-subtext); cursor:pointer; font-size: 16px; font-weight: 600; padding: 4px 0; margin-bottom: 6px; }
       .uvd-header-actions { display:flex; gap:10px; align-items:center; flex-wrap: wrap; }
-      .uvd-cta { border:1px solid var(--uvd-border); background: var(--uvd-surface); color: var(--uvd-text); border-radius: 14px; padding: 12px 16px; font-size: 16px; font-weight: 600; cursor:pointer; transition: background .16s ease, border-color .16s ease; white-space: nowrap; }
+      .uvd-cta { border:1px solid var(--uvd-border); background: var(--uvd-surface); color: var(--uvd-text); border-radius: 14px; padding: 12px 16px; font-size: 16px; font-weight: 600; cursor:pointer; transition: background .16s ease, border-color .16s ease; }
       .uvd-cta:hover { background: var(--uvd-surface-hover); border-color: var(--uvd-border-strong); }
       .uvd-sync-status { font-size: 13px; color: var(--uvd-subtext); min-height: 18px; }
       .uvd-sync-status[data-tone="syncing"] { color: #70b2ff; }
@@ -6902,6 +5469,31 @@
       .uvd-composer { position: fixed; left: 0; top: 0; bottom: 0; width: 390px; box-sizing: border-box; padding: 22px 18px 24px; overflow: auto; border-right: 1px solid var(--uvd-border); background: var(--token-bg-primary, #0a0e18); z-index: 2; }
       .uvd-composer-head h2 { margin: 0; font-size: 52px; line-height: .92; letter-spacing: -0.03em; color: var(--uvd-text); font-weight: 700; }
       .uvd-composer-head p { margin: 10px 0 0; color: var(--uvd-subtext); font-size: 16px; line-height: 1.35; }
+      .uvd-jsonl-upload { margin-top: 12px; border: 1px solid var(--uvd-border); border-radius: 12px; background: var(--uvd-surface); padding: 10px; }
+      .uvd-jsonl-upload-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+      .uvd-jsonl-upload-actions button { border: 1px solid var(--uvd-border); background: transparent; color: var(--uvd-text); border-radius: 9px; min-height: 34px; padding: 0 8px; font-size: 12px; font-weight: 700; cursor: pointer; }
+      .uvd-jsonl-upload-actions button:hover:not(:disabled) { background: var(--uvd-surface-hover); border-color: var(--uvd-border-strong); }
+      .uvd-jsonl-upload-actions button:disabled { opacity: 0.45; cursor: not-allowed; }
+      .uvd-jsonl-upload-summary { margin-top: 8px; min-height: 18px; color: var(--uvd-subtext); font-size: 12px; line-height: 1.35; }
+      .uvd-jsonl-queue-panel { margin-top: 8px; border-top: 1px solid var(--uvd-border); padding-top: 8px; display: grid; gap: 8px; }
+      .uvd-jsonl-queue-meta { color: var(--uvd-subtext); font-size: 12px; line-height: 1.35; }
+      .uvd-jsonl-queue-controls { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+      .uvd-jsonl-queue-controls button { border: 1px solid var(--uvd-border); background: transparent; color: var(--uvd-text); border-radius: 8px; min-height: 30px; padding: 0 6px; font-size: 11px; font-weight: 700; cursor: pointer; }
+      .uvd-jsonl-queue-controls button:hover:not(:disabled) { background: var(--uvd-surface-hover); border-color: var(--uvd-border-strong); }
+      .uvd-jsonl-queue-controls button:disabled { opacity: 0.45; cursor: not-allowed; }
+      .uvd-jsonl-queue-list { max-height: 150px; overflow: auto; border: 1px solid var(--uvd-border); border-radius: 10px; padding: 6px; display: grid; gap: 6px; background: rgba(0,0,0,0.15); }
+      .uvd-jsonl-item { width: 100%; text-align: left; border: 1px solid var(--uvd-border); background: transparent; color: var(--uvd-text); border-radius: 8px; padding: 7px 8px; font-size: 11px; line-height: 1.35; cursor: pointer; }
+      .uvd-jsonl-item[data-selected="true"] { border-color: rgba(103,177,255,0.95); box-shadow: inset 0 0 0 1px rgba(103,177,255,0.45); }
+      .uvd-jsonl-item[data-current="true"]::before { content: "Current"; margin-right: 6px; color: #8de3ab; font-weight: 700; }
+      .uvd-jsonl-preview-field { margin-top: 0; }
+      .uvd-jsonl-preview-field textarea { min-height: 90px; font-size: 12px; line-height: 1.35; }
+      .uvd-jsonl-batch-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+      .uvd-jsonl-batch-actions button { border: 1px solid var(--uvd-border); background: var(--uvd-surface); color: var(--uvd-text); border-radius: 9px; min-height: 34px; padding: 0 8px; font-size: 12px; font-weight: 700; cursor: pointer; }
+      .uvd-jsonl-batch-actions button:hover:not(:disabled) { background: var(--uvd-surface-hover); border-color: var(--uvd-border-strong); }
+      .uvd-jsonl-batch-actions button:disabled { opacity: 0.45; cursor: not-allowed; }
+      .uvd-jsonl-review-summary { margin-top: 12px; display: grid; gap: 6px; color: var(--uvd-subtext); font-size: 13px; line-height: 1.35; }
+      .uvd-jsonl-review-list { margin-top: 12px; border: 1px solid var(--uvd-border); border-radius: 12px; padding: 8px; max-height: 320px; overflow: auto; display: grid; gap: 6px; background: var(--uvd-surface); }
+      .uvd-jsonl-review-item { border: 1px solid var(--uvd-border); border-radius: 8px; padding: 8px; color: var(--uvd-text); font-size: 12px; line-height: 1.35; background: rgba(0,0,0,0.12); }
       .uvd-dropzone { margin-top: 14px; border: 2px dashed var(--uvd-border-strong); border-radius: 12px; padding: 20px 14px; background: transparent; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:6px; text-align:center; transition: background .15s ease, border-color .15s ease; cursor: default; }
       .uvd-composer.is-source-ready .uvd-dropzone { display: none !important; }
       .uvd-dropzone strong { font-size: 15px; color: var(--uvd-text); }
@@ -6947,43 +5539,10 @@
       .uvd-compose-actions .uvd-requires-source { display: none; }
       .uvd-composer.is-source-ready .uvd-compose-actions .uvd-requires-source { display: inline-flex; align-items: center; justify-content: center; }
       .uvd-composer.is-source-ready [data-uvd-compose-create="1"] { display: none; }
-      .uvd-cameo-section { margin-top: 10px; }
-      .uvd-cameo-section .uvd-field-label { font-size: 13px; font-weight: 600; color: var(--uvd-subtext); display: block; margin-bottom: 6px; }
-      .uvd-cameo-list { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
-      .uvd-cameo-chip { display: inline-flex; align-items: center; gap: 4px; background: var(--uvd-surface); border: 1px solid var(--uvd-border); border-radius: 8px; padding: 3px 6px 3px 8px; font-size: 12px; color: var(--uvd-text); }
-      .uvd-cameo-label { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-      .uvd-cameo-swap, .uvd-cameo-remove { background: none; border: none; color: var(--uvd-subtext); cursor: pointer; font-size: 14px; padding: 0 2px; line-height: 1; }
-      .uvd-cameo-swap:hover, .uvd-cameo-remove:hover { color: var(--uvd-text); }
-      .uvd-cameo-add-row { display: flex; gap: 6px; }
-      .uvd-cameo-input { flex: 1; background: var(--uvd-surface); border: 1px solid var(--uvd-border); border-radius: 8px; color: var(--uvd-text); padding: 4px 8px; font-size: 12px; }
-      .uvd-cameo-add-btn { background: var(--uvd-surface); border: 1px solid var(--uvd-border); border-radius: 8px; color: var(--uvd-text); padding: 4px 10px; font-size: 12px; font-weight: 600; cursor: pointer; }
-      .uvd-cameo-add-btn:hover { background: var(--uvd-surface-hover); border-color: var(--uvd-border-strong); }
       .uvd-compose-status { min-height: 18px; margin-top: 8px; font-size: 13px; color: var(--uvd-subtext); }
       .uvd-compose-status[data-tone="ok"] { color: var(--uvd-ok); }
       .uvd-compose-status[data-tone="error"] { color: var(--uvd-error); }
-      .uvd-modal-backdrop {
-        --uvd-border: var(--token-border-light, rgba(255,255,255,0.12));
-        --uvd-border-strong: var(--token-border-medium, rgba(255,255,255,0.2));
-        --uvd-surface: var(--token-bg-surface-secondary, rgba(255,255,255,0.06));
-        --uvd-surface-hover: var(--token-bg-surface-tertiary, rgba(255,255,255,0.11));
-        --uvd-text: var(--token-text-primary, #f4f7fb);
-        --uvd-subtext: var(--token-text-tertiary, rgba(255,255,255,0.7));
-        --uvd-ok: #8de3ab;
-        --uvd-error: #ffaba5;
-        --uvd-font-sans: var(--token-font-sans, var(--token-font-family, "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif));
-        position: fixed;
-        inset: 0;
-        z-index: 2147483647;
-        background: rgba(0,0,0,0.58);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        padding: 18px;
-        box-sizing: border-box;
-        color: var(--uvd-text);
-        font-family: var(--uvd-font-sans);
-      }
-      .uvd-modal-backdrop * { font-family: inherit; }
+      .uvd-modal-backdrop { position: fixed; inset: 0; z-index: 2147483647; background: rgba(0,0,0,0.58); display: flex; align-items: center; justify-content: center; padding: 18px; box-sizing: border-box; }
       .uvd-modal { width: 100%; max-width: 520px; max-height: min(82vh, 780px); overflow: auto; border: 1px solid var(--uvd-border-strong); border-radius: 16px; background: var(--token-bg-primary, #0a0e18); box-shadow: 0 24px 64px rgba(0,0,0,0.5); padding: 16px; }
       .uvd-modal-head h3 { margin: 0; font-size: 24px; line-height: 1.1; color: var(--uvd-text); font-weight: 700; }
       .uvd-modal-head p { margin: 6px 0 0; font-size: 14px; line-height: 1.35; color: var(--uvd-subtext); }
@@ -7010,39 +5569,28 @@
       .uvd-modal-btn:disabled { opacity: 0.55; cursor: not-allowed; }
       .uvd-modal-btn.is-primary { background: #1f8d51; border-color: #1f8d51; color: #f8fffc; }
       .uvd-modal-btn.is-primary:hover:not(:disabled) { background: #23a15d; border-color: #23a15d; }
-      .uvd-modal--workspace-manager { max-width: 560px; }
-      .uvd-ws-manage-list { margin-top: 10px; display: grid; gap: 8px; }
-      .uvd-ws-manage-row { display: flex; align-items: center; gap: 12px; min-height: 56px; padding: 10px 12px; border: 1px solid var(--uvd-border); border-radius: 12px; background: var(--uvd-surface); }
-      .uvd-ws-manage-name { flex: 1; min-width: 0; font-size: 14px; font-weight: 600; color: var(--uvd-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-      .uvd-ws-manage-delete { width: 32px; height: 32px; border: none; border-radius: 8px; background: transparent; color: #ff8d86; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; font-size: 16px; font-weight: 700; flex: 0 0 auto; }
-      .uvd-ws-manage-delete:hover { background: rgba(255,255,255,0.08); color: #ffb4ad; }
-      .uvd-ws-manage-empty { padding: 18px 12px; border: 1px dashed var(--uvd-border); border-radius: 12px; color: var(--uvd-subtext); background: rgba(255,255,255,0.02); text-align: center; font-size: 13px; line-height: 1.4; }
       .uvd-card { position: relative; overflow: hidden; cursor: pointer; border: 1px solid var(--uvd-border); background: var(--token-bg-surface-primary, #1f222a); box-shadow: 0 12px 32px rgba(0,0,0,0.3); border-radius: 14px; transition: transform 0.15s ease, box-shadow 0.15s ease; }
-      .uvd-grid-row { display:grid; gap: 14px; align-items: start; }
-      .uvd-landscape-run-grid { display:grid; grid-template-columns: repeat(var(--uvd-landscape-run-cols, 2), minmax(0, 1fr)); gap: 14px; align-content: start; }
       .uvd-card.is-violation { background: #3a2020; }
       .uvd-card.is-processing-error { background: #1f273b; border-color: rgba(125,164,255,0.5); }
       .uvd-thumb-link { display:block; text-decoration:none; color:inherit; }
-      .uvd-thumb-video:fullscreen, .uvd-thumb-video:-webkit-full-screen { width: 100vw !important; height: 100vh !important; object-fit: contain !important; background: #000 !important; }
       .uvd-info { padding: 10px; }
       .uvd-prompt { font-size: 13px; font-weight: 500; color: var(--uvd-text); line-height: 1.3; margin-bottom: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-decoration: none; }
       .uvd-prompt:hover { color: #d9e7ff; }
       .uvd-time { font-size: 12px; color: var(--uvd-subtext); }
       .uvd-actions-row { display:grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap:6px; padding: 0 10px 10px; }
       .uvd-actions-row2 { display:grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap:6px; padding: 0 10px 10px; }
-      .uvd-icon-btn { width: 100%; height: 34px; border-radius: 9px; border: 1px solid var(--uvd-border); background: var(--uvd-surface); color: var(--uvd-text); display:flex; align-items:center; justify-content:center; cursor:pointer; transition: background .15s ease, border-color .15s ease, color .15s ease, opacity .15s ease; }
-      .uvd-icon-btn:hover:not(:disabled) { background: var(--uvd-surface-hover); border-color: var(--uvd-border-strong); }
-      .uvd-icon-btn:disabled { opacity: .42; cursor:not-allowed; color: var(--uvd-text-dim); background: rgba(255,255,255,0.04); border-color: rgba(255,255,255,0.08); pointer-events: none; }
-      .uvd-action-pill { width: 100%; min-height: 38px; border: 1px solid var(--uvd-border); background: var(--uvd-surface); border-radius: 9px; color: var(--uvd-text); font-size: 13px; font-weight: 600; cursor:pointer; transition: background .15s ease, border-color .15s ease, color .15s ease, opacity .15s ease; }
+      .uvd-icon-btn { width: 100%; height: 34px; border-radius: 9px; border: 1px solid var(--uvd-border); background: var(--uvd-surface); color: var(--uvd-text); display:flex; align-items:center; justify-content:center; cursor:pointer; transition: background .15s ease, border-color .15s ease; }
+      .uvd-icon-btn:hover { background: var(--uvd-surface-hover); border-color: var(--uvd-border-strong); }
+      .uvd-action-pill { width: 100%; min-height: 38px; border: 1px solid var(--uvd-border); background: var(--uvd-surface); border-radius: 9px; color: var(--uvd-text); font-size: 13px; font-weight: 600; cursor:pointer; transition: background .15s ease, border-color .15s ease; }
       .uvd-action-pill:hover:not(:disabled) { background: var(--uvd-surface-hover); border-color: var(--uvd-border-strong); }
       .uvd-action-pill[data-tone="success"] { background: #1f8d51; border-color: #1f8d51; }
       .uvd-action-pill[data-tone="info"] { background: #215ba6; border-color: #215ba6; }
-      .uvd-action-pill:disabled { opacity: .42; cursor:not-allowed; color: var(--uvd-text-dim); background: rgba(255,255,255,0.04); border-color: rgba(255,255,255,0.08); pointer-events: none; }
-      .uv-drafts-loading, .uvd-empty-state, .uv-drafts-load-more { width: 100%; text-align: center; color: var(--uvd-subtext); }
+      .uvd-action-pill:disabled { opacity: .6; cursor:not-allowed; }
+      .uv-drafts-loading, .uvd-empty-state, .uv-drafts-load-more { grid-column: 1 / -1; text-align: center; color: var(--uvd-subtext); }
       .uv-drafts-loading { display:flex; align-items:center; justify-content:center; padding: 42px 18px; font-size: 16px; }
       .uvd-empty-state { padding: 60px 20px; font-size: 16px; }
       .uv-drafts-load-more { padding: 20px; font-size: 14px; }
-      .uv-drafts-grid { display:flex; flex-direction:column; gap: 14px; }
+      .uv-drafts-grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px; }
       @media (max-width: 1380px) {
         .uvd-shell { padding-left: 396px; }
         .uvd-composer { width: 332px; padding: 20px 14px 22px; }
@@ -7055,8 +5603,6 @@
         .uvd-composer { position: static; width: 100%; border: 1px solid var(--uvd-border); border-radius: 16px; margin-bottom: 16px; }
         .uvd-title-wrap h1 { font-size: 36px; }
         .uvd-compose-actions { grid-template-columns: 1fr; }
-        .uvd-grid-row { grid-template-columns: 1fr !important; }
-        .uvd-landscape-run-grid { grid-column: auto; grid-template-columns: 1fr !important; }
         .uvd-actions-row { grid-template-columns: repeat(4, minmax(0, 1fr)); }
         .uvd-field-grid-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       }
@@ -7085,10 +5631,18 @@
     const titleSection = document.createElement('div');
     titleSection.className = 'uvd-title-wrap';
 
+    const backBtn = document.createElement('button');
+    backBtn.className = 'uvd-back-btn';
+    backBtn.textContent = '← Back';
+    backBtn.addEventListener('click', () => {
+      hideUVDraftsPage();
+      history.back();
+    });
+    titleSection.appendChild(backBtn);
+
     const title = document.createElement('h1');
-    title.textContent = getUVDraftsPageTitle(uvDraftsWorkspaceFilter, getWorkspaceNameById);
+    title.textContent = 'My Drafts';
     titleSection.appendChild(title);
-    uvDraftsTitleEl = title;
 
     const stats = document.createElement('div');
     stats.className = 'uv-drafts-stats';
@@ -7105,7 +5659,7 @@
       uvDraftsJustSeenIds.clear();
       const statusEl = uvDraftsComposerEl?.querySelector('[data-uvd-compose-status="1"]');
       setComposerSource(null, statusEl);
-      initUVDraftsPage(true);
+      initUVDraftsPage();
     });
     uvDraftsSyncButtonEl = refreshBtn;
     setUVDraftsSyncUiState({ processed: uvDraftsData.length });
@@ -7214,7 +5768,6 @@
       uvDraftsFilterState = filterSelect.value;
       uvDraftsJustSeenIds.clear(); // Clear just-seen on filter change
       persistUVDraftsViewState();
-      updateUVDraftsHeaderTitle();
       renderUVDraftsGrid();
     });
     filterBar.appendChild(filterSelect);
@@ -7231,27 +5784,34 @@
       }
       uvDraftsWorkspaceFilter = workspaceSelect.value || null;
       persistUVDraftsViewState();
-      syncCreatortoolsPathToWorkspaceFilter({ historyMode: 'push' });
-      updateUVDraftsHeaderTitle();
       renderUVDraftsGrid();
     });
     uvWorkspaceSelectEl = workspaceSelect;
     filterBar.appendChild(workspaceSelect);
 
     // Load workspaces async
-    loadWorkspaces().then(() => {
-      syncWorkspaceFilterFromCreatortoolsPath({
-        render: false,
-        updateSelect: false,
-        updateUrl: true,
-        allowEmptyWorkspaces: true,
-      });
-      updateWorkspaceSelect();
-      updateUVDraftsHeaderTitle();
-      if (uvDraftsGridEl && isUVDraftsPageVisible()) {
-        renderUVDraftsGrid();
-      }
+    loadWorkspaces().then(() => updateWorkspaceSelect());
+
+    // Sort dropdown
+    const sortSelect = document.createElement('select');
+    sortSelect.className = 'uvd-select';
+    sortSelect.innerHTML = `
+      <option value="newest">Newest First</option>
+      <option value="oldest">Oldest First</option>
+    `;
+    if (Array.from(sortSelect.options).some((opt) => opt.value === uvDraftsSortState)) {
+      sortSelect.value = uvDraftsSortState;
+    } else {
+      uvDraftsSortState = 'newest';
+      sortSelect.value = uvDraftsSortState;
+      persistUVDraftsViewState();
+    }
+    sortSelect.addEventListener('change', () => {
+      uvDraftsSortState = sortSelect.value;
+      persistUVDraftsViewState();
+      renderUVDraftsGrid();
     });
+    filterBar.appendChild(sortSelect);
 
     // "Remove All Unsynced" button — only visible when unsynced filter is active
     const removeUnsyncedBtn = document.createElement('button');
@@ -7270,10 +5830,10 @@
           await uvDBDelete(UV_DRAFTS_STORES.drafts, draft.id);
         }
         uvDraftsData = uvDraftsData.filter(d => d?.is_unsynced !== true);
-        rerenderUVDraftsGridForLocalMutation(unsyncedDrafts.map((draft) => draft?.id));
+        renderUVDraftsGrid();
         updateUVDraftsStats();
       } catch (err) {
-        console.error('[UV Drafts] Failed to remove unsynced drafts:', err);
+        console.error('[Creator Tools] Failed to remove unsynced drafts:', err);
       }
       removeUnsyncedBtn.disabled = false;
       removeUnsyncedBtn.textContent = 'Remove All Unsynced';
@@ -7302,13 +5862,20 @@
     uvDraftsGridEl = grid;
 
     uvDraftsComposerEl = buildUVDraftsComposer();
+    if (capturedAuthToken) {
+      queueMicrotask(() => {
+        if (uvDraftsComposerEl) {
+          fetchComposerModels();
+          fetchComposerStyles();
+        }
+      });
+    }
     layout.appendChild(uvDraftsComposerEl);
     layout.appendChild(mainPanel);
     container.appendChild(layout);
     page.appendChild(container);
     document.documentElement.appendChild(page);
     uvDraftsPageEl = page;
-    ensureUVDraftsResponsiveLayoutWatchers();
 
     // Initialize data
     initUVDraftsPage();
@@ -7356,33 +5923,23 @@
       capturedAuthToken = nextToken;
       if (!gainedToken) return;
 
+      fetchComposerModels();
+      fetchComposerStyles();
+
       if (uvDraftsMarkAllState?.active) {
         resumePersistedMarkAllProgress({ queue: true });
       }
-      if (uvDraftsPageEl && uvDraftsPageEl.style.display !== 'none') {
+      if (uvDraftsPageEl && uvDraftsPageEl.style.display !== 'none' && uvDraftsSyncUiState.syncing) {
         initUVDraftsPage();
       }
-
-      // Fetch models and styles for composer once authenticated
-      fetchComposerModels();
-      fetchComposerStyles();
     }
 
     function setModelOverride(value) {
-      const normalized = normalizeComposerModel(value);
-      if (normalized) {
-        modelOverride = normalized;
-        return;
-      }
-      modelOverride = typeof value === 'string' && value.trim() ? value.trim() : null;
+      modelOverride = typeof value === 'string' && value ? value : null;
     }
 
     function getModelOverride() {
       return modelOverride;
-    }
-
-    function getDocumentTitle() {
-      return getUVDraftsDocumentTitle(uvDraftsWorkspaceFilter, getWorkspaceNameById, location.pathname);
     }
 
     return {
@@ -7392,11 +5949,20 @@
       checkPendingComposePrompt,
       loadPendingCreateOverrides,
       clearPendingCreateOverrides,
+      loadPendingCreateQueue,
+      savePendingCreateQueue,
+      peekPendingCreateQueuePrompt,
+      advancePendingCreateQueuePrompt,
+      consumePendingCreateQueuePrompt,
+      setPendingCreateQueueSelection,
+      removePendingCreateQueueAtIndex,
+      loadPendingCreateBatchState,
+      savePendingCreateBatchState,
+      clearPendingCreateBatchState,
       applyComposerOverridesToCreateBody,
       setCapturedAuthToken,
       setModelOverride,
       getModelOverride,
-      getDocumentTitle,
     };
   }
 
@@ -7404,56 +5970,5 @@
 
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = createSoraUVDraftsPageModule;
-    module.exports.__test = {
-      getComposerModelFamily,
-      resolveComposerModelValue,
-      buildPublicPostPayload,
-      extractPublishedPost,
-      resolveDraftPostData,
-      applyPublishedPostToDraftData,
-      extractRemixTargetPostId,
-      extractPublishedPostGenerationId,
-      buildComposerSourceFromPublishedPost,
-      isLargeComposerSizeAllowed,
-      normalizeComposerSizeForModel,
-      parseComposerGensInputValue,
-      extractPersistedGensCountValue,
-      resolvePreferredComposerGensCountValue,
-      extractPersistedComposerPromptValue,
-      resolvePreferredComposerPromptValue,
-      filterDraftsByWorkspace,
-      isDraftVisibleInBookmarkedFilter,
-      isDraftVisibleInFilterState,
-      slugifyWorkspaceName,
-      getWorkspaceUrlSlug,
-      findWorkspaceIdByUrlSlug,
-      extractWorkspaceSlugFromCreatortoolsPath,
-      buildCreatortoolsPathForWorkspace,
-      getDraftWorkspaceBadgeLabel,
-      getUVDraftsPageTitle,
-      formatWorkspaceSlugForTitle,
-      getUVDraftsDocumentTitle,
-      normalizeDraftOrientationValue,
-      extractDraftDimensions,
-      resolveDraftOrientationValue,
-      getDraftCardVideoObjectFit,
-      applyDraftCardVideoFullscreenPresentation,
-      getDraftOrientationForLayout,
-      getDraftCardPaddingTop,
-      getDraftCardLayoutStyle,
-      getUVDraftsViewportRerenderTargetCount,
-      shouldGroupLandscapeDraftCard,
-      getLandscapeRunChunkPlan,
-      planLandscapeRunChunks,
-      planDraftGridRows,
-      extendDraftRenderEndToRowBoundary,
-      extendLandscapeRunRenderEnd,
-      FIRST_FRAME_UPLOAD_USE_CASE,
-      buildFirstFrameInpaintItems,
-      isGenerationDraftId,
-      resolvePendingPollState,
-      buildPendingCompletionHandoffPlan,
-      extractErrorMessage,
-    };
   }
 })(typeof globalThis !== 'undefined' ? globalThis : window);

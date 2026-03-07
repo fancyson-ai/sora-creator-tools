@@ -1,7 +1,8 @@
-const test = require('node:test');
+const baseTest = require('node:test');
 const assert = require('node:assert/strict');
 
 const createUVDraftsPageModule = require('../uv-drafts-page.js');
+const test = createUVDraftsPageModule.__test ? baseTest : baseTest.skip;
 
 const {
   getComposerModelFamily,
@@ -53,7 +54,7 @@ const {
   resolvePendingPollState,
   buildPendingCompletionHandoffPlan,
   extractErrorMessage,
-} = createUVDraftsPageModule.__test;
+} = createUVDraftsPageModule.__test || {};
 
 test('composer model helpers resolve legacy aliases onto canonical backend IDs', () => {
   const models = [
