@@ -369,10 +369,10 @@
   let uvDraftsScriptsInjected = false;
   let uvDraftsScriptsInjecting = false;
   let uvDraftsScriptReadyCallbacks = [];
+  const UV_DRAFTS_ROUTE_RE = /^\/(?:uv-drafts|creatortools)(?:\/|$)/i;
 
   function isUVDraftsRoute(pathname = location.pathname) {
-    const current = String(pathname || '');
-    return current === '/creatortools' || current.startsWith('/creatortools/');
+    return UV_DRAFTS_ROUTE_RE.test(String(pathname || ''));
   }
 
   function flushUVDraftsReadyCallbacks() {

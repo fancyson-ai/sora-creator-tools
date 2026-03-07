@@ -850,7 +850,31 @@
   const isPost = () => /^\/p\/s_[A-Za-z0-9]+/i.test(location.pathname);
   const isDraftDetail = () => location.pathname === '/d' || location.pathname.startsWith('/d/');
   const isDraftEditor = () => location.pathname === '/de' || location.pathname.startsWith('/de/');
-  const isUVDrafts = () => location.pathname === '/uv-drafts' || location.pathname.startsWith('/uv-drafts');
+  const UV_DRAFTS_CANONICAL_PREFIX = '/creatortools';
+  const UV_DRAFTS_ROUTE_RE = /^\/(?:uv-drafts|creatortools)(?:\/|$)/i;
+  const UV_DRAFTS_LEGACY_ROUTE_RE = /^\/uv-drafts(?:\/|$)/i;
+  const isUVDrafts = () => UV_DRAFTS_ROUTE_RE.test(String(location.pathname || ''));
+
+  function getCanonicalUVDraftsPath(pathname = location.pathname) {
+    const current = String(pathname || '').trim();
+    if (!current) return UV_DRAFTS_CANONICAL_PREFIX;
+    if (current === UV_DRAFTS_CANONICAL_PREFIX || current.startsWith(`${UV_DRAFTS_CANONICAL_PREFIX}/`)) {
+      return current;
+    }
+    if (!UV_DRAFTS_LEGACY_ROUTE_RE.test(current)) {
+      return UV_DRAFTS_CANONICAL_PREFIX;
+    }
+    const suffix = current.slice('/uv-drafts'.length);
+    return `${UV_DRAFTS_CANONICAL_PREFIX}${suffix}`;
+  }
+
+  function maybeCanonicalizeUVDraftsRoute() {
+    if (!UV_DRAFTS_LEGACY_ROUTE_RE.test(String(location.pathname || ''))) return false;
+    const nextPath = getCanonicalUVDraftsPath(location.pathname);
+    const nextUrl = `${nextPath}${location.search || ''}${location.hash || ''}`;
+    history.replaceState(history.state, '', nextUrl);
+    return true;
+  }
 
   const isTopFeed = () => {
     try {
@@ -2073,7 +2097,7 @@
     if (uvDraftsPrevDocTitle == null && typeof document.title === 'string' && document.title.trim()) {
       uvDraftsPrevDocTitle = document.title;
     }
-    history.pushState({}, '', '/uv-drafts');
+    history.pushState({}, '', UV_DRAFTS_CANONICAL_PREFIX);
     onRouteChange();
   }
 
@@ -2086,7 +2110,7 @@
     if (total <= 0) {
       return {
         title: 'Queue: empty',
-        detail: 'Load prompts from UV Drafts to prepare batch creation.',
+        detail: 'Load prompts from Creator Tools to prepare batch creation.',
         canResume: false,
         canPushRetryBack: false,
         retryCountdownSec: 0,
@@ -4792,7 +4816,7 @@
     });
 
     const openUVDraftsBtn = document.createElement('button');
-    makePill(openUVDraftsBtn, 'Open UV Drafts');
+    makePill(openUVDraftsBtn, 'Open Creator Tools');
     openUVDraftsBtn.classList.add('sora-uv-open-uv-drafts-btn');
     Object.assign(openUVDraftsBtn.style, {
       flex: '1',
@@ -9801,6 +9825,7 @@ async function renderAnalyzeTable(force = false) {
 
     // Handle UV Drafts page
     if (isUVDrafts()) {
+      if (maybeCanonicalizeUVDraftsRoute()) return;
       stopDraftDetailBadgeLoop();
       teardownDetailBadge();
       // Hide other overlays
@@ -9822,7 +9847,7 @@ async function renderAnalyzeTable(force = false) {
       // Show UV Drafts page
       const uvDraftsPageEl = ensureUVDraftsPage();
       if (!uvDraftsPageEl) requestUVDraftsScriptLoad(true);
-      // /uv-drafts is an extension virtual route; keep tab title from falling back to 404.
+      // The drafts route is extension-owned; keep the tab title from falling back to Sora's 404 title.
       startUVDraftsTitleGuard();
       return;
     } else {
@@ -10156,7 +10181,7 @@ async function renderAnalyzeTable(force = false) {
     // Create UV Drafts button
     const uvDraftsBtn = document.createElement('button');
     uvDraftsBtn.className = 'sora-uv-drafts-btn p-3.5 group data-[state=open]:opacity-100 opacity-50 hover:opacity-100 focus-visible:opacity-100';
-    uvDraftsBtn.setAttribute('aria-label', 'UV Drafts');
+    uvDraftsBtn.setAttribute('aria-label', 'Creator Tools');
     uvDraftsBtn.setAttribute('type', 'button');
     uvDraftsBtn.style.padding = '13px';
 
@@ -10181,7 +10206,7 @@ async function renderAnalyzeTable(force = false) {
 
     const srOnly = document.createElement('div');
     srOnly.className = 'sr-only';
-    srOnly.textContent = 'UV Drafts';
+    srOnly.textContent = 'Creator Tools';
 
     uvDraftsBtn.appendChild(iconSpanInline);
     uvDraftsBtn.appendChild(iconSpanHover);
