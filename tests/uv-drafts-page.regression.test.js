@@ -599,3 +599,28 @@ test('resolvePendingPollState removes completion placeholders once the matching 
   assert.deepEqual(state.visibleDrafts, []);
   assert.equal(state.requiresTopRefresh, false);
 });
+
+test('resolvePendingPollState removes completion placeholders when the finished draft matches by task_id', () => {
+  const state = resolvePendingPollState(
+    [
+      {
+        id: 'task_done_2',
+        task_id: 'task_done_2',
+        prompt: 'studio portrait',
+        pending_status: 'complete',
+        pending_task_status: 'complete',
+        progress_pct: 100,
+        is_pending: true,
+        pending_completion_waiting: true,
+      },
+    ],
+    new Set(),
+    [],
+    [{ id: 'gen_done_2', task_id: 'task_done_2', prompt: 'studio portrait' }]
+  );
+
+  assert.deepEqual(state.droppedIds, []);
+  assert.deepEqual(Array.from(state.visibleIds), []);
+  assert.deepEqual(state.visibleDrafts, []);
+  assert.equal(state.requiresTopRefresh, false);
+});

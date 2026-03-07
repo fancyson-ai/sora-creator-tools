@@ -55,10 +55,21 @@
     return next;
   }
 
-  function isDraftPresentInCollection(drafts, draftId) {
-    const id = String(draftId || '').trim();
-    if (!id || !Array.isArray(drafts)) return false;
-    return drafts.some((draft) => String(draft?.id || '').trim() === id);
+  function isPendingDraftSettledInCollection(drafts, pendingDraft) {
+    if (!Array.isArray(drafts) || !pendingDraft || typeof pendingDraft !== 'object') return false;
+    const pendingKeys = new Set(
+      [pendingDraft.id, pendingDraft.task_id]
+        .map((value) => String(value || '').trim())
+        .filter(Boolean)
+    );
+    if (pendingKeys.size === 0) return false;
+    return drafts.some((draft) => {
+      const draftKeys = [
+        String(draft?.id || '').trim(),
+        String(draft?.task_id || '').trim(),
+      ].filter(Boolean);
+      return draftKeys.some((key) => pendingKeys.has(key));
+    });
   }
 
   function resolvePendingPollState(previousVisibleDrafts, previousEndpointIds, nextEndpointDrafts, existingDrafts, pendingLogic = null) {
@@ -89,7 +100,7 @@
 
     const maybePushSettlingDraft = (draft) => {
       const id = String(draft?.id || '').trim();
-      if (!id || settlingSeen.has(id) || nextEndpointIds.has(id) || isDraftPresentInCollection(existingDrafts, id)) return;
+      if (!id || settlingSeen.has(id) || nextEndpointIds.has(id) || isPendingDraftSettledInCollection(existingDrafts, draft)) return;
       settlingSeen.add(id);
       settlingDrafts.push(buildPendingCompletionDraft(draft));
     };
