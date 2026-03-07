@@ -19,8 +19,16 @@ const {
   resolvePreferredComposerGensCountValue,
   extractPersistedComposerPromptValue,
   resolvePreferredComposerPromptValue,
+  filterDraftsByWorkspace,
+  slugifyWorkspaceName,
+  getWorkspaceUrlSlug,
+  findWorkspaceIdByUrlSlug,
+  extractWorkspaceSlugFromCreatortoolsPath,
+  buildCreatortoolsPathForWorkspace,
   getDraftWorkspaceBadgeLabel,
   getUVDraftsPageTitle,
+  formatWorkspaceSlugForTitle,
+  getUVDraftsDocumentTitle,
   normalizeDraftOrientationValue,
   extractDraftDimensions,
   resolveDraftOrientationValue,
@@ -236,6 +244,60 @@ test('drafts page title uses the current workspace name when filtered to a works
   assert.equal(getUVDraftsPageTitle('', resolveWorkspaceName), 'My Drafts');
   assert.equal(getUVDraftsPageTitle('ws_music', resolveWorkspaceName), 'Music Lab');
   assert.equal(getUVDraftsPageTitle('ws_unknown', resolveWorkspaceName), 'My Drafts');
+});
+
+test('drafts document title uses workspace name and falls back to the creatortools slug', () => {
+  const resolveWorkspaceName = (id) => ({ ws_music: 'Music Lab' }[id] || '');
+
+  assert.equal(formatWorkspaceSlugForTitle('food-travel'), 'Food Travel');
+  assert.equal(getUVDraftsDocumentTitle('ws_music', resolveWorkspaceName, '/creatortools/music-lab'), 'Music Lab - Sora');
+  assert.equal(getUVDraftsDocumentTitle('ws_unknown', resolveWorkspaceName, '/creatortools/selfies'), 'Selfies - Sora');
+  assert.equal(getUVDraftsDocumentTitle(null, resolveWorkspaceName, '/creatortools'), 'My Drafts - Sora');
+});
+
+test('workspace draft filtering scopes stats and grid data to the active workspace', () => {
+  const drafts = [
+    { id: 'd1', workspace_id: 'ws_selfies' },
+    { id: 'd2', workspace_id: 'ws_food' },
+    { id: 'd3', workspace_id: 'ws_selfies' },
+    { id: 'd4', workspace_id: null },
+  ];
+
+  assert.deepEqual(
+    filterDraftsByWorkspace(drafts, 'ws_selfies').map((draft) => draft.id),
+    ['d1', 'd3']
+  );
+  assert.deepEqual(
+    filterDraftsByWorkspace(drafts, '').map((draft) => draft.id),
+    ['d1', 'd2', 'd3', 'd4']
+  );
+});
+
+test('workspace URL helpers build stable slugs and creatortools paths', () => {
+  const workspaces = [
+    { id: 'ws_selfies_a', name: 'Selfies' },
+    { id: 'ws_selfies_b', name: 'Selfies' },
+    { id: 'ws_food', name: 'Food & Travel' },
+  ];
+
+  assert.equal(slugifyWorkspaceName(' Food & Travel '), 'food-travel');
+  assert.equal(getWorkspaceUrlSlug(workspaces[0], workspaces), 'selfies');
+  assert.equal(getWorkspaceUrlSlug(workspaces[1], workspaces), 'selfies-2');
+  assert.equal(getWorkspaceUrlSlug(workspaces[2], workspaces), 'food-travel');
+  assert.equal(findWorkspaceIdByUrlSlug('selfies', workspaces), 'ws_selfies_a');
+  assert.equal(findWorkspaceIdByUrlSlug('selfies-2', workspaces), 'ws_selfies_b');
+  assert.equal(findWorkspaceIdByUrlSlug('food-travel', workspaces), 'ws_food');
+  assert.equal(findWorkspaceIdByUrlSlug('ws_food', workspaces), 'ws_food');
+  assert.equal(buildCreatortoolsPathForWorkspace(null, workspaces), '/creatortools');
+  assert.equal(buildCreatortoolsPathForWorkspace('ws_selfies_b', workspaces), '/creatortools/selfies-2');
+  assert.equal(buildCreatortoolsPathForWorkspace('ws_food', workspaces), '/creatortools/food-travel');
+});
+
+test('creatortools path parser extracts workspace slug for direct links', () => {
+  assert.equal(extractWorkspaceSlugFromCreatortoolsPath('/creatortools'), '');
+  assert.equal(extractWorkspaceSlugFromCreatortoolsPath('/creatortools/selfies'), 'selfies');
+  assert.equal(extractWorkspaceSlugFromCreatortoolsPath('/creatortools/Food%20Travel'), 'food travel');
+  assert.equal(extractWorkspaceSlugFromCreatortoolsPath('/profile/test'), null);
 });
 
 test('landscape cards group only inside consecutive landscape runs', () => {

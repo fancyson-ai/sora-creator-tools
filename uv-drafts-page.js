@@ -691,6 +691,114 @@
     return workspaceName || 'My Drafts';
   }
 
+  function formatWorkspaceSlugForTitle(slug = '') {
+    const normalizedSlug = typeof slug === 'string' ? slug.trim().toLowerCase() : '';
+    if (!normalizedSlug) return '';
+    return normalizedSlug
+      .split('-')
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+      .join(' ');
+  }
+
+  function getUVDraftsDocumentTitle(currentWorkspaceFilter = null, resolveWorkspaceName = null, pathname = '') {
+    const pageTitle = getUVDraftsPageTitle(currentWorkspaceFilter, resolveWorkspaceName);
+    if (pageTitle && pageTitle !== 'My Drafts') {
+      return `${pageTitle} - Sora`;
+    }
+    const workspaceSlug = extractWorkspaceSlugFromCreatortoolsPath(pathname);
+    const fallbackWorkspaceTitle = formatWorkspaceSlugForTitle(workspaceSlug);
+    return `${fallbackWorkspaceTitle || pageTitle || 'My Drafts'} - Sora`;
+  }
+
+  function filterDraftsByWorkspace(drafts, currentWorkspaceFilter = null) {
+    if (!Array.isArray(drafts)) return [];
+    const normalizedWorkspaceFilter = typeof currentWorkspaceFilter === 'string'
+      ? currentWorkspaceFilter.trim()
+      : '';
+    if (!normalizedWorkspaceFilter) return drafts;
+    return drafts.filter((draft) => String(draft?.workspace_id || '').trim() === normalizedWorkspaceFilter);
+  }
+
+  function slugifyWorkspaceName(name, fallback = 'workspace') {
+    const fallbackSlug = String(fallback || 'workspace')
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '') || 'workspace';
+    const rawName = typeof name === 'string' ? name.trim() : '';
+    if (!rawName) return fallbackSlug;
+    const normalized = rawName
+      .normalize('NFKD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '');
+    return normalized || fallbackSlug;
+  }
+
+  function getWorkspaceUrlSlug(workspace, workspaces = []) {
+    const workspaceId = typeof workspace?.id === 'string' ? workspace.id.trim() : '';
+    if (!workspaceId) return '';
+    const fallbackSlug = slugifyWorkspaceName(workspaceId, 'workspace');
+    const baseSlug = slugifyWorkspaceName(workspace?.name, fallbackSlug);
+    let duplicateIndex = 0;
+    const list = Array.isArray(workspaces) ? workspaces : [];
+    for (const item of list) {
+      const itemId = typeof item?.id === 'string' ? item.id.trim() : '';
+      if (!itemId) continue;
+      const itemBaseSlug = slugifyWorkspaceName(item?.name, slugifyWorkspaceName(itemId, 'workspace'));
+      if (itemBaseSlug !== baseSlug) continue;
+      duplicateIndex += 1;
+      if (itemId === workspaceId) {
+        return duplicateIndex === 1 ? baseSlug : `${baseSlug}-${duplicateIndex}`;
+      }
+    }
+    return baseSlug;
+  }
+
+  function findWorkspaceIdByUrlSlug(slug, workspaces = []) {
+    const normalizedSlug = typeof slug === 'string' ? slug.trim().toLowerCase() : '';
+    if (!normalizedSlug) return null;
+    const list = Array.isArray(workspaces) ? workspaces : [];
+    for (const workspace of list) {
+      const workspaceId = typeof workspace?.id === 'string' ? workspace.id.trim() : '';
+      if (!workspaceId) continue;
+      const workspaceSlug = getWorkspaceUrlSlug(workspace, list);
+      if (workspaceSlug === normalizedSlug || workspaceId.toLowerCase() === normalizedSlug) {
+        return workspaceId;
+      }
+    }
+    return null;
+  }
+
+  function extractWorkspaceSlugFromCreatortoolsPath(pathname = '') {
+    const currentPath = String(pathname || '').split(/[?#]/)[0];
+    if (currentPath === '/creatortools') return '';
+    if (!currentPath.startsWith('/creatortools/')) return null;
+    const remainder = currentPath.slice('/creatortools/'.length).replace(/^\/+/, '');
+    if (!remainder) return '';
+    const firstSegment = remainder.split('/')[0];
+    if (!firstSegment) return '';
+    try {
+      return decodeURIComponent(firstSegment).trim().toLowerCase();
+    } catch {
+      return firstSegment.trim().toLowerCase();
+    }
+  }
+
+  function buildCreatortoolsPathForWorkspace(workspaceId = null, workspaces = []) {
+    const normalizedWorkspaceId = typeof workspaceId === 'string' ? workspaceId.trim() : '';
+    if (!normalizedWorkspaceId) return '/creatortools';
+    const list = Array.isArray(workspaces) ? workspaces : [];
+    const workspace = list.find((item) => String(item?.id || '').trim() === normalizedWorkspaceId);
+    const slug = workspace
+      ? getWorkspaceUrlSlug(workspace, list)
+      : slugifyWorkspaceName(normalizedWorkspaceId, 'workspace');
+    return slug ? `/creatortools/${encodeURIComponent(slug)}` : '/creatortools';
+  }
+
   function createSoraUVDraftsPageModule(deps = {}) {
     let capturedAuthToken = null;
     let modelOverride = null;
@@ -2008,15 +2116,16 @@
   }
 
   function computeUVDraftsStats() {
+    const workspaceScopedDrafts = filterDraftsByWorkspace(uvDraftsData, uvDraftsWorkspaceFilter);
     const bookmarks = getBookmarks();
     if (uvDraftsLogic && typeof uvDraftsLogic.computeDraftStats === 'function') {
-      return uvDraftsLogic.computeDraftStats(uvDraftsData, bookmarks, uvDraftsJustSeenIds);
+      return uvDraftsLogic.computeDraftStats(workspaceScopedDrafts, bookmarks, uvDraftsJustSeenIds);
     }
     return {
-      total: uvDraftsData.length,
-      bookmarked: uvDraftsData.filter((d) => bookmarks.has(d.id)).length,
-      hidden: uvDraftsData.filter((d) => d.hidden).length,
-      newCount: uvDraftsData.filter((d) => d?.is_unsynced !== true && isDraftUnreadState(d) && !uvDraftsJustSeenIds.has(d.id)).length,
+      total: workspaceScopedDrafts.length,
+      bookmarked: workspaceScopedDrafts.filter((d) => bookmarks.has(d.id)).length,
+      hidden: workspaceScopedDrafts.filter((d) => d.hidden).length,
+      newCount: workspaceScopedDrafts.filter((d) => d?.is_unsynced !== true && isDraftUnreadState(d) && !uvDraftsJustSeenIds.has(d.id)).length,
     };
   }
 
@@ -2326,6 +2435,71 @@
     return ws?.name || '';
   }
 
+  function syncWorkspaceSelectValue() {
+    if (!uvWorkspaceSelectEl) return;
+    const optionValues = new Set(Array.from(uvWorkspaceSelectEl.options).map((opt) => opt.value));
+    const nextValue = uvDraftsWorkspaceFilter && optionValues.has(uvDraftsWorkspaceFilter)
+      ? uvDraftsWorkspaceFilter
+      : '';
+    if (uvWorkspaceSelectEl.value !== nextValue) {
+      uvWorkspaceSelectEl.value = nextValue;
+    }
+  }
+
+  function syncCreatortoolsPathToWorkspaceFilter(options = {}) {
+    const currentSlug = extractWorkspaceSlugFromCreatortoolsPath(location.pathname);
+    if (currentSlug == null) return false;
+    const nextPath = buildCreatortoolsPathForWorkspace(uvDraftsWorkspaceFilter, uvWorkspaces);
+    if (location.pathname === nextPath) return false;
+    const nextUrl = `${nextPath}${location.search || ''}${location.hash || ''}`;
+    const historyMode = options.historyMode === 'replace' ? 'replaceState' : 'pushState';
+    history[historyMode]({}, '', nextUrl);
+    return true;
+  }
+
+  function syncWorkspaceFilterFromCreatortoolsPath(options = {}) {
+    const currentSlug = extractWorkspaceSlugFromCreatortoolsPath(location.pathname);
+    if (currentSlug == null) return false;
+
+    let nextWorkspaceFilter = uvDraftsWorkspaceFilter;
+    if (!currentSlug) {
+      nextWorkspaceFilter = null;
+    } else if (uvWorkspaces.length > 0) {
+      nextWorkspaceFilter = findWorkspaceIdByUrlSlug(currentSlug, uvWorkspaces);
+      if (!nextWorkspaceFilter) {
+        nextWorkspaceFilter = null;
+      }
+    } else if (options.allowEmptyWorkspaces === true) {
+      nextWorkspaceFilter = null;
+    } else {
+      return false;
+    }
+
+    const changed = nextWorkspaceFilter !== uvDraftsWorkspaceFilter;
+    if (changed) {
+      uvDraftsWorkspaceFilter = nextWorkspaceFilter;
+      if (options.persist !== false) {
+        persistUVDraftsViewState();
+      }
+    }
+
+    if (options.updateSelect !== false) {
+      syncWorkspaceSelectValue();
+    }
+    updateUVDraftsHeaderTitle();
+
+    const canonicalPath = buildCreatortoolsPathForWorkspace(uvDraftsWorkspaceFilter, uvWorkspaces);
+    if (options.updateUrl !== false && location.pathname !== canonicalPath) {
+      const nextUrl = `${canonicalPath}${location.search || ''}${location.hash || ''}`;
+      history.replaceState({}, '', nextUrl);
+    }
+
+    if (changed && options.render !== false && uvDraftsGridEl && isUVDraftsPageVisible()) {
+      renderUVDraftsGrid();
+    }
+    return changed;
+  }
+
   function parseSearchTerms(query) {
     if (uvDraftsLogic && typeof uvDraftsLogic.parseSearchQuery === 'function') {
       return uvDraftsLogic.parseSearchQuery(query);
@@ -2580,12 +2754,17 @@
         persistUVDraftsViewState();
       }
     }
+    syncWorkspaceSelectValue();
+    syncCreatortoolsPathToWorkspaceFilter({ historyMode: 'replace' });
     updateUVDraftsHeaderTitle();
   }
 
   function updateUVDraftsHeaderTitle() {
     if (!uvDraftsTitleEl) return;
     uvDraftsTitleEl.textContent = getUVDraftsPageTitle(uvDraftsWorkspaceFilter, getWorkspaceNameById);
+    try {
+      document.title = getUVDraftsDocumentTitle(uvDraftsWorkspaceFilter, getWorkspaceNameById, location.pathname);
+    } catch {}
   }
 
   function closeDraftWorkspacePicker() {
@@ -2798,65 +2977,47 @@
 
   function showWorkspaceManager() {
     const modal = document.createElement('div');
-    Object.assign(modal.style, {
-      position: 'fixed',
-      inset: '0',
-      zIndex: '2147483647',
-      background: 'rgba(0,0,0,0.8)',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-    });
+    modal.className = 'uvd-modal-backdrop';
 
     const panel = document.createElement('div');
-    Object.assign(panel.style, {
-      background: '#1e1e1e',
-      borderRadius: '16px',
-      padding: '24px',
-      minWidth: '400px',
-      maxWidth: '500px',
-      maxHeight: '80vh',
-      overflow: 'auto',
-    });
+    panel.className = 'uvd-modal uvd-modal--workspace-manager';
 
-    const title = document.createElement('h2');
+    const head = document.createElement('div');
+    head.className = 'uvd-modal-head';
+
+    const title = document.createElement('h3');
     title.textContent = 'Manage Workspaces';
-    Object.assign(title.style, { margin: '0 0 16px 0', fontSize: '20px', fontWeight: '600' });
-    panel.appendChild(title);
+    head.appendChild(title);
+
+    const subtitle = document.createElement('p');
+    subtitle.textContent = 'Create and organize workspace buckets for your drafts.';
+    head.appendChild(subtitle);
+    panel.appendChild(head);
 
     // New workspace form
     const form = document.createElement('div');
-    Object.assign(form.style, { display: 'flex', gap: '8px', marginBottom: '16px' });
+    form.className = 'uvd-ws-create';
 
     const input = document.createElement('input');
     input.type = 'text';
     input.placeholder = 'New workspace name...';
-    Object.assign(input.style, {
-      flex: '1',
-      padding: '10px 12px',
-      borderRadius: '8px',
-      border: '1px solid #333',
-      background: '#2a2a2a',
-      color: '#fff',
-      fontSize: '14px',
-    });
+    input.className = 'uvd-modal-input';
 
     const addBtn = document.createElement('button');
+    addBtn.type = 'button';
+    addBtn.className = 'uvd-modal-btn is-primary';
     addBtn.textContent = '+ Create';
-    Object.assign(addBtn.style, {
-      padding: '10px 16px',
-      borderRadius: '8px',
-      border: 'none',
-      background: '#3b82f6',
-      color: '#fff',
-      cursor: 'pointer',
-      fontWeight: '600',
-    });
-    addBtn.addEventListener('click', async () => {
+    const createWorkspaceFromInput = async () => {
       if (!input.value.trim()) return;
       await createWorkspace(input.value.trim());
       input.value = '';
       renderWorkspaceList();
+    };
+    addBtn.addEventListener('click', createWorkspaceFromInput);
+    input.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter') return;
+      event.preventDefault();
+      createWorkspaceFromInput();
     });
 
     form.appendChild(input);
@@ -2865,45 +3026,29 @@
 
     // Workspace list
     const list = document.createElement('div');
-    list.className = 'workspace-list';
-    Object.assign(list.style, { display: 'flex', flexDirection: 'column', gap: '8px' });
+    list.className = 'uvd-ws-manage-list';
 
     function renderWorkspaceList() {
       list.innerHTML = '';
       for (const ws of uvWorkspaces) {
         const row = document.createElement('div');
-        Object.assign(row.style, {
-          display: 'flex',
-          alignItems: 'center',
-          gap: '12px',
-          padding: '12px',
-          background: '#2a2a2a',
-          borderRadius: '8px',
-        });
+        row.className = 'uvd-ws-manage-row';
 
-        const colorDot = document.createElement('div');
-        Object.assign(colorDot.style, {
-          width: '12px',
-          height: '12px',
-          borderRadius: '50%',
-          background: ws.color,
-        });
+        const colorDot = document.createElement('span');
+        colorDot.className = 'uvd-ws-dot';
+        colorDot.style.background = ws.color || '#3b82f6';
         row.appendChild(colorDot);
 
         const name = document.createElement('div');
+        name.className = 'uvd-ws-manage-name';
         name.textContent = ws.name;
-        Object.assign(name.style, { flex: '1', fontWeight: '500' });
         row.appendChild(name);
 
         const delBtn = document.createElement('button');
-        delBtn.textContent = '🗑';
-        Object.assign(delBtn.style, {
-          background: 'none',
-          border: 'none',
-          color: '#ef4444',
-          cursor: 'pointer',
-          fontSize: '16px',
-        });
+        delBtn.type = 'button';
+        delBtn.className = 'uvd-ws-manage-delete';
+        delBtn.textContent = '✕';
+        delBtn.title = `Delete ${ws.name}`;
         delBtn.addEventListener('click', async () => {
           if (!confirm(`Delete workspace "${ws.name}"?`)) return;
           await deleteWorkspace(ws.id);
@@ -2916,8 +3061,8 @@
 
       if (uvWorkspaces.length === 0) {
         const empty = document.createElement('div');
+        empty.className = 'uvd-ws-manage-empty';
         empty.textContent = 'No workspaces yet. Create one above!';
-        Object.assign(empty.style, { color: '#888', textAlign: 'center', padding: '20px' });
         list.appendChild(empty);
       }
     }
@@ -2925,22 +3070,16 @@
     panel.appendChild(list);
     renderWorkspaceList();
 
-    // Close button
+    const footer = document.createElement('div');
+    footer.className = 'uvd-modal-footer';
+
     const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.className = 'uvd-modal-btn';
     closeBtn.textContent = 'Done';
-    Object.assign(closeBtn.style, {
-      marginTop: '16px',
-      width: '100%',
-      padding: '12px',
-      borderRadius: '8px',
-      border: 'none',
-      background: 'rgba(255,255,255,0.1)',
-      color: '#fff',
-      cursor: 'pointer',
-      fontWeight: '600',
-    });
     closeBtn.addEventListener('click', () => modal.remove());
-    panel.appendChild(closeBtn);
+    footer.appendChild(closeBtn);
+    panel.appendChild(footer);
 
     modal.appendChild(panel);
     modal.addEventListener('click', (e) => {
@@ -4539,9 +4678,7 @@
       }
     }
 
-    if (uvDraftsWorkspaceFilter) {
-      filtered = filtered.filter(d => d.workspace_id === uvDraftsWorkspaceFilter);
-    }
+    filtered = filterDraftsByWorkspace(filtered, uvDraftsWorkspaceFilter);
 
     if (uvDraftsFilterState === 'unsynced') {
       filtered = filtered.filter((d) => d?.is_unsynced === true);
@@ -5532,6 +5669,24 @@
     uvDraftsLoadingEl.style.display = 'none';
   }
 
+  function isUVDraftsLoadingIndicatorVisible() {
+    if (!uvDraftsLoadingEl) return false;
+    const display = String(uvDraftsLoadingEl.style.display || '').trim().toLowerCase();
+    return !!display && display !== 'none';
+  }
+
+  function shouldDeferUVDraftsEmptyState() {
+    if (String(uvDraftsSearchQuery || '').trim()) return false;
+    if (uvDraftsAwaitingMoreResults) return true;
+    if (uvDraftsSyncUiState?.syncing === true) return true;
+    return false;
+  }
+
+  function shouldRerenderUVDraftsEmptyStateAfterSync() {
+    const renderableDrafts = getRenderableUVDrafts();
+    return !Array.isArray(renderableDrafts) || renderableDrafts.length === 0;
+  }
+
   function restoreUVDraftsPlaybackState() {
     if (!uvDraftsCurrentlyPlayingDraftId || !uvDraftsGridEl) return;
     const card = uvDraftsGridEl.querySelector(`[data-draft-id="${CSS.escape(uvDraftsCurrentlyPlayingDraftId)}"]`);
@@ -5744,8 +5899,10 @@
     if (uvDraftsFilteredCache.length === 0) {
       uvDraftsGridEl.innerHTML = '';
       uvDraftsRenderedCount = 0;
-      if (uvDraftsAwaitingMoreResults) {
-        showUVDraftsLoadingIndicator('Syncing drafts...');
+      if (shouldDeferUVDraftsEmptyState()) {
+        if (!isUVDraftsLoadingIndicatorVisible()) {
+          showUVDraftsLoadingIndicator(uvDraftsAwaitingMoreResults ? 'Syncing drafts...' : 'Loading drafts...');
+        }
         return;
       }
       hideUVDraftsLoadingIndicator();
@@ -5823,8 +5980,9 @@
     const statsEl = uvDraftsPageEl?.querySelector('.uv-drafts-stats');
     if (!statsEl) return;
 
+    const workspaceScopedDrafts = filterDraftsByWorkspace(uvDraftsData, uvDraftsWorkspaceFilter);
     const { total, bookmarked, hidden, newCount } = computeUVDraftsStats();
-    const unsyncedCount = uvDraftsData.reduce((count, draft) => count + (draft?.is_unsynced === true ? 1 : 0), 0);
+    const unsyncedCount = workspaceScopedDrafts.reduce((count, draft) => count + (draft?.is_unsynced === true ? 1 : 0), 0);
     statsEl.textContent = `${total} drafts • ${bookmarked} bookmarked • ${hidden} hidden • ${newCount} new • ${unsyncedCount} unsynced`;
     setUVDraftsSyncUiState({ processed: total });
   }
@@ -6002,7 +6160,7 @@
             if (isStaleRun()) return;
             uvDraftsAwaitingMoreResults = false;
             setUVDraftsSyncUiState({ syncing: false, processed: uvDraftsData.length, page: 0 });
-            if (uvDraftsData.length === 0) {
+            if (shouldRerenderUVDraftsEmptyStateAfterSync()) {
               renderUVDraftsGrid();
               updateUVDraftsStats();
             }
@@ -6014,6 +6172,10 @@
           if (isStaleRun()) return;
         }
         setUVDraftsSyncUiState({ syncing: false, processed: uvDraftsData.length, page: 0 });
+        if (shouldRerenderUVDraftsEmptyStateAfterSync()) {
+          renderUVDraftsGrid();
+          updateUVDraftsStats();
+        }
       }
     } catch (err) {
       console.error('[UV Drafts] Quick fetch failed, falling back to full sync:', err);
@@ -6036,9 +6198,17 @@
         renderUVDraftsGrid();
         updateUVDraftsStats();
         setUVDraftsSyncUiState({ syncing: false, processed: uvDraftsData.length, page: 0 });
+        if (shouldRerenderUVDraftsEmptyStateAfterSync()) {
+          renderUVDraftsGrid();
+          updateUVDraftsStats();
+        }
       } catch (syncErr) {
         console.error('[UV Drafts] Full sync also failed:', syncErr);
         setUVDraftsSyncUiState({ syncing: false, processed: uvDraftsData.length, page: 0 });
+        if (shouldRerenderUVDraftsEmptyStateAfterSync()) {
+          renderUVDraftsGrid();
+          updateUVDraftsStats();
+        }
       }
       if (uvDraftsLoadingEl) {
         uvDraftsLoadingEl.style.display = 'none';
@@ -6117,10 +6287,21 @@
 
   function ensureUVDraftsPage() {
     loadUVDraftsViewState();
+    syncWorkspaceFilterFromCreatortoolsPath({
+      render: false,
+      updateSelect: false,
+      updateUrl: false,
+    });
 
     if (uvDraftsPageEl && document.contains(uvDraftsPageEl)) {
       uvDraftsPageEl.style.display = 'block';
       ensureUVDraftsResponsiveLayoutWatchers();
+      syncWorkspaceFilterFromCreatortoolsPath({
+        render: false,
+        updateSelect: true,
+        updateUrl: true,
+        allowEmptyWorkspaces: true,
+      });
       updateUVDraftsHeaderTitle();
       startPendingDraftsPolling();
       if (uvDraftsComposerEl) {
@@ -6249,6 +6430,15 @@
       .uvd-compose-status[data-tone="ok"] { color: var(--uvd-ok); }
       .uvd-compose-status[data-tone="error"] { color: var(--uvd-error); }
       .uvd-modal-backdrop {
+        --uvd-border: var(--token-border-light, rgba(255,255,255,0.12));
+        --uvd-border-strong: var(--token-border-medium, rgba(255,255,255,0.2));
+        --uvd-surface: var(--token-bg-surface-secondary, rgba(255,255,255,0.06));
+        --uvd-surface-hover: var(--token-bg-surface-tertiary, rgba(255,255,255,0.11));
+        --uvd-text: var(--token-text-primary, #f4f7fb);
+        --uvd-subtext: var(--token-text-tertiary, rgba(255,255,255,0.7));
+        --uvd-ok: #8de3ab;
+        --uvd-error: #ffaba5;
+        --uvd-font-sans: var(--token-font-sans, var(--token-font-family, "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif));
         position: fixed;
         inset: 0;
         z-index: 2147483647;
@@ -6258,7 +6448,8 @@
         justify-content: center;
         padding: 18px;
         box-sizing: border-box;
-        font-family: var(--token-font-sans, var(--token-font-family, "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif));
+        color: var(--uvd-text);
+        font-family: var(--uvd-font-sans);
       }
       .uvd-modal-backdrop * { font-family: inherit; }
       .uvd-modal { width: 100%; max-width: 520px; max-height: min(82vh, 780px); overflow: auto; border: 1px solid var(--uvd-border-strong); border-radius: 16px; background: var(--token-bg-primary, #0a0e18); box-shadow: 0 24px 64px rgba(0,0,0,0.5); padding: 16px; }
@@ -6287,6 +6478,13 @@
       .uvd-modal-btn:disabled { opacity: 0.55; cursor: not-allowed; }
       .uvd-modal-btn.is-primary { background: #1f8d51; border-color: #1f8d51; color: #f8fffc; }
       .uvd-modal-btn.is-primary:hover:not(:disabled) { background: #23a15d; border-color: #23a15d; }
+      .uvd-modal--workspace-manager { max-width: 560px; }
+      .uvd-ws-manage-list { margin-top: 10px; display: grid; gap: 8px; }
+      .uvd-ws-manage-row { display: flex; align-items: center; gap: 12px; min-height: 56px; padding: 10px 12px; border: 1px solid var(--uvd-border); border-radius: 12px; background: var(--uvd-surface); }
+      .uvd-ws-manage-name { flex: 1; min-width: 0; font-size: 14px; font-weight: 600; color: var(--uvd-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .uvd-ws-manage-delete { width: 32px; height: 32px; border: none; border-radius: 8px; background: transparent; color: #ff8d86; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; font-size: 16px; font-weight: 700; flex: 0 0 auto; }
+      .uvd-ws-manage-delete:hover { background: rgba(255,255,255,0.08); color: #ffb4ad; }
+      .uvd-ws-manage-empty { padding: 18px 12px; border: 1px dashed var(--uvd-border); border-radius: 12px; color: var(--uvd-subtext); background: rgba(255,255,255,0.02); text-align: center; font-size: 13px; line-height: 1.4; }
       .uvd-card { position: relative; overflow: hidden; cursor: pointer; border: 1px solid var(--uvd-border); background: var(--token-bg-surface-primary, #1f222a); box-shadow: 0 12px 32px rgba(0,0,0,0.3); border-radius: 14px; transition: transform 0.15s ease, box-shadow 0.15s ease; }
       .uvd-grid-row { display:grid; gap: 14px; align-items: start; }
       .uvd-landscape-run-grid { display:grid; grid-template-columns: repeat(var(--uvd-landscape-run-cols, 2), minmax(0, 1fr)); gap: 14px; align-content: start; }
@@ -6500,6 +6698,7 @@
       }
       uvDraftsWorkspaceFilter = workspaceSelect.value || null;
       persistUVDraftsViewState();
+      syncCreatortoolsPathToWorkspaceFilter({ historyMode: 'push' });
       updateUVDraftsHeaderTitle();
       renderUVDraftsGrid();
     });
@@ -6508,8 +6707,17 @@
 
     // Load workspaces async
     loadWorkspaces().then(() => {
+      syncWorkspaceFilterFromCreatortoolsPath({
+        render: false,
+        updateSelect: false,
+        updateUrl: true,
+        allowEmptyWorkspaces: true,
+      });
       updateWorkspaceSelect();
       updateUVDraftsHeaderTitle();
+      if (uvDraftsGridEl && isUVDraftsPageVisible()) {
+        renderUVDraftsGrid();
+      }
     });
 
     // "Remove All Unsynced" button — only visible when unsynced filter is active
@@ -6640,6 +6848,10 @@
       return modelOverride;
     }
 
+    function getDocumentTitle() {
+      return getUVDraftsDocumentTitle(uvDraftsWorkspaceFilter, getWorkspaceNameById, location.pathname);
+    }
+
     return {
       ensureUVDraftsPage,
       hideUVDraftsPage,
@@ -6651,6 +6863,7 @@
       setCapturedAuthToken,
       setModelOverride,
       getModelOverride,
+      getDocumentTitle,
     };
   }
 
@@ -6674,8 +6887,16 @@
       resolvePreferredComposerGensCountValue,
       extractPersistedComposerPromptValue,
       resolvePreferredComposerPromptValue,
+      filterDraftsByWorkspace,
+      slugifyWorkspaceName,
+      getWorkspaceUrlSlug,
+      findWorkspaceIdByUrlSlug,
+      extractWorkspaceSlugFromCreatortoolsPath,
+      buildCreatortoolsPathForWorkspace,
       getDraftWorkspaceBadgeLabel,
       getUVDraftsPageTitle,
+      formatWorkspaceSlugForTitle,
+      getUVDraftsDocumentTitle,
       normalizeDraftOrientationValue,
       extractDraftDimensions,
       resolveDraftOrientationValue,

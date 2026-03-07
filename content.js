@@ -223,7 +223,7 @@
 
   function isUVDraftsRoute(pathname = location.pathname) {
     const current = String(pathname || '');
-    return current === '/uv-drafts' || current.startsWith('/uv-drafts/');
+    return current === '/creatortools' || current.startsWith('/creatortools/');
   }
 
   function flushUVDraftsReadyCallbacks() {

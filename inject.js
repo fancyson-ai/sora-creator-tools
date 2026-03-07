@@ -171,14 +171,44 @@
     }
   });
 
+  function getFallbackUVDraftsDocumentTitle() {
+    const path = String(location.pathname || '');
+    if (!path.startsWith('/creatortools/')) return UV_DRAFTS_DOC_TITLE;
+    const slug = path.slice('/creatortools/'.length).split('/')[0];
+    if (!slug) return UV_DRAFTS_DOC_TITLE;
+    let decodedSlug = slug;
+    try {
+      decodedSlug = decodeURIComponent(slug);
+    } catch {}
+    const prettyTitle = decodedSlug
+      .trim()
+      .split('-')
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+      .join(' ');
+    return prettyTitle ? `${prettyTitle} - Sora` : UV_DRAFTS_DOC_TITLE;
+  }
+
+  function getDesiredUVDraftsDocumentTitle() {
+    try {
+      const moduleTitle = ensureUVDraftsPageModule()?.getDocumentTitle?.();
+      if (typeof moduleTitle === 'string' && moduleTitle.trim()) {
+        return moduleTitle.trim();
+      }
+    } catch {}
+    return getFallbackUVDraftsDocumentTitle();
+  }
+
   function setUVDraftsDocumentTitle() {
     try {
+      const desiredTitle = getDesiredUVDraftsDocumentTitle();
       const currentTitle = typeof document.title === 'string' ? document.title : '';
-      if (uvDraftsPrevDocTitle == null && currentTitle !== UV_DRAFTS_DOC_TITLE) {
+      if (uvDraftsPrevDocTitle == null && currentTitle !== desiredTitle) {
         uvDraftsPrevDocTitle = currentTitle;
       }
-      if (currentTitle !== UV_DRAFTS_DOC_TITLE) {
-        document.title = UV_DRAFTS_DOC_TITLE;
+      if (currentTitle !== desiredTitle) {
+        document.title = desiredTitle;
       }
     } catch {}
   }

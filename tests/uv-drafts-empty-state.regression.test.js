@@ -129,6 +129,8 @@ function buildRenderHarness() {
     let uvDraftsFilteredCache = [];
     let uvDraftsAwaitingMoreResults = false;
     let uvDraftsSearchQuery = '';
+    let uvDraftsData = [];
+    let uvDraftsSyncUiState = { syncing: false, processed: 0, page: 0 };
     let uvDraftsCurrentlyPlayingDraftId = null;
     let uvDraftsCurrentlyPlayingVideo = null;
 
@@ -195,7 +197,9 @@ function buildRenderHarness() {
 
     globalThis.__setState = (next) => {
       if (Object.prototype.hasOwnProperty.call(next, 'currentDrafts')) currentDrafts = Array.isArray(next.currentDrafts) ? next.currentDrafts.slice() : [];
+      if (Object.prototype.hasOwnProperty.call(next, 'allDrafts')) uvDraftsData = Array.isArray(next.allDrafts) ? next.allDrafts.slice() : [];
       if (Object.prototype.hasOwnProperty.call(next, 'awaitingMoreResults')) uvDraftsAwaitingMoreResults = !!next.awaitingMoreResults;
+      if (Object.prototype.hasOwnProperty.call(next, 'syncing')) uvDraftsSyncUiState = { ...uvDraftsSyncUiState, syncing: !!next.syncing };
       if (Object.prototype.hasOwnProperty.call(next, 'searchQuery')) uvDraftsSearchQuery = String(next.searchQuery || '');
       if (Object.prototype.hasOwnProperty.call(next, 'loadingDisplay')) uvDraftsLoadingEl.style.display = next.loadingDisplay;
       if (Object.prototype.hasOwnProperty.call(next, 'loadingText')) uvDraftsLoadingEl.textContent = String(next.loadingText || '');
@@ -207,6 +211,7 @@ function buildRenderHarness() {
     };
     globalThis.__renderGrid = renderUVDraftsGrid;
     globalThis.__renderSyncUpdate = renderUVDraftsSyncUpdate;
+    globalThis.__shouldRerenderAfterSync = shouldRerenderUVDraftsEmptyStateAfterSync;
     globalThis.__snapshot = () => ({
       loadingDisplay: uvDraftsLoadingEl.style.display || '',
       loadingText: uvDraftsLoadingEl.textContent || '',
@@ -221,6 +226,7 @@ function buildRenderHarness() {
   return {
     renderGrid: context.__renderGrid,
     renderSyncUpdate: context.__renderSyncUpdate,
+    shouldRerenderAfterSync: context.__shouldRerenderAfterSync,
     setState: context.__setState,
     snapshot: context.__snapshot,
   };
@@ -230,6 +236,7 @@ test('renderUVDraftsGrid defers empty state while more draft pages are still pen
   const harness = buildRenderHarness();
   harness.setState({
     currentDrafts: [],
+    allDrafts: [],
     awaitingMoreResults: true,
     searchQuery: '',
     resetGrid: true,
@@ -246,10 +253,68 @@ test('renderUVDraftsGrid defers empty state while more draft pages are still pen
   assert.deepEqual(Array.from(snapshot.childClasses), []);
 });
 
+test('renderUVDraftsGrid keeps loading state while initial sync is still in progress', () => {
+  const harness = buildRenderHarness();
+  harness.setState({
+    currentDrafts: [],
+    allDrafts: [],
+    awaitingMoreResults: false,
+    syncing: true,
+    searchQuery: '',
+    resetGrid: true,
+    loadingDisplay: '',
+    loadingText: '',
+  });
+
+  harness.renderGrid();
+  const snapshot = harness.snapshot();
+
+  assert.equal(snapshot.emptyText, null);
+  assert.equal(snapshot.loadingDisplay, 'flex');
+  assert.equal(snapshot.loadingText, 'Loading drafts...');
+});
+
+test('renderUVDraftsGrid shows empty state once syncing has finished with no drafts', () => {
+  const harness = buildRenderHarness();
+  harness.setState({
+    currentDrafts: [],
+    allDrafts: [],
+    awaitingMoreResults: false,
+    syncing: false,
+    searchQuery: '',
+    resetGrid: true,
+    loadingDisplay: 'flex',
+    loadingText: 'Loading drafts...',
+  });
+
+  harness.renderGrid();
+  const snapshot = harness.snapshot();
+
+  assert.equal(snapshot.loadingDisplay, 'none');
+  assert.equal(snapshot.emptyText, 'No drafts found');
+});
+
+test('shouldRerenderUVDraftsEmptyStateAfterSync treats an empty workspace result as empty even when other drafts exist', () => {
+  const harness = buildRenderHarness();
+  harness.setState({
+    currentDrafts: [],
+    allDrafts: [{ id: 'draft_other_workspace' }],
+    awaitingMoreResults: false,
+    syncing: false,
+    searchQuery: '',
+    resetGrid: true,
+    loadingDisplay: 'flex',
+    loadingText: 'Loading drafts...',
+  });
+
+  assert.equal(harness.shouldRerenderAfterSync(), true);
+});
+
 test('renderUVDraftsSyncUpdate removes stale empty state before appending real draft cards', () => {
   const harness = buildRenderHarness();
   harness.setState({
     currentDrafts: [],
+    allDrafts: [],
     awaitingMoreResults: false,
     searchQuery: '',
     resetGrid: true,
