@@ -520,6 +520,75 @@ test('getDraftRemixSource ignores malformed source ids', () => {
   });
 });
 
+test('getDraftRemixSource resolves nested post target candidates', () => {
+  const out = getDraftRemixSource({
+    creation_config: {
+      remix_target_post: { post: { id: 's_nested123' } },
+    },
+  });
+  assert.deepEqual(out, {
+    isRemix: true,
+    sourceType: 'post',
+    sourceId: 's_nested123',
+    sourcePostId: 's_nested123',
+    sourceDraftId: '',
+  });
+});
+
+test('getDraftRemixSource resolves draft target candidates', () => {
+  const out = getDraftRemixSource({
+    creation_config: {
+      remix_target_draft: { id: 'draft_src_1' },
+    },
+  });
+  assert.deepEqual(out, {
+    isRemix: true,
+    sourceType: 'draft',
+    sourceId: 'draft_src_1',
+    sourcePostId: '',
+    sourceDraftId: 'draft_src_1',
+  });
+});
+
+test('getDraftRemixSource prioritizes post source over draft source', () => {
+  const out = getDraftRemixSource({
+    remix_target_post_id: 's_post_first',
+    remix_target_draft_id: 'draft_second',
+  });
+  assert.equal(out.isRemix, true);
+  assert.equal(out.sourceType, 'post');
+  assert.equal(out.sourcePostId, 's_post_first');
+  assert.equal(out.sourceDraftId, '');
+});
+
+test('getDraftRemixSource returns non-remix shape for regular draft', () => {
+  const out = getDraftRemixSource({
+    id: 'draft_plain',
+    creation_config: { mode: 'compose' },
+  });
+  assert.deepEqual(out, {
+    isRemix: false,
+    sourceType: '',
+    sourceId: '',
+    sourcePostId: '',
+    sourceDraftId: '',
+  });
+});
+
+test('getDraftRemixSource ignores malformed source ids', () => {
+  const out = getDraftRemixSource({
+    remix_target_post_id: 'abc123',
+    remix_target_draft_id: 'bad id with spaces',
+  });
+  assert.deepEqual(out, {
+    isRemix: false,
+    sourceType: '',
+    sourceId: '',
+    sourcePostId: '',
+    sourceDraftId: '',
+  });
+});
+
 test('canTrimDraft and getDraftTrimUrl support storyboard and draft fallback', () => {
   assert.equal(canTrimDraft({ id: 'd1', storyboard_id: 'sb1' }), true);
   assert.equal(
