@@ -638,18 +638,63 @@
   }
 
   function isForcedFullHeightDraftCard(draft) {
+    const kind = String(draft?.kind || draft?.type || '').trim().toLowerCase();
+    const status = String(
+      draft?.status ||
+      draft?.state ||
+      draft?.pending_status ||
+      draft?.pending_task_status ||
+      ''
+    ).trim().toLowerCase();
     const statusBlob = getDraftLayoutStateBlob(draft);
+    const reasonValue = draft?.violation_reason;
+    const reasonText = typeof reasonValue === 'string'
+      ? reasonValue.toLowerCase()
+      : (() => {
+        if (!reasonValue || typeof reasonValue !== 'object') return '';
+        try {
+          return JSON.stringify(reasonValue).toLowerCase();
+        } catch {
+          return '';
+        }
+      })();
+    const hasMedia = !!(String(draft?.preview_url || '').trim() || String(draft?.thumbnail_url || '').trim());
+    const isContentViolation = kind === 'sora_content_violation'
+      || kind.includes('content_violation')
+      || kind.includes('policy_violation')
+      || kind.includes('moderation_violation')
+      || kind.includes('safety_violation')
+      || status === 'content_violation'
+      || status === 'sora_content_violation'
+      || status.includes('content_violation')
+      || status.includes('policy_violation')
+      || status.includes('moderation_violation')
+      || status.includes('safety_violation')
+      || statusBlob.includes('policy blocked');
+    const isContextViolation = kind === 'sora_context_violation'
+      || kind.includes('context_violation')
+      || status === 'context_violation'
+      || status === 'sora_context_violation'
+      || status.includes('context_violation');
+    const isProcessingError = kind === 'sora_processing_error'
+      || kind === 'processing_error'
+      || kind.includes('processing_error')
+      || kind.includes('processing_failed')
+      || kind.includes('generation_error')
+      || kind.endsWith('_error')
+      || status === 'processing_error'
+      || status.includes('processing_error')
+      || status.includes('processing_failed')
+      || status.includes('generation_error')
+      || status.endsWith('_error')
+      || status === 'failed'
+      || status.endsWith('_failed')
+      || (!!reasonText && !hasMedia && !isContentViolation && !isContextViolation);
     return draft?.is_pending === true
       || /\bpending\b/.test(statusBlob)
-      || statusBlob.includes('content_violation')
-      || statusBlob.includes('context_violation')
-      || statusBlob.includes('policy_violation')
-      || statusBlob.includes('moderation_violation')
-      || statusBlob.includes('safety_violation')
-      || statusBlob.includes('policy blocked')
-      || statusBlob.includes('processing_error')
-      || statusBlob.includes('processing_failed')
-      || statusBlob.includes('generation_error');
+      || isContentViolation
+      || isContextViolation
+      || isProcessingError;
   }
 
   function getDraftOrientationForGrouping(draft) {

@@ -451,6 +451,27 @@ test('multiple blocked landscape drafts do not collapse into a half-height run',
   );
 });
 
+test('processing error landscape drafts stay full height and break landscape runs', () => {
+  const drafts = [
+    { id: 'err', orientation: 'landscape', status: 'failed', failure_reason: 'Timeout talking to worker' },
+    { id: 'l1', orientation: 'landscape' },
+    { id: 'l2', orientation: 'landscape' },
+    { id: 'p1', orientation: 'portrait' },
+  ];
+
+  assert.equal(shouldGroupLandscapeDraftCard(drafts, 0), false);
+  assert.deepEqual(
+    planDraftGridRows(drafts, 4),
+    [
+      [
+        { kind: 'card', span: 1, draftIds: ['err'] },
+        { kind: 'landscape-run', span: 1, draftIds: ['l1', 'l2'] },
+        { kind: 'card', span: 1, draftIds: ['p1'] },
+      ],
+    ]
+  );
+});
+
 test('draft card padding uses normalized orientation while placeholders stay full height', () => {
   assert.equal(getDraftCardPaddingTop({ orientation: 'landscape' }), '56.25%');
   assert.equal(getDraftCardPaddingTop({ width: 1280, height: 720 }), '56.25%');
