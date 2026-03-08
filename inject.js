@@ -47,8 +47,23 @@
   const DRAFTS_RE = /\/(backend\/project_[a-z]+\/)?profile\/drafts($|\/|\?)/i;
   const CHARACTERS_RE = /\/(backend\/project_[a-z]+\/)?profile\/[^/]+\/characters($|\?)/i;
   const NF_CREATE_RE = /\/backend\/nf\/create/i;
+  const NF_BULK_CREATE_RE = /\/backend\/nf\/bulk_create/i;
   const NF_PENDING_V2_RE = /\/backend\/nf\/pending\/v2/i;
   const POST_DETAIL_RE = /\/(backend\/project_[a-z]+\/)?posts?\/[^/]+(\/(tree|children|ancestors|remix_posts|remixes))?(\?|$)/i;
+  const HARVEST_TEMPLATE_WAIT_MS = 5000;
+  const HARVEST_PAGE_LIMIT = 400;
+  const HARVEST_DRAFTS_PAGE_SIZE = 100;
+  const HARVEST_FEED_PAGE_SIZE = 30;
+  const HARVEST_BATCH_CHUNK_MAX = 200;
+  const HARVEST_BATCH_FLUSH_MS = 2000;
+  const DETAIL_LOOKUPS_PER_PAGE = 10;
+  const DETAIL_LOOKUPS_TOTAL_MAX = 300;
+  const DETAIL_LOOKUP_DELAY_MS = 35;
+  const HARVEST_SCROLL_STEP_PX = 450;
+  const HARVEST_SCROLL_BASE_DELAY_MS = 1500;
+  const HARVEST_SCROLL_MAX_DELAY_MS = 3500;
+  const HARVEST_SCROLL_NO_PROGRESS_LIMIT = 8;
+  const HARVEST_SCROLL_MAX_TICKS = 120;
 
   // Includes <21h (1260 minutes) plus a final special filter
   const FILTER_STEPS_MIN = [null, 180, 360, 720, 900, 1080, 1260, 'no_remixes'];
@@ -57,8 +72,12 @@
   const MIN_PER_H = 60;
   const MIN_PER_D = 1440;
   const MIN_PER_Y = 525600;
-  const HOT_FLAME_MAX_AGE_MIN = 3 * MIN_PER_D; // Flames apply within first 3 days
-  const ANALYZE_EXPIRES_WINDOW_MIN = 24 * MIN_PER_H; // Expires column always counts down to 24h post age
+  const HOT_FLAME_MAX_AGE_MIN = 24 * MIN_PER_H; // 4/5 flames only apply within first 24h
+  const REMIX_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="none" viewBox="0 0 20 20" style="pointer-events:none;">
+    <circle cx="10" cy="10" r="7" stroke="currentColor" stroke-width="1.556"></circle>
+    <path stroke="currentColor" stroke-linecap="round" stroke-width="1.556" d="M11.945 10c0-4.667-9.723-5.833-8.75 1.556"></path>
+    <path stroke="currentColor" stroke-linecap="round" stroke-width="1.556" d="M8.055 10c0 4.667 9.723 5.833 8.75-1.556"></path>
+  </svg>`;
 
   // Debug toggle for characters
   DEBUG.characters = false;
@@ -69,6 +88,8 @@
   const idToViews = new Map();
   const idToComments = new Map();
   const idToRemixes = new Map();
+  const idToIsRemix = new Map();
+  const idToRemixSourcePostId = new Map();
   const idToCameos = new Map(); // Array of cameo usernames
   const idToMeta = new Map(); // { ageMin, userHandle, createdAtMs }
   const idToDuration = new Map(); // Draft duration in seconds
@@ -76,6 +97,7 @@
   const idToPrompt = new Map(); // Draft prompt text
   const idToDownloadUrl = new Map(); // Draft downloadable URL
   const idToViolation = new Map(); // Draft content violation status
+  const idToDraftIsRemix = new Map(); // Draft remix marker even when source id is unavailable
   const idToRemixTarget = new Map(); // Draft remix target post ID (if it's a remix of a post)
   const idToRemixTargetDraft = new Map(); // Draft remix target draft ID (if it's a remix of a draft)
   const taskToSourceDraft = new Map(); // task_id -> source draft gen ID (for draft remix tracking)
@@ -98,7 +120,7 @@
   const DRAFT_BUTTON_SPACING = 4; // px between buttons
   const SORA_DEFAULT_FPS = 30; // Sora standard framerate (fallback if API doesn't provide fps)
 
-  // == UV Drafts Page Constants ==
+  // == Creator Tools Page Constants ==
   let capturedAuthToken = null; // Captured from intercepted fetch requests
   let modelOverride = null; // Custom model override for create requests
   let uvDraftsPage = null;
@@ -122,7 +144,9 @@
     if (uvDraftsPage) return uvDraftsPage;
     const factory = window.SoraUVDraftsPageModule;
     if (typeof factory !== 'function') {
-      if (isUVDrafts()) requestUVDraftsScriptLoad();
+      if (isUVDrafts() || isDrafts() || String(location.search || '').includes('remix')) {
+        requestUVDraftsScriptLoad();
+      }
       return null;
     }
     uvDraftsPage = factory({ defaultFps: SORA_DEFAULT_FPS });
@@ -169,46 +193,19 @@
       ensureUVDraftsPage();
       startUVDraftsTitleGuard();
     }
+    if (isDrafts() || String(location.search || '').includes('remix')) {
+      checkPendingComposePrompt();
+    }
   });
-
-  function getFallbackUVDraftsDocumentTitle() {
-    const path = String(location.pathname || '');
-    if (!path.startsWith('/creatortools/')) return UV_DRAFTS_DOC_TITLE;
-    const slug = path.slice('/creatortools/'.length).split('/')[0];
-    if (!slug) return UV_DRAFTS_DOC_TITLE;
-    let decodedSlug = slug;
-    try {
-      decodedSlug = decodeURIComponent(slug);
-    } catch {}
-    const prettyTitle = decodedSlug
-      .trim()
-      .split('-')
-      .map((part) => part.trim())
-      .filter(Boolean)
-      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-      .join(' ');
-    return prettyTitle ? `${prettyTitle} - Sora` : UV_DRAFTS_DOC_TITLE;
-  }
-
-  function getDesiredUVDraftsDocumentTitle() {
-    try {
-      const moduleTitle = ensureUVDraftsPageModule()?.getDocumentTitle?.();
-      if (typeof moduleTitle === 'string' && moduleTitle.trim()) {
-        return moduleTitle.trim();
-      }
-    } catch {}
-    return getFallbackUVDraftsDocumentTitle();
-  }
 
   function setUVDraftsDocumentTitle() {
     try {
-      const desiredTitle = getDesiredUVDraftsDocumentTitle();
       const currentTitle = typeof document.title === 'string' ? document.title : '';
-      if (uvDraftsPrevDocTitle == null && currentTitle !== desiredTitle) {
+      if (uvDraftsPrevDocTitle == null && currentTitle !== UV_DRAFTS_DOC_TITLE) {
         uvDraftsPrevDocTitle = currentTitle;
       }
-      if (currentTitle !== desiredTitle) {
-        document.title = desiredTitle;
+      if (currentTitle !== UV_DRAFTS_DOC_TITLE) {
+        document.title = UV_DRAFTS_DOC_TITLE;
       }
     } catch {}
   }
@@ -253,6 +250,52 @@
     ensureUVDraftsPageModule()?.clearPendingCreateOverrides?.();
   }
 
+  function loadPendingCreateQueue() {
+    return ensureUVDraftsPageModule()?.loadPendingCreateQueue?.() || null;
+  }
+
+  function peekPendingCreateQueuePrompt() {
+    const out = ensureUVDraftsPageModule()?.peekPendingCreateQueuePrompt?.();
+    if (!out || typeof out !== 'object') {
+      return { prompt: '', remaining: 0, hasPrompt: false };
+    }
+    return out;
+  }
+
+  function advancePendingCreateQueuePrompt() {
+    const out = ensureUVDraftsPageModule()?.advancePendingCreateQueuePrompt?.();
+    if (!out || typeof out !== 'object') {
+      return { prompt: '', consumed: false, remaining: 0 };
+    }
+    return out;
+  }
+
+  function consumePendingCreateQueuePrompt() {
+    const out = ensureUVDraftsPageModule()?.consumePendingCreateQueuePrompt?.();
+    if (!out || typeof out !== 'object') {
+      return { prompt: '', consumed: false, remaining: 0 };
+    }
+    return out;
+  }
+
+  function loadPendingCreateBatchState() {
+    return ensureUVDraftsPageModule()?.loadPendingCreateBatchState?.() || {
+      status: 'idle',
+      awaitingRequest: false,
+      progress: { submitted: 0, total: 0 },
+      settings: null,
+      lastError: '',
+    };
+  }
+
+  function savePendingCreateBatchState(state) {
+    return ensureUVDraftsPageModule()?.savePendingCreateBatchState?.(state) || state;
+  }
+
+  function clearPendingCreateBatchState() {
+    return ensureUVDraftsPageModule()?.clearPendingCreateBatchState?.() || null;
+  }
+
   function applyComposerOverridesToCreateBody(bodyString, overrides) {
     const moduleApi = ensureUVDraftsPageModule();
     if (moduleApi?.applyComposerOverridesToCreateBody) {
@@ -261,11 +304,289 @@
     return bodyString;
   }
 
+  const UV_MODEL_TO_NATIVE_MODEL_ID = Object.freeze({
+    sora2: 'sy_8',
+    sora2pro: 'sy_ore',
+  });
+  const UV_RESOLUTION_TO_NATIVE_SIZE = Object.freeze({
+    standard: 'small',
+    high: 'large',
+  });
+  const UV_ALLOWED_ORIENTATION = new Set(['portrait', 'landscape', 'square']);
+
+  function normalizeCreateOverrideValues(overrides) {
+    if (!overrides || typeof overrides !== 'object') return null;
+    const out = {};
+    const takeTrimmed = (key, targetKey = key, lower = false) => {
+      const value = overrides[key];
+      if (typeof value !== 'string') return;
+      const trimmed = value.trim();
+      if (!trimmed) return;
+      out[targetKey] = lower ? trimmed.toLowerCase() : trimmed;
+    };
+
+    takeTrimmed('prompt');
+    takeTrimmed('model', 'modelAlias', true);
+    takeTrimmed('orientation', 'orientation', true);
+    takeTrimmed('resolution', 'resolution', true);
+    takeTrimmed('style');
+    takeTrimmed('mode', 'mode', true);
+
+    const seedRaw = overrides.seed;
+    if (typeof seedRaw === 'string' || Number.isFinite(Number(seedRaw))) {
+      const seed = String(seedRaw).replace(/[^\d]/g, '').slice(0, 10);
+      if (seed) out.seed = seed;
+    }
+
+    const durationSeconds = Number(overrides.durationSeconds);
+    if (Number.isFinite(durationSeconds) && durationSeconds > 0) {
+      out.durationSeconds = Math.floor(durationSeconds);
+    }
+
+    const nFrames = Number(overrides.nFrames);
+    if (Number.isFinite(nFrames) && nFrames > 0) {
+      out.nFrames = Math.floor(nFrames);
+    } else if (Number.isFinite(out.durationSeconds) && out.durationSeconds > 0) {
+      out.nFrames = Math.floor(out.durationSeconds * SORA_DEFAULT_FPS);
+    }
+
+    const gensCount = Number(overrides.gensCount);
+    if (Number.isFinite(gensCount) && gensCount > 0) {
+      out.gensCount = Math.max(1, Math.floor(gensCount));
+    }
+
+    if (!Object.keys(out).length) return null;
+    if (out.orientation && !UV_ALLOWED_ORIENTATION.has(out.orientation)) {
+      delete out.orientation;
+    }
+    return out;
+  }
+
+  function resolveNativeModelId(modelAlias) {
+    const alias = String(modelAlias || '').trim().toLowerCase();
+    if (!alias) return '';
+    if (/^sy_[a-z0-9]+$/i.test(alias)) return alias;
+    return UV_MODEL_TO_NATIVE_MODEL_ID[alias] || '';
+  }
+
+  function resolveNativeSize(resolution) {
+    const normalized = String(resolution || '').trim().toLowerCase();
+    if (!normalized) return '';
+    return UV_RESOLUTION_TO_NATIVE_SIZE[normalized] || '';
+  }
+
+  function applyCreateOverridesPreservingNativeShape(bodyString, overrides, options = {}) {
+    if (typeof bodyString !== 'string') return bodyString;
+    const normalized = normalizeCreateOverrideValues(overrides);
+    if (!normalized) return bodyString;
+    const isBulkRequest = options && options.isBulkRequest === true;
+
+    const addHintOnce = (basePrompt, label, value) => {
+      const base = String(basePrompt || '').trim();
+      const hint = `${label}: ${String(value || '').trim()}`;
+      if (!base || !hint.trim()) return base;
+      return base.includes(hint) ? base : `${base}\n\n${hint}`;
+    };
+
+    const applyToObject = (obj, allowFallbackPrompt) => {
+      if (!obj || typeof obj !== 'object') return false;
+      let changed = false;
+      const hasOwn = (target, key) => Object.prototype.hasOwnProperty.call(target, key);
+      const hasOwnRoot = (key) => hasOwn(obj, key);
+      const cfg = obj.creation_config && typeof obj.creation_config === 'object'
+        ? obj.creation_config
+        : null;
+
+      let styleApplied = false;
+      let seedApplied = false;
+
+      const nativeModel = resolveNativeModelId(normalized.modelAlias);
+      if (nativeModel) {
+        if (hasOwnRoot('model') || obj.model != null) {
+          if (obj.model !== nativeModel) {
+            obj.model = nativeModel;
+            changed = true;
+          }
+        }
+        if (cfg && (hasOwn(cfg, 'model') || hasOwnRoot('model'))) {
+          if (cfg.model !== nativeModel) {
+            cfg.model = nativeModel;
+            changed = true;
+          }
+        }
+      }
+
+      if (normalized.orientation) {
+        if (hasOwnRoot('orientation') || obj.orientation != null) {
+          if (obj.orientation !== normalized.orientation) {
+            obj.orientation = normalized.orientation;
+            changed = true;
+          }
+        }
+        if (cfg && hasOwn(cfg, 'orientation') && cfg.orientation !== normalized.orientation) {
+          cfg.orientation = normalized.orientation;
+          changed = true;
+        }
+      }
+
+      if (normalized.mode) {
+        if (hasOwnRoot('mode') || obj.mode != null) {
+          if (obj.mode !== normalized.mode) {
+            obj.mode = normalized.mode;
+            changed = true;
+          }
+        }
+      }
+
+      if (normalized.resolution) {
+        const nativeSize = resolveNativeSize(normalized.resolution);
+        if (nativeSize && (hasOwnRoot('size') || obj.size != null)) {
+          if (obj.size !== nativeSize) {
+            obj.size = nativeSize;
+            changed = true;
+          }
+        }
+        if (hasOwnRoot('resolution') && obj.resolution !== normalized.resolution) {
+          obj.resolution = normalized.resolution;
+          changed = true;
+        }
+        if (cfg && (hasOwn(cfg, 'resolution') || cfg.resolution != null) && cfg.resolution !== normalized.resolution) {
+          cfg.resolution = normalized.resolution;
+          changed = true;
+        }
+      }
+
+      if (Number.isFinite(normalized.nFrames) && normalized.nFrames > 0) {
+        if (hasOwnRoot('n_frames') || obj.n_frames != null) {
+          if (obj.n_frames !== normalized.nFrames) {
+            obj.n_frames = normalized.nFrames;
+            changed = true;
+          }
+        }
+        if (hasOwnRoot('duration_seconds') && obj.duration_seconds !== Math.floor(normalized.nFrames / SORA_DEFAULT_FPS)) {
+          obj.duration_seconds = Math.floor(normalized.nFrames / SORA_DEFAULT_FPS);
+          changed = true;
+        }
+        if (cfg && (hasOwn(cfg, 'n_frames') || cfg.n_frames != null) && cfg.n_frames !== normalized.nFrames) {
+          cfg.n_frames = normalized.nFrames;
+          changed = true;
+        }
+        if (cfg && hasOwn(cfg, 'duration_seconds')) {
+          const durationSeconds = Math.floor(normalized.nFrames / SORA_DEFAULT_FPS);
+          if (cfg.duration_seconds !== durationSeconds) {
+            cfg.duration_seconds = durationSeconds;
+            changed = true;
+          }
+        }
+      }
+
+      if (Number.isFinite(normalized.gensCount) && normalized.gensCount > 0) {
+        const desired = normalized.gensCount;
+        const shouldSetSamples = isBulkRequest || desired > 1 || hasOwnRoot('nsamples') || obj.nsamples != null;
+        if (shouldSetSamples && obj.nsamples !== desired) {
+          obj.nsamples = desired;
+          changed = true;
+        }
+      }
+
+      if (normalized.style) {
+        if (hasOwnRoot('style')) {
+          if (obj.style !== normalized.style) {
+            obj.style = normalized.style;
+            changed = true;
+          }
+          styleApplied = true;
+        }
+        if (cfg) {
+          if (cfg.style !== normalized.style) {
+            cfg.style = normalized.style;
+            changed = true;
+          }
+          styleApplied = true;
+        }
+      }
+
+      if (normalized.seed) {
+        if (hasOwnRoot('seed')) {
+          if (obj.seed !== normalized.seed) {
+            obj.seed = normalized.seed;
+            changed = true;
+          }
+          seedApplied = true;
+        }
+        if (hasOwnRoot('metadata')) {
+          const metadata = obj.metadata && typeof obj.metadata === 'object'
+            ? obj.metadata
+            : {};
+          if (obj.metadata !== metadata) {
+            obj.metadata = metadata;
+            changed = true;
+          }
+          if (metadata.seed !== Number(normalized.seed)) {
+            metadata.seed = Number(normalized.seed);
+            changed = true;
+          }
+          seedApplied = true;
+        }
+        if (cfg) {
+          if (cfg.seed !== normalized.seed) {
+            cfg.seed = normalized.seed;
+            changed = true;
+          }
+          seedApplied = true;
+        }
+      }
+
+      let finalPrompt = normalized.prompt
+        ? normalized.prompt
+        : (typeof obj.prompt === 'string' ? obj.prompt.trim() : '');
+      if (!styleApplied && normalized.style) {
+        finalPrompt = addHintOnce(finalPrompt, 'Style', normalized.style);
+      }
+      if (!seedApplied && normalized.seed) {
+        finalPrompt = addHintOnce(finalPrompt, 'Seed', normalized.seed);
+      }
+
+      if (finalPrompt) {
+        if (hasOwnRoot('prompt') || allowFallbackPrompt) {
+          if (obj.prompt !== finalPrompt) {
+            obj.prompt = finalPrompt;
+            changed = true;
+          }
+        }
+        if (cfg && hasOwn(cfg, 'prompt') && cfg.prompt !== finalPrompt) {
+          cfg.prompt = finalPrompt;
+          changed = true;
+        }
+      }
+
+      return changed;
+    };
+
+    try {
+      const parsed = JSON.parse(bodyString);
+      let changed = applyToObject(parsed, true);
+      if (typeof parsed.body === 'string') {
+        try {
+          const nested = JSON.parse(parsed.body);
+          if (applyToObject(nested, false)) {
+            parsed.body = JSON.stringify(nested);
+            changed = true;
+          }
+        } catch {}
+      }
+      return changed ? JSON.stringify(parsed) : bodyString;
+    } catch {
+      return bodyString;
+    }
+  }
+
   // == UI State ==
   let controlBar = null;
   let gatherTimerEl = null;
   let detailBadgeEl = null;
   let detailBadgeRetryInterval = null;
+  let draftDetailBadgeTimerId = null;
   let characterSortBtn = null;
   let characterSortMode = 'date'; // 'date', 'likes', 'cameos', 'likesPerDay'
   let charAutoLoadLastAttemptMs = 0;
@@ -277,6 +598,25 @@
   let gatherRefreshTimeoutId = null;
   let gatherCountdownIntervalId = null;
   let isGatheringActiveThisTab = false;
+  let harvestActive = false;
+  let harvestRunId = null;
+  let harvestCancelRequested = false;
+  let harvestStatusText = '';
+  const harvestTemplates = {
+    top: null,
+    profile: null,
+    drafts: null,
+  };
+  const harvestHeaderBank = {
+    authorization: null,
+    oaiDeviceId: null,
+    oaiLanguage: null,
+    updatedAt: 0,
+  };
+  let harvestDetailLookupsTotal = 0;
+  const harvestDomSeenKeys = new Set();
+  const harvestQueue = [];
+  let harvestFlushTimer = null;
 
   // Analyze (Top feed only)
   let analyzeActive = false;
@@ -325,6 +665,90 @@
   // Track route to detect same-tab navigation
   const routeKey = () => `${location.pathname}${location.search}`;
   let lastRouteKey = routeKey();
+  let batchAutomationTimerId = null;
+  const BATCH_AUTOMATION_INTERVAL_MS = 900;
+  const BATCH_ACTIVE_SLOTS_DEFAULT = 5;
+  const BATCH_SLOT_OBSERVER_STALE_MS = 30 * 1000;
+  const BATCH_SLOT_CAPACITY_BACKOFF_MS = 5000;
+  const BATCH_SLOT_CAPACITY_BACKOFF_MIN_MS = 30 * 1000;
+  const BATCH_SLOT_CAPACITY_BACKOFF_MAX_MS = 30000;
+  const BATCH_SLOT_REFRESH_POLL_MS = 2000;
+  const BATCH_SLOT_REFRESH_ENDPOINT = '/backend/nf/pending/v2';
+  const BATCH_DURATION_EMA_ALPHA = 0.25;
+  const BATCH_DURATION_DEFAULT_MS = 75 * 1000;
+  const BATCH_DURATION_STATS_MAX_SAMPLES = 400;
+  const BATCH_DURATION_MIN_SAMPLE_MS = 5000;
+  const BATCH_DURATION_MAX_SAMPLE_MS = 10 * 60 * 1000;
+  const BATCH_DURATION_TRACK_TTL_MS = BATCH_DURATION_MAX_SAMPLE_MS * 2;
+  const BATCH_DURATION_TRACK_MAX_ITEMS = 600;
+  const BATCH_DURATION_PROFILE_ANY = 'any|any';
+  const BATCH_SLOT_OBSERVER_MAX_LIMIT = 100;
+  const BATCH_RETRY_PUSHBACK_OPTIONS_SEC = Object.freeze([30, 60, 90, 120, 300]);
+  const BATCH_SLOT_HEADER_RE = /(limit|slot|concurr|generation|pending|active|max)/i;
+  const BATCH_SLOT_CAPACITY_ERROR_RE = /(limit|slot|concurr|too many|capacity|active generation|pending generation|max active|max pending|queue full|retry later)/i;
+  const BATCH_SLOT_TRANSIENT_400_RE = /(didn.t look right|hmmm|try again later|please try again)/i;
+  const BATCH_ACTIVE_COUNT_PATH_RE = /(active|pending|running|in_?progress|queue).*(count|total|size)|(?:count|total|size).*(active|pending|running|in_?progress|queue)/i;
+  const BATCH_ACTIVE_PENDING_STATUSES = new Set([
+    'pending',
+    'queued',
+    'queueing',
+    'enqueued',
+    'running',
+    'processing',
+    'in_progress',
+    'in-progress',
+    'starting',
+    'submitted',
+    'waiting',
+    'retrying',
+    'active',
+  ]);
+  const BATCH_LIMIT_EXACT_KEYS = new Set([
+    'max_active_generations',
+    'active_generations_limit',
+    'max_pending_generations',
+    'pending_generations_limit',
+    'max_concurrent_generations',
+    'concurrent_generations_limit',
+    'max_generation_slots',
+    'generation_slot_limit',
+    'slot_limit',
+    'slots_limit',
+    'max_slots',
+    'max_active_slots',
+    'active_slot_limit',
+    'concurrency_limit',
+  ]);
+  const BATCH_ACTIVE_COUNT_EXACT_KEYS = new Set([
+    'active_generations_count',
+    'pending_generations_count',
+    'running_generations_count',
+    'queued_generations_count',
+    'active_count',
+    'pending_count',
+    'running_count',
+    'queued_count',
+    'in_progress_count',
+    'inprogress_count',
+  ]);
+  const pendingBatchSlotObserver = {
+    observedActive: 0,
+    observedLimit: null,
+    updatedAt: 0,
+    optimisticActive: 0,
+    optimisticUpdatedAt: 0,
+    backoffUntilMs: 0,
+    manualBackoffUntilMs: 0,
+    source: '',
+  };
+  const DRAFT_DETAIL_BADGE_POLL_MS = 750;
+  const DRAFT_DETAIL_FETCH_RETRY_MS = 10000;
+  const pendingDraftDetailFetchIds = new Set();
+  const draftDetailLastFetchAt = new Map();
+  let pendingBatchSlotRefreshInFlight = false;
+  let pendingBatchSlotRefreshLastAt = 0;
+  const pendingBatchGenerationFirstSeen = new Map(); // id -> { firstSeenAt, lastSeenAt, profileKey }
+  const pendingBatchDurationStatsByProfile = new Map(); // profileKey -> { avgMs, samples, updatedAt }
 
   // == Utils ==
   const fmt = (n) =>
@@ -373,14 +797,6 @@
     const mTotal = Math.max(0, Math.floor(ageMin));
     if (mTotal <= 1) return 'Just now';
     return fmtAgeMin(ageMin);
-  }
-
-  function fmtHoursMinutesRemaining(ageMin) {
-    if (!Number.isFinite(ageMin)) return '—';
-    const totalMin = Math.max(0, Math.floor(ageMin));
-    const h = Math.floor(totalMin / MIN_PER_H);
-    const m = totalMin % MIN_PER_H;
-    return `${h}h ${m}m`;
   }
 
   function fmtRefreshCountdown(ms) {
@@ -434,7 +850,18 @@
   const isPost = () => /^\/p\/s_[A-Za-z0-9]+/i.test(location.pathname);
   const isDraftDetail = () => location.pathname === '/d' || location.pathname.startsWith('/d/');
   const isDraftEditor = () => location.pathname === '/de' || location.pathname.startsWith('/de/');
-  const isUVDrafts = () => location.pathname === '/creatortools' || location.pathname.startsWith('/creatortools');
+  const UV_DRAFTS_CANONICAL_PREFIX = '/creatortools';
+  const UV_DRAFTS_ROUTE_RE = /^\/creatortools(?:\/|$)/i;
+  const isUVDrafts = () => UV_DRAFTS_ROUTE_RE.test(String(location.pathname || ''));
+
+  function getCanonicalUVDraftsPath(pathname = location.pathname) {
+    const current = String(pathname || '').trim();
+    if (!current) return UV_DRAFTS_CANONICAL_PREFIX;
+    if (current === UV_DRAFTS_CANONICAL_PREFIX || current.startsWith(`${UV_DRAFTS_CANONICAL_PREFIX}/`)) {
+      return current;
+    }
+    return UV_DRAFTS_CANONICAL_PREFIX;
+  }
 
   const isTopFeed = () => {
     try {
@@ -459,13 +886,133 @@
 
   const isDrafts = () => location.pathname.startsWith('/drafts');
 
+  function getHarvestContextFromRoute(pathname = location.pathname, search = location.search) {
+    const p = String(pathname || '');
+    const s = String(search || '');
+    if (p.startsWith('/drafts')) return 'drafts';
+    if (p.startsWith('/profile')) return 'profile';
+    if (p === '/explore') {
+      try {
+        const sp = new URLSearchParams(s.startsWith('?') ? s : `?${s}`);
+        if (sp.get('feed') === 'top') return 'top';
+      } catch {}
+    }
+    return null;
+  }
+
+  function pickHarvestTemplateForContext(context, templates = harvestTemplates) {
+    if (context === 'top') return templates.top || null;
+    if (context === 'drafts') return templates.drafts || null;
+    if (context === 'profile') return templates.profile || templates.top || null;
+    return null;
+  }
+
   function currentSIdFromURL() {
     const m = location.pathname.match(/^\/p\/(s_[A-Za-z0-9]+)/i);
     return m ? m[1] : null;
   }
+  function currentDraftIdFromURL() {
+    const m = location.pathname.match(/^\/d\/([A-Za-z0-9_-]+)/i);
+    return m ? normalizeId(m[1]) : null;
+  }
   function currentProfileHandleFromURL() {
     const m = location.pathname.match(/^\/profile\/(?:username\/)?([^\/?#]+)/i);
     return m ? m[1] : null;
+  }
+
+  function normalizeSoraPostId(value) {
+    if (value == null) return '';
+    const raw = normalizeId(String(value).trim());
+    if (!raw) return '';
+    if (/^s_[A-Za-z0-9_-]+$/i.test(raw)) return raw;
+    try {
+      const parsed = new URL(raw, location.origin);
+      const match = parsed.pathname.match(/\/p\/(s_[A-Za-z0-9_-]+)/i);
+      return match ? normalizeId(match[1]) : '';
+    } catch {
+      const match = raw.match(/\/p\/(s_[A-Za-z0-9_-]+)/i);
+      return match ? normalizeId(match[1]) : '';
+    }
+  }
+
+  function normalizeSoraDraftId(value) {
+    if (value == null) return '';
+    const raw = normalizeId(String(value).trim());
+    if (!raw) return '';
+    try {
+      const parsed = new URL(raw, location.origin);
+      const match = parsed.pathname.match(/\/d\/([A-Za-z0-9_-]+)/i);
+      if (match) return normalizeId(match[1]);
+    } catch {
+      const match = raw.match(/\/d\/([A-Za-z0-9_-]+)/i);
+      if (match) return normalizeId(match[1]);
+    }
+    return /^[A-Za-z0-9_-]+$/i.test(raw) ? raw : '';
+  }
+
+  function firstValidPostId(values) {
+    const list = Array.isArray(values) ? values : [];
+    for (const value of list) {
+      const id = normalizeSoraPostId(value);
+      if (id) return id;
+    }
+    return '';
+  }
+
+  function firstValidDraftId(values) {
+    const list = Array.isArray(values) ? values : [];
+    for (const value of list) {
+      const id = normalizeSoraDraftId(value);
+      if (id) return id;
+    }
+    return '';
+  }
+
+  function derivePostRemixSourceId(postLike, currentPostId, fallbackParentPostId) {
+    const post = postLike?.post || postLike || {};
+    const currentId = normalizeSoraPostId(currentPostId);
+    const parentId = firstValidPostId([post?.parent_post_id, fallbackParentPostId]);
+    const rootId = normalizeSoraPostId(post?.root_post_id);
+    const sourceCandidates = [
+      post?.source_post_id,
+      post?.remix_target_post_id,
+      post?.creation_config?.remix_target_post?.id,
+      post?.creation_config?.remix_target_post?.post?.id,
+      parentId,
+      rootId,
+    ];
+    for (const candidate of sourceCandidates) {
+      const normalized = normalizeSoraPostId(candidate);
+      if (!normalized) continue;
+      if (currentId && normalized === currentId) continue;
+      return normalized;
+    }
+    return '';
+  }
+
+  function setPostRemixState(postId, postLike, fallbackParentPostId) {
+    const normalizedPostId = normalizeSoraPostId(postId);
+    if (!normalizedPostId) return;
+    const post = postLike?.post || postLike || {};
+    const sourcePostId = derivePostRemixSourceId(post, normalizedPostId, fallbackParentPostId);
+    const explicitSignals = [
+      post?.source_post_id,
+      post?.remix_target_post_id,
+      post?.creation_config?.remix_target_post?.id,
+      post?.creation_config?.remix_target_post?.post?.id,
+      post?.parent_post_id,
+      post?.root_post_id,
+      fallbackParentPostId,
+    ];
+    const hasSignalId = explicitSignals.some((value) => {
+      const normalized = normalizeSoraPostId(value);
+      return !!(normalized && normalized !== normalizedPostId);
+    });
+    const hasBooleanSignal = post?.is_remix === true || post?.isRemix === true || post?.remix === true;
+    const isRemix = !!sourcePostId || hasSignalId || hasBooleanSignal;
+    idToIsRemix.set(normalizedPostId, isRemix);
+    if (sourcePostId) idToRemixSourcePostId.set(normalizedPostId, sourcePostId);
+    else idToRemixSourcePostId.delete(normalizedPostId);
   }
 
   // == Data extraction ==
@@ -888,14 +1435,6 @@
     const l = 42 - 12 * t;
     return `hsla(${h.toFixed(1)}, 100%, ${l.toFixed(1)}%, 0.85)`;
   }
-  function colorForFlameCount(flameCount) {
-    if (!Number.isFinite(flameCount) || flameCount <= 0) return null;
-    if (flameCount >= 4) return colorForAgeMin(0);
-    if (flameCount === 3) return colorForAgeMin(3 * MIN_PER_H);
-    if (flameCount === 2) return colorForAgeMin(9 * MIN_PER_H);
-    if (flameCount === 1) return colorForAgeMin(15 * MIN_PER_H);
-    return null;
-  }
   function isNearWholeDay(ageMin, windowMin = 15) {
     if (!Number.isFinite(ageMin) || ageMin < 0) return false;
     const nearest = Math.round(ageMin / 1440) * 1440;
@@ -903,23 +1442,30 @@
     return nearest >= 1440 && diff <= windowMin;
   }
   const greenEmblemColor = () => 'hsla(120, 85%, 32%, 0.92)';
-  function flameCountByRate(likes, ageMin) {
-    if (!Number.isFinite(ageMin) || ageMin <= 0 || ageMin >= HOT_FLAME_MAX_AGE_MIN) return 0;
-    const l = Number(likes);
-    if (!Number.isFinite(l) || l < 0) return 0;
-    if (l < 10) return 0;
-    if (l >= (5 * ageMin) / 6) return 5;
-    if (ageMin >= 10 && l >= (4 * ageMin) / 6) return 4;
-    if (l >= (3 * ageMin) / 6) return 3;
-    if (l >= (2 * ageMin) / 6) return 2;
-    if (l >= ageMin / 6) return 1;
-    return 0;
+  const FIRE_THRESHOLDS = [
+    { maxHours: 6, flames: '🔥🔥🔥' },
+    { maxHours: 12, flames: '🔥🔥' },
+    { maxHours: 18, flames: '🔥' },
+  ];
+  function fireForAge(ageMin) {
+    if (!Number.isFinite(ageMin)) return '';
+    const h = ageMin / MIN_PER_H;
+    for (const rule of FIRE_THRESHOLDS) {
+      if (h < rule.maxHours) return rule.flames;
+    }
+    return '';
   }
   function isSuperHotByRate(likes, ageMin) {
-    return flameCountByRate(likes, ageMin) === 5;
+    if (!Number.isFinite(ageMin) || ageMin <= 0 || ageMin >= HOT_FLAME_MAX_AGE_MIN) return false;
+    const l = Number(likes);
+    if (!Number.isFinite(l) || l < 0) return false;
+    return l >= 10 && l >= (5 * ageMin) / 6;
   }
   function isVeryHotByRate(likes, ageMin) {
-    return flameCountByRate(likes, ageMin) === 4;
+    if (!Number.isFinite(ageMin) || ageMin < 10 || ageMin >= HOT_FLAME_MAX_AGE_MIN) return false;
+    const l = Number(likes);
+    if (!Number.isFinite(l) || l < 0) return false;
+    return l >= (4 * ageMin) / 6;
   }
 
   // Tooltip (1s delayed, cursor-follow)
@@ -1471,11 +2017,7 @@
       });
 
       // Remix icon SVG (Sora's official remix icon)
-      remixBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="none" viewBox="0 0 20 20" style="pointer-events: none;">
-        <circle cx="10" cy="10" r="7" stroke="currentColor" stroke-width="1.556"></circle>
-        <path stroke="currentColor" stroke-linecap="round" stroke-width="1.556" d="M11.945 10c0-4.667-9.723-5.833-8.75 1.556"></path>
-        <path stroke="currentColor" stroke-linecap="round" stroke-width="1.556" d="M8.055 10c0 4.667 9.723 5.833 8.75-1.556"></path>
-      </svg>`;
+      remixBtn.innerHTML = REMIX_ICON_SVG;
 
       remixBtn.addEventListener('mouseenter', () => {
         remixBtn.style.background = 'rgba(0,0,0,0.9)';
@@ -1538,6 +2080,911 @@
     setTimeout(() => attemptFill(), 300);
   }
 
+  function navigateToUVDraftsRoute() {
+    if (uvDraftsPrevDocTitle == null && typeof document.title === 'string' && document.title.trim()) {
+      uvDraftsPrevDocTitle = document.title;
+    }
+    history.pushState({}, '', UV_DRAFTS_CANONICAL_PREFIX);
+    onRouteChange();
+  }
+
+  function getDraftsQueueUiSummary() {
+    const queue = loadPendingCreateQueue() || {};
+    const total = Math.max(0, toFiniteInt(queue.total, 0));
+    const remaining = Math.max(0, toFiniteInt(queue.remaining, 0));
+    const index = Math.max(0, toFiniteInt(queue.index, 0));
+    const nextNumber = total > 0 ? Math.min(total, Math.max(1, index + 1)) : 0;
+    if (total <= 0) {
+      return {
+        title: 'Queue: empty',
+        detail: 'Load prompts from Creator Tools to prepare batch creation.',
+        canResume: false,
+        canPushRetryBack: false,
+        retryCountdownSec: 0,
+      };
+    }
+
+    const batch = loadPendingCreateBatchState() || {};
+    const status = String(batch.status || 'idle').trim().toLowerCase();
+    const submitted = Math.max(0, toFiniteInt(batch?.progress?.submitted, 0));
+    const progressTotal = Math.max(submitted, toFiniteInt(batch?.progress?.total, 0));
+    const genPerPrompt = Math.max(1, toFiniteInt(batch?.settings?.gensCount, 1));
+    const slotAvailability = getPendingBatchSlotAvailability(batch);
+    const retryCountdownSec = Math.max(
+      0,
+      Math.ceil(Math.max(0, toFiniteInt(slotAvailability?.backoffUntilMs, 0) - Date.now()) / 1000)
+    );
+    const title = `Queue: ${remaining}/${total} remaining`;
+    let detail = `Batch not started. Next prompt #${nextNumber}.`;
+
+    if (status === 'armed' || status === 'running') {
+      const totalLabel = Math.max(progressTotal, total);
+      detail = `Batch ${status}: ${submitted}/${totalLabel} submitted (${genPerPrompt} gen/prompt). Next #${nextNumber}.`;
+      if (status === 'running' && batch.lastError) {
+        detail += ` ${truncateInline(batch.lastError, 90)}`;
+      }
+      if (retryCountdownSec > 0) {
+        detail += ` Next retry in ${retryCountdownSec}s.`;
+      }
+    } else if (status === 'paused_error') {
+      const totalLabel = Math.max(progressTotal, total);
+      const reason = batch.lastError ? ` Error: ${truncateInline(batch.lastError, 80)}.` : '';
+      detail = `Batch paused: ${submitted}/${totalLabel} submitted.${reason} Next #${nextNumber}. Click Resume Queue to continue.`;
+    } else if (status === 'completed') {
+      const totalLabel = Math.max(progressTotal, submitted);
+      detail = `Batch completed: ${submitted}/${totalLabel} submitted.`;
+    }
+
+    return {
+      title,
+      detail,
+      canResume: status === 'paused_error' && remaining > 0,
+      canPushRetryBack: (status === 'armed' || status === 'running') && remaining > 0,
+      retryCountdownSec,
+    };
+  }
+
+  function pushBackPendingBatchRetrySeconds(delaySeconds) {
+    const seconds = toFiniteInt(delaySeconds, 0);
+    if (seconds <= 0) return 0;
+    const batch = loadPendingCreateBatchState() || {};
+    const status = String(batch.status || '').trim().toLowerCase();
+    if (!(status === 'armed' || status === 'running')) return 0;
+    const queue = loadPendingCreateQueue() || {};
+    const remaining = Math.max(0, toFiniteInt(queue.remaining, 0));
+    if (remaining <= 0) return 0;
+    const now = Date.now();
+    const currentUntil = Math.max(
+      now,
+      toFiniteInt(pendingBatchSlotObserver.backoffUntilMs, 0),
+      toFiniteInt(pendingBatchSlotObserver.manualBackoffUntilMs, 0)
+    );
+    const nextUntil = currentUntil + seconds * 1000;
+    pendingBatchSlotObserver.manualBackoffUntilMs = nextUntil;
+    const retryCountdownSec = Math.max(1, Math.ceil((nextUntil - now) / 1000));
+    savePendingCreateBatchState({
+      ...batch,
+      lastError: `Retry postponed by user. Next retry in ${retryCountdownSec}s.`,
+    });
+    return retryCountdownSec;
+  }
+
+  function resumePausedBatchQueueFromDrafts() {
+    const queue = loadPendingCreateQueue() || {};
+    const remaining = Math.max(0, toFiniteInt(queue.remaining, 0));
+    if (remaining <= 0) return false;
+
+    const batch = loadPendingCreateBatchState() || {};
+    const status = String(batch.status || '').trim().toLowerCase();
+    if (status !== 'paused_error') return false;
+
+    const submitted = Math.max(0, toFiniteInt(batch?.progress?.submitted, 0));
+    const total = Math.max(
+      submitted,
+      toFiniteInt(batch?.progress?.total, 0),
+      submitted + remaining
+    );
+    pendingBatchSlotObserver.backoffUntilMs = 0;
+    pendingBatchSlotObserver.manualBackoffUntilMs = 0;
+
+    savePendingCreateBatchState({
+      ...batch,
+      status: 'running',
+      awaitingRequest: false,
+      startedAt: toFiniteInt(batch?.startedAt, 0) || Date.now(),
+      completedAt: 0,
+      progress: { submitted, total },
+      lastError: '',
+    });
+
+    setTimeout(tickPendingCreateBatchAutomation, 0);
+    return true;
+  }
+
+  function isPendingBatchStatus(status) {
+    const normalized = String(status || '').trim().toLowerCase();
+    return normalized === 'armed' || normalized === 'running';
+  }
+
+  function setNativeComposePrompt(promptText) {
+    const text = typeof promptText === 'string' ? promptText.trim() : '';
+    if (!text) return null;
+    const textarea = document.querySelector('textarea[placeholder="Describe your video..."]');
+    if (!textarea) return null;
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
+    if (!setter) return null;
+    setter.call(textarea, text);
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    textarea.dispatchEvent(new Event('change', { bubbles: true }));
+    return textarea;
+  }
+
+  function findNativeCreateButton() {
+    const textarea = document.querySelector('textarea[placeholder="Describe your video..."]');
+    const scopes = [];
+    if (textarea) {
+      scopes.push(textarea.closest('form'));
+      scopes.push(textarea.closest('[role="dialog"]'));
+      scopes.push(textarea.parentElement);
+    }
+    scopes.push(document);
+
+    for (const scope of scopes) {
+      if (!scope || typeof scope.querySelectorAll !== 'function') continue;
+      const buttons = Array.from(scope.querySelectorAll('button'))
+        .filter((btn) => !btn.disabled && btn.offsetParent !== null);
+      const exact = buttons.find((btn) => /^create$/i.test(String(btn.textContent || '').trim()));
+      if (exact) return exact;
+      const fuzzy = buttons.find((btn) => /create/i.test(String(btn.textContent || '')));
+      if (fuzzy) return fuzzy;
+    }
+    return null;
+  }
+
+  function toFiniteInt(value, fallback = 0) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return Math.floor(Number(fallback) || 0);
+    return Math.floor(n);
+  }
+
+  function normalizeBatchObserverKey(value) {
+    return String(value || '')
+      .trim()
+      .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+      .replace(/[^a-zA-Z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '')
+      .toLowerCase();
+  }
+
+  function clampBatchObservedLimit(value) {
+    const n = toFiniteInt(value, 0);
+    if (n <= 0) return null;
+    return Math.min(BATCH_SLOT_OBSERVER_MAX_LIMIT, n);
+  }
+
+  function clampBatchObservedActive(value) {
+    const n = toFiniteInt(value, 0);
+    if (n <= 0) return 0;
+    return Math.min(n, BATCH_SLOT_OBSERVER_MAX_LIMIT * 4);
+  }
+
+  function normalizeBatchPendingStatus(status) {
+    const raw = String(status || '').trim().toLowerCase();
+    return raw;
+  }
+
+  function isActiveBatchPendingStatus(status) {
+    return BATCH_ACTIVE_PENDING_STATUSES.has(normalizeBatchPendingStatus(status));
+  }
+
+  function getBatchSubmissionSlotCost(batchState) {
+    const gensCount = Number(batchState?.settings?.gensCount);
+    if (!Number.isFinite(gensCount) || gensCount <= 0) return 1;
+    return Math.max(1, Math.floor(gensCount));
+  }
+
+  function normalizeBatchDurationModel(value) {
+    const raw = String(value || '').trim().toLowerCase();
+    if (!raw) return 'any';
+    const compact = raw.replace(/[^a-z0-9]+/g, '');
+    if (compact === 'sora2pro' || compact === 'syore' || compact.includes('sora2pro')) return 'sora2pro';
+    if (compact === 'sora2' || compact === 'sy8' || compact.includes('sora2')) return 'sora2';
+    if (/^sy[a-z0-9]+$/.test(compact)) return compact;
+    return compact || 'any';
+  }
+
+  function normalizeBatchDurationResolution(resolutionValue, sizeValue, widthValue, heightValue) {
+    const resolutionRaw = String(resolutionValue || '').trim().toLowerCase();
+    const sizeRaw = String(sizeValue || '').trim().toLowerCase();
+    const resolutionCompact = resolutionRaw.replace(/[^a-z0-9]+/g, '');
+    const sizeCompact = sizeRaw.replace(/[^a-z0-9]+/g, '');
+
+    if (
+      resolutionCompact === 'high' ||
+      resolutionCompact === 'large' ||
+      resolutionCompact === 'hd' ||
+      resolutionCompact.includes('high')
+    ) {
+      return 'high';
+    }
+    if (
+      resolutionCompact === 'standard' ||
+      resolutionCompact === 'small' ||
+      resolutionCompact === 'sd' ||
+      resolutionCompact.includes('standard')
+    ) {
+      return 'standard';
+    }
+
+    if (sizeCompact === 'large' || sizeCompact === 'high' || sizeCompact === 'hd') return 'high';
+    if (sizeCompact === 'small' || sizeCompact === 'standard' || sizeCompact === 'sd') return 'standard';
+
+    const width = Number(widthValue);
+    const height = Number(heightValue);
+    const maxSide = Math.max(width, height);
+    if (Number.isFinite(maxSide) && maxSide > 0) {
+      return maxSide >= 1080 ? 'high' : 'standard';
+    }
+    return 'any';
+  }
+
+  function parseBatchDurationProfileKey(profileKey) {
+    const raw = String(profileKey || '').trim().toLowerCase();
+    if (!raw || !raw.includes('|')) {
+      return { model: 'any', resolution: 'any' };
+    }
+    const [modelRaw, resolutionRaw] = raw.split('|', 2);
+    return {
+      model: normalizeBatchDurationModel(modelRaw),
+      resolution: normalizeBatchDurationResolution(resolutionRaw),
+    };
+  }
+
+  function buildBatchDurationProfileKey(modelValue, resolutionValue) {
+    const model = normalizeBatchDurationModel(modelValue);
+    const resolution = normalizeBatchDurationResolution(resolutionValue);
+    return `${model}|${resolution}`;
+  }
+
+  function normalizePendingBatchGenerationId(value) {
+    if (value == null) return '';
+    const id = String(value).trim();
+    if (!id) return '';
+    return id;
+  }
+
+  function resolvePendingBatchProfileKey(task, generation = null) {
+    const taskCfg = task?.creation_config && typeof task.creation_config === 'object' ? task.creation_config : null;
+    const genCfg =
+      generation?.creation_config && typeof generation.creation_config === 'object'
+        ? generation.creation_config
+        : null;
+    const model = normalizeBatchDurationModel(
+      generation?.model ||
+      genCfg?.model ||
+      task?.model ||
+      taskCfg?.model ||
+      ''
+    );
+    const resolution = normalizeBatchDurationResolution(
+      generation?.resolution ||
+      genCfg?.resolution ||
+      task?.resolution ||
+      taskCfg?.resolution ||
+      '',
+      generation?.size ||
+      genCfg?.size ||
+      task?.size ||
+      taskCfg?.size ||
+      '',
+      generation?.width || genCfg?.width || task?.width || taskCfg?.width,
+      generation?.height || genCfg?.height || task?.height || taskCfg?.height
+    );
+    return `${model}|${resolution}`;
+  }
+
+  function collectActivePendingGenerationEntries(payload) {
+    const items = extractPendingTaskItems(payload);
+    if (!Array.isArray(items) || items.length === 0) return [];
+    const out = [];
+    const hasGenerationTasks = items.some((item) => !!item && typeof item === 'object' && Array.isArray(item.generations));
+
+    if (hasGenerationTasks) {
+      for (let taskIndex = 0; taskIndex < items.length; taskIndex += 1) {
+        const task = items[taskIndex];
+        if (!task || typeof task !== 'object') continue;
+        const taskStatus = normalizeBatchPendingStatus(task.status);
+        const taskId = normalizePendingBatchGenerationId(task.id || task.task_id || task.uuid);
+        const taskProfileKey = resolvePendingBatchProfileKey(task, null);
+        const generations = Array.isArray(task.generations) ? task.generations : [];
+        if (generations.length === 0) {
+          if (!isActiveBatchPendingStatus(taskStatus) || !taskId) continue;
+          out.push({ id: `task:${taskId}`, profileKey: taskProfileKey });
+          continue;
+        }
+        for (let genIndex = 0; genIndex < generations.length; genIndex += 1) {
+          const generation = generations[genIndex];
+          if (!generation || typeof generation !== 'object') continue;
+          const genStatus = normalizeBatchPendingStatus(generation.status);
+          if (!(isActiveBatchPendingStatus(genStatus) || (!genStatus && isActiveBatchPendingStatus(taskStatus)))) {
+            continue;
+          }
+          const generationId = normalizePendingBatchGenerationId(
+            generation.id ||
+            generation.generation_id ||
+            generation.draft_id ||
+            generation.video_id ||
+            generation.uuid ||
+            generation.task_generation_id
+          );
+          const fallbackId = taskId ? `${taskId}:gen:${genIndex}` : '';
+          const trackingId = generationId || fallbackId;
+          if (!trackingId) continue;
+          out.push({
+            id: trackingId,
+            profileKey: resolvePendingBatchProfileKey(task, generation),
+          });
+        }
+      }
+      return out;
+    }
+
+    for (let index = 0; index < items.length; index += 1) {
+      const item = items[index];
+      if (!item || typeof item !== 'object') continue;
+      if (!isActiveBatchPendingStatus(item.status)) continue;
+      const id = normalizePendingBatchGenerationId(item.id || item.generation_id || item.draft_id || item.uuid);
+      if (!id) continue;
+      out.push({ id, profileKey: resolvePendingBatchProfileKey(item, null) });
+    }
+    return out;
+  }
+
+  function updatePendingBatchDurationStat(profileKey, sampleMs, now) {
+    const key = String(profileKey || BATCH_DURATION_PROFILE_ANY);
+    const prev = pendingBatchDurationStatsByProfile.get(key);
+    const sample = Math.round(sampleMs);
+    if (prev && Number.isFinite(prev.avgMs) && prev.avgMs > 0) {
+      const avgMs = Math.round(prev.avgMs + BATCH_DURATION_EMA_ALPHA * (sample - prev.avgMs));
+      const samples = Math.min(BATCH_DURATION_STATS_MAX_SAMPLES, Math.max(1, toFiniteInt(prev.samples, 1) + 1));
+      pendingBatchDurationStatsByProfile.set(key, {
+        avgMs,
+        samples,
+        updatedAt: now,
+      });
+      return;
+    }
+    pendingBatchDurationStatsByProfile.set(key, {
+      avgMs: sample,
+      samples: 1,
+      updatedAt: now,
+    });
+  }
+
+  function recordPendingBatchDurationSample(profileKey, durationMs, now = Date.now()) {
+    if (!Number.isFinite(durationMs)) return;
+    const sample = Math.round(durationMs);
+    if (sample < BATCH_DURATION_MIN_SAMPLE_MS || sample > BATCH_DURATION_MAX_SAMPLE_MS) return;
+    const parsed = parseBatchDurationProfileKey(profileKey);
+    const keys = new Set([
+      `${parsed.model}|${parsed.resolution}`,
+      `${parsed.model}|any`,
+      `any|${parsed.resolution}`,
+      BATCH_DURATION_PROFILE_ANY,
+    ]);
+    for (const key of keys) {
+      updatePendingBatchDurationStat(key, sample, now);
+    }
+  }
+
+  function prunePendingBatchGenerationTracking(now = Date.now()) {
+    const staleBefore = now - BATCH_DURATION_TRACK_TTL_MS;
+    for (const [id, tracked] of pendingBatchGenerationFirstSeen.entries()) {
+      const lastSeenAt = toFiniteInt(tracked?.lastSeenAt, 0);
+      if (lastSeenAt > 0 && lastSeenAt < staleBefore) {
+        pendingBatchGenerationFirstSeen.delete(id);
+      }
+    }
+    if (pendingBatchGenerationFirstSeen.size <= BATCH_DURATION_TRACK_MAX_ITEMS) return;
+    const rows = Array.from(pendingBatchGenerationFirstSeen.entries())
+      .sort((a, b) => toFiniteInt(a[1]?.lastSeenAt, 0) - toFiniteInt(b[1]?.lastSeenAt, 0));
+    const overflow = pendingBatchGenerationFirstSeen.size - BATCH_DURATION_TRACK_MAX_ITEMS;
+    for (let i = 0; i < overflow; i += 1) {
+      pendingBatchGenerationFirstSeen.delete(rows[i][0]);
+    }
+  }
+
+  function updatePendingBatchDurationLearningFromPayload(payload, now = Date.now()) {
+    const activeEntries = collectActivePendingGenerationEntries(payload);
+    const inferredActive = clampBatchObservedActive(countActivePendingFromPayload(payload));
+    if (activeEntries.length === 0 && inferredActive > 0) {
+      prunePendingBatchGenerationTracking(now);
+      return;
+    }
+    const activeIds = new Set();
+    for (const entry of activeEntries) {
+      const id = normalizePendingBatchGenerationId(entry?.id);
+      if (!id || activeIds.has(id)) continue;
+      activeIds.add(id);
+      const profileKey = String(entry?.profileKey || BATCH_DURATION_PROFILE_ANY);
+      const tracked = pendingBatchGenerationFirstSeen.get(id);
+      if (tracked) {
+        tracked.lastSeenAt = now;
+        if (
+          (!tracked.profileKey || tracked.profileKey === BATCH_DURATION_PROFILE_ANY) &&
+          profileKey !== BATCH_DURATION_PROFILE_ANY
+        ) {
+          tracked.profileKey = profileKey;
+        }
+      } else {
+        pendingBatchGenerationFirstSeen.set(id, {
+          firstSeenAt: now,
+          lastSeenAt: now,
+          profileKey,
+        });
+      }
+    }
+
+    for (const [id, tracked] of pendingBatchGenerationFirstSeen.entries()) {
+      if (activeIds.has(id)) continue;
+      const firstSeenAt = toFiniteInt(tracked?.firstSeenAt, 0);
+      if (firstSeenAt > 0) {
+        const durationMs = Math.max(0, now - firstSeenAt);
+        recordPendingBatchDurationSample(tracked?.profileKey, durationMs, now);
+      }
+      pendingBatchGenerationFirstSeen.delete(id);
+    }
+    prunePendingBatchGenerationTracking(now);
+  }
+
+  function getPendingBatchDefaultDurationMs(profileKey) {
+    const parsed = parseBatchDurationProfileKey(profileKey);
+    if (parsed.model === 'sora2pro' && parsed.resolution === 'high') return 150 * 1000;
+    if (parsed.model === 'sora2pro') return 110 * 1000;
+    if (parsed.model === 'sora2' && parsed.resolution === 'high') return 95 * 1000;
+    if (parsed.model === 'sora2') return 70 * 1000;
+    if (parsed.resolution === 'high') return 100 * 1000;
+    return BATCH_DURATION_DEFAULT_MS;
+  }
+
+  function getPendingBatchDurationEstimateMs(batchState) {
+    const model = normalizeBatchDurationModel(
+      batchState?.settings?.model || batchState?.settings?.modelAlias || ''
+    );
+    const resolution = normalizeBatchDurationResolution(
+      batchState?.settings?.resolution || '',
+      batchState?.settings?.size || ''
+    );
+    const profileKey = buildBatchDurationProfileKey(model, resolution);
+    const parsed = parseBatchDurationProfileKey(profileKey);
+    const keys = [
+      `${parsed.model}|${parsed.resolution}`,
+      `${parsed.model}|any`,
+      `any|${parsed.resolution}`,
+      BATCH_DURATION_PROFILE_ANY,
+    ];
+    for (const key of keys) {
+      const stat = pendingBatchDurationStatsByProfile.get(key);
+      const avgMs = Number(stat?.avgMs);
+      if (Number.isFinite(avgMs) && avgMs > 0) {
+        return Math.max(BATCH_DURATION_MIN_SAMPLE_MS, Math.min(BATCH_DURATION_MAX_SAMPLE_MS, Math.round(avgMs)));
+      }
+    }
+    return getPendingBatchDefaultDurationMs(profileKey);
+  }
+
+  function computePendingBatchCapacityBackoffMs(batchState, availability = null) {
+    const slotAvailability = availability || getPendingBatchSlotAvailability(batchState);
+    const slotLimit = Math.max(1, toFiniteInt(slotAvailability?.limit, BATCH_ACTIVE_SLOTS_DEFAULT));
+    const slotCost = Math.max(1, getBatchSubmissionSlotCost(batchState));
+    const estimatedDurationMs = getPendingBatchDurationEstimateMs(batchState);
+    const estimatedTimeToFreeSlotMs = estimatedDurationMs / slotLimit;
+    const scaled = estimatedTimeToFreeSlotMs * slotCost;
+    const backoffMs = Number.isFinite(scaled) && scaled > 0 ? scaled : BATCH_SLOT_CAPACITY_BACKOFF_MS;
+    return Math.max(
+      BATCH_SLOT_CAPACITY_BACKOFF_MIN_MS,
+      Math.min(BATCH_SLOT_CAPACITY_BACKOFF_MAX_MS, Math.round(backoffMs))
+    );
+  }
+
+  function extractPendingTaskItems(payload) {
+    if (Array.isArray(payload)) return payload;
+    if (!payload || typeof payload !== 'object') return [];
+    if (Array.isArray(payload.items)) return payload.items;
+    if (Array.isArray(payload.tasks)) return payload.tasks;
+    if (payload.data && typeof payload.data === 'object') {
+      if (Array.isArray(payload.data.items)) return payload.data.items;
+      if (Array.isArray(payload.data.tasks)) return payload.data.tasks;
+    }
+    return [];
+  }
+
+  function countActivePendingFromPayload(payload) {
+    const items = extractPendingTaskItems(payload);
+    if (!Array.isArray(items) || items.length === 0) return 0;
+    const hasGenerationTasks = items.some((item) => !!item && typeof item === 'object' && Array.isArray(item.generations));
+    let active = 0;
+
+    if (hasGenerationTasks) {
+      for (const task of items) {
+        if (!task || typeof task !== 'object') continue;
+        const taskStatus = normalizeBatchPendingStatus(task.status);
+        const generations = Array.isArray(task.generations) ? task.generations : [];
+        if (generations.length === 0) {
+          if (isActiveBatchPendingStatus(taskStatus)) active += 1;
+          continue;
+        }
+        let taskActive = 0;
+        for (const generation of generations) {
+          if (!generation || typeof generation !== 'object') continue;
+          const genStatus = normalizeBatchPendingStatus(generation.status);
+          if (isActiveBatchPendingStatus(genStatus) || (!genStatus && isActiveBatchPendingStatus(taskStatus))) {
+            taskActive += 1;
+          }
+        }
+        active += taskActive;
+      }
+      return clampBatchObservedActive(active);
+    }
+
+    for (const item of items) {
+      if (!item || typeof item !== 'object') continue;
+      if (isActiveBatchPendingStatus(item.status)) active += 1;
+    }
+    return clampBatchObservedActive(active);
+  }
+
+  function forEachNumericField(root, visitor, maxDepth = 5, maxNodes = 500) {
+    const stack = [{ value: root, path: '', key: '', depth: 0 }];
+    let visited = 0;
+    while (stack.length > 0 && visited < maxNodes) {
+      const { value, path, key, depth } = stack.pop();
+      visited += 1;
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        visitor(value, path, key);
+        continue;
+      }
+      if (!value || typeof value !== 'object') continue;
+      if (depth >= maxDepth) continue;
+      if (Array.isArray(value)) {
+        const cap = Math.min(value.length, 40);
+        for (let i = cap - 1; i >= 0; i -= 1) {
+          const childPath = path ? `${path}[${i}]` : `[${i}]`;
+          stack.push({ value: value[i], path: childPath, key: key || '', depth: depth + 1 });
+        }
+        continue;
+      }
+      const entries = Object.entries(value);
+      const cap = Math.min(entries.length, 80);
+      for (let i = cap - 1; i >= 0; i -= 1) {
+        const [childKey, childVal] = entries[i];
+        const childPath = path ? `${path}.${childKey}` : childKey;
+        stack.push({ value: childVal, path: childPath, key: String(childKey || '').toLowerCase(), depth: depth + 1 });
+      }
+    }
+  }
+
+  function inferBatchSlotLimitFromPayload(payload) {
+    if (!payload || typeof payload !== 'object') return null;
+    let best = null;
+    forEachNumericField(payload, (value, path, key) => {
+      const candidate = clampBatchObservedLimit(value);
+      if (!candidate) return;
+      const keyText = normalizeBatchObserverKey(key);
+      if (!BATCH_LIMIT_EXACT_KEYS.has(keyText)) return;
+      const pathText = String(path || '').toLowerCase();
+      const score = 100 - Math.min(pathText.length, 80);
+      if (!best || score > best.score || (score === best.score && candidate < best.value)) {
+        best = { value: candidate, score };
+      }
+    });
+    return best ? best.value : null;
+  }
+
+  function inferActiveCountFromPayload(payload) {
+    const statusDerived = countActivePendingFromPayload(payload);
+    if (!payload || typeof payload !== 'object') return statusDerived;
+    let best = null;
+    forEachNumericField(payload, (value, path, key) => {
+      const candidate = clampBatchObservedActive(value);
+      if (!Number.isFinite(candidate) || candidate < 0) return;
+      const keyText = normalizeBatchObserverKey(key);
+      const pathText = String(path || '').toLowerCase();
+      if (!BATCH_ACTIVE_COUNT_PATH_RE.test(pathText) && !BATCH_ACTIVE_COUNT_EXACT_KEYS.has(keyText)) return;
+
+      let score = 0;
+      if (BATCH_ACTIVE_COUNT_EXACT_KEYS.has(keyText)) score += 7;
+      if (BATCH_ACTIVE_COUNT_PATH_RE.test(pathText)) score += 3;
+      if (/(active|running|in_?progress|pending|queue)/.test(keyText)) score += 2;
+      if (/(count|total|size)/.test(keyText)) score += 2;
+      if (score <= 0) return;
+
+      if (!best || score > best.score || (score === best.score && candidate > best.value)) {
+        best = { value: candidate, score };
+      }
+    });
+
+    if (!best) return statusDerived;
+    return Math.max(statusDerived, best.value);
+  }
+
+  function inferBatchSlotLimitFromHeaders(headersLike) {
+    if (!headersLike) return null;
+    let best = null;
+    const tryCandidate = (key, value) => {
+      const keyRaw = String(key || '').trim().toLowerCase();
+      if (!keyRaw || !BATCH_SLOT_HEADER_RE.test(keyRaw)) return;
+      const keyText = normalizeBatchObserverKey(keyRaw);
+      const hasStrongSlotSignal =
+        BATCH_LIMIT_EXACT_KEYS.has(keyText) ||
+        /(?:limit|max|quota).*(?:slot|concurr|active|pending)|(?:slot|concurr|active|pending).*(?:limit|max|quota)/.test(keyRaw);
+      if (!hasStrongSlotSignal) return;
+      const valueText = String(value || '');
+      const nums = valueText.match(/\d+/g) || [];
+      for (const rawNum of nums) {
+        const candidate = clampBatchObservedLimit(rawNum);
+        if (!candidate) continue;
+        let score = 0;
+        if (BATCH_LIMIT_EXACT_KEYS.has(keyText)) score += 7;
+        if (/(limit|max|quota|concurr|slot)/.test(keyText)) score += 3;
+        if (/(generation|pending|active)/.test(keyText)) score += 2;
+        if (score <= 0) continue;
+        if (!best || score > best.score || (score === best.score && candidate < best.value)) {
+          best = { value: candidate, score };
+        }
+      }
+    };
+
+    try {
+      if (typeof headersLike.forEach === 'function') {
+        headersLike.forEach((value, key) => tryCandidate(key, value));
+      } else if (typeof headersLike === 'string') {
+        const lines = headersLike.split(/\r?\n/);
+        for (const line of lines) {
+          const sep = line.indexOf(':');
+          if (sep <= 0) continue;
+          tryCandidate(line.slice(0, sep), line.slice(sep + 1));
+        }
+      } else if (typeof headersLike === 'object') {
+        for (const [key, value] of Object.entries(headersLike)) {
+          tryCandidate(key, value);
+        }
+      }
+    } catch {}
+
+    return best ? best.value : null;
+  }
+
+  function pruneBatchOptimisticActive(now = Date.now()) {
+    if (!pendingBatchSlotObserver.optimisticActive) return;
+    const sinceUpdate = now - toFiniteInt(pendingBatchSlotObserver.optimisticUpdatedAt, 0);
+    if (sinceUpdate <= BATCH_SLOT_OBSERVER_STALE_MS) return;
+    pendingBatchSlotObserver.optimisticActive = 0;
+    pendingBatchSlotObserver.optimisticUpdatedAt = 0;
+  }
+
+  function updatePendingBatchSlotObserverFromPayload(payload, observerMeta = null) {
+    const now = Date.now();
+    updatePendingBatchDurationLearningFromPayload(payload, now);
+    const prevObserved = clampBatchObservedActive(pendingBatchSlotObserver.observedActive);
+    const observedActive = clampBatchObservedActive(inferActiveCountFromPayload(payload));
+    let observedLimit = clampBatchObservedLimit(observerMeta && observerMeta.limitHint);
+    if (!observedLimit) {
+      observedLimit = inferBatchSlotLimitFromPayload(payload);
+    }
+
+    let optimisticActive = clampBatchObservedActive(pendingBatchSlotObserver.optimisticActive);
+    const absorbed = Math.max(0, observedActive - prevObserved);
+    if (absorbed > 0) {
+      optimisticActive = Math.max(0, optimisticActive - absorbed);
+    }
+
+    pendingBatchSlotObserver.observedActive = observedActive;
+    if (observedLimit) {
+      pendingBatchSlotObserver.observedLimit = observedLimit;
+    }
+    pendingBatchSlotObserver.updatedAt = now;
+    pendingBatchSlotObserver.optimisticActive = optimisticActive;
+    if (pendingBatchSlotObserver.backoffUntilMs && pendingBatchSlotObserver.backoffUntilMs <= now) {
+      pendingBatchSlotObserver.backoffUntilMs = 0;
+    }
+    if (observerMeta && observerMeta.source) {
+      pendingBatchSlotObserver.source = observerMeta.source;
+    }
+
+    pruneBatchOptimisticActive(now);
+  }
+
+  function getPendingBatchSlotAvailability(batchState) {
+    const now = Date.now();
+    pruneBatchOptimisticActive(now);
+    const observedLimit = clampBatchObservedLimit(pendingBatchSlotObserver.observedLimit);
+    const settingsLimit = clampBatchObservedLimit(
+      batchState?.settings?.maxActiveGenerations ||
+      batchState?.settings?.activeGenerationLimit ||
+      batchState?.settings?.concurrencyLimit
+    );
+    const limit = observedLimit || settingsLimit || BATCH_ACTIVE_SLOTS_DEFAULT;
+    const observerFresh = (now - toFiniteInt(pendingBatchSlotObserver.updatedAt, 0)) <= BATCH_SLOT_OBSERVER_STALE_MS;
+    const observedActive = observerFresh ? clampBatchObservedActive(pendingBatchSlotObserver.observedActive) : 0;
+    const optimisticActive = clampBatchObservedActive(pendingBatchSlotObserver.optimisticActive);
+    const active = clampBatchObservedActive(observedActive + optimisticActive);
+    let autoBackoffUntilMs = Math.max(0, toFiniteInt(pendingBatchSlotObserver.backoffUntilMs, 0));
+    if (autoBackoffUntilMs && autoBackoffUntilMs <= now) {
+      autoBackoffUntilMs = 0;
+      pendingBatchSlotObserver.backoffUntilMs = 0;
+    }
+    let manualBackoffUntilMs = Math.max(0, toFiniteInt(pendingBatchSlotObserver.manualBackoffUntilMs, 0));
+    if (manualBackoffUntilMs && manualBackoffUntilMs <= now) {
+      manualBackoffUntilMs = 0;
+      pendingBatchSlotObserver.manualBackoffUntilMs = 0;
+    }
+    const backoffUntilMs = Math.max(autoBackoffUntilMs, manualBackoffUntilMs);
+    return {
+      limit,
+      active,
+      available: Math.max(0, limit - active),
+      backoffUntilMs,
+    };
+  }
+
+  function notePendingBatchCreateAccepted(batchState) {
+    const slots = getBatchSubmissionSlotCost(batchState);
+    if (!slots) return;
+    const now = Date.now();
+    pruneBatchOptimisticActive(now);
+    pendingBatchSlotObserver.optimisticActive = clampBatchObservedActive(
+      pendingBatchSlotObserver.optimisticActive + slots
+    );
+    pendingBatchSlotObserver.optimisticUpdatedAt = now;
+    pendingBatchSlotObserver.backoffUntilMs = 0;
+    pendingBatchSlotObserver.manualBackoffUntilMs = 0;
+  }
+
+  function notePendingBatchCapacityBackoff(batchState) {
+    const availability = getPendingBatchSlotAvailability(batchState);
+    const now = Date.now();
+    pendingBatchSlotObserver.optimisticActive = clampBatchObservedActive(
+      Math.max(pendingBatchSlotObserver.optimisticActive, availability.limit)
+    );
+    pendingBatchSlotObserver.optimisticUpdatedAt = now;
+    const backoffMs = computePendingBatchCapacityBackoffMs(batchState, availability);
+    const autoBackoffUntilMs = now + backoffMs;
+    pendingBatchSlotObserver.backoffUntilMs = autoBackoffUntilMs;
+    const effectiveBackoffUntilMs = Math.max(
+      autoBackoffUntilMs,
+      toFiniteInt(pendingBatchSlotObserver.manualBackoffUntilMs, 0)
+    );
+    return Math.max(0, effectiveBackoffUntilMs - now);
+  }
+
+  function refreshPendingBatchSlotObserver(reason = 'tick') {
+    try {
+      if (!isDrafts()) return;
+      const now = Date.now();
+      if (pendingBatchSlotRefreshInFlight) return;
+      if (now - pendingBatchSlotRefreshLastAt < BATCH_SLOT_REFRESH_POLL_MS) return;
+      pendingBatchSlotRefreshInFlight = true;
+      pendingBatchSlotRefreshLastAt = now;
+      fetch(`${location.origin}${BATCH_SLOT_REFRESH_ENDPOINT}`)
+        .catch(() => {})
+        .finally(() => {
+          pendingBatchSlotRefreshInFlight = false;
+        });
+      dlog('drafts', 'queued pending/v2 refresh', { reason });
+    } catch {}
+  }
+
+  async function classifyPendingBatchCreateFailure(res, batchState = null) {
+    const status = Number(res?.status || 0);
+    let message = `HTTP ${status || 0}`;
+    let payloadText = '';
+
+    try {
+      const clone = typeof res?.clone === 'function' ? res.clone() : null;
+      if (clone) {
+        const contentType = String(clone.headers?.get?.('content-type') || '').toLowerCase();
+        if (contentType.includes('application/json') || contentType.includes('+json')) {
+          const data = await clone.json().catch(() => null);
+          if (data && typeof data === 'object') {
+            const rawMessage = data?.error?.message || data?.message || data?.detail || data?.reason || data?.error_code || data?.code;
+            if (rawMessage) payloadText = String(rawMessage);
+            else payloadText = JSON.stringify(data);
+          }
+        } else {
+          payloadText = String(await clone.text().catch(() => ''));
+        }
+      }
+    } catch {}
+
+    payloadText = truncateInline(payloadText, 140);
+    if (payloadText) message = `${message} ${payloadText}`;
+    const haystack = `${status} ${payloadText}`.toLowerCase();
+    const availability = getPendingBatchSlotAvailability(batchState || {});
+    const activeAtOrNearLimit = availability.active >= Math.max(1, availability.limit - 1);
+    const likelyTransient400 = status === 400 && (BATCH_SLOT_TRANSIENT_400_RE.test(haystack) || activeAtOrNearLimit);
+    const isCapacity =
+      status === 429 ||
+      status === 503 ||
+      ((status === 400 || status === 409) && (BATCH_SLOT_CAPACITY_ERROR_RE.test(haystack) || likelyTransient400));
+
+    return { status, isCapacity, message: message.trim() };
+  }
+
+  function tickPendingCreateBatchAutomation() {
+    if (!isDrafts()) return;
+    const batch = loadPendingCreateBatchState();
+    if (!isPendingBatchStatus(batch?.status)) return;
+    if (batch.awaitingRequest === true) return;
+
+    const queue = loadPendingCreateQueue() || {};
+    const remaining = Number(queue.remaining || 0);
+    if (remaining <= 0) {
+      pendingBatchSlotObserver.backoffUntilMs = 0;
+      pendingBatchSlotObserver.manualBackoffUntilMs = 0;
+      clearPendingCreateBatchState();
+      return;
+    }
+
+    const peek = peekPendingCreateQueuePrompt();
+    const prompt = typeof peek?.prompt === 'string' ? peek.prompt.trim() : '';
+    if (!prompt) {
+      pendingBatchSlotObserver.backoffUntilMs = 0;
+      pendingBatchSlotObserver.manualBackoffUntilMs = 0;
+      clearPendingCreateBatchState();
+      return;
+    }
+    const slotCost = getBatchSubmissionSlotCost(batch);
+    const slotAvailability = getPendingBatchSlotAvailability(batch);
+    const observerAgeMs = Date.now() - toFiniteInt(pendingBatchSlotObserver.updatedAt, 0);
+    if (observerAgeMs >= BATCH_SLOT_REFRESH_POLL_MS || slotAvailability.available < slotCost || slotAvailability.backoffUntilMs > Date.now()) {
+      refreshPendingBatchSlotObserver('automation_tick');
+    }
+    if (slotAvailability.backoffUntilMs > Date.now()) return;
+    if (slotAvailability.available < slotCost) return;
+
+    const textarea = setNativeComposePrompt(prompt);
+    if (!textarea) return;
+    const createBtn = findNativeCreateButton();
+    if (!createBtn) return;
+
+    try {
+      createBtn.click();
+    } catch {
+      return;
+    }
+
+    const submitted = Number(batch?.progress?.submitted || 0);
+    const total = Math.max(
+      Number(batch?.progress?.total || 0),
+      submitted + Math.max(remaining, 0)
+    );
+    savePendingCreateBatchState({
+      ...batch,
+      status: 'running',
+      awaitingRequest: true,
+      startedAt: Number(batch?.startedAt || 0) || Date.now(),
+      progress: {
+        submitted,
+        total,
+      },
+      lastError: '',
+    });
+  }
+
+  function startPendingCreateBatchAutomation() {
+    if (batchAutomationTimerId) return;
+    refreshPendingBatchSlotObserver('automation_start');
+    batchAutomationTimerId = setInterval(tickPendingCreateBatchAutomation, BATCH_AUTOMATION_INTERVAL_MS);
+  }
+
+  function stopPendingCreateBatchAutomation() {
+    if (!batchAutomationTimerId) return;
+    clearInterval(batchAutomationTimerId);
+    batchAutomationTimerId = null;
+    pendingBatchSlotRefreshInFlight = false;
+  }
+
   function createPill(parent, text, tooltipText, tooltipEnabled = true) {
     if (!text) return null;
     const pill = document.createElement('span');
@@ -1566,14 +3013,56 @@
     return pill;
   }
 
+  function createRemixIndicatorPill(parent, options = {}) {
+    if (!parent) return null;
+    const href = typeof options.href === 'string' ? options.href.trim() : '';
+    const tooltipText = typeof options.tooltipText === 'string' ? options.tooltipText : '';
+    const useLink = !!href;
+    const el = document.createElement(useLink ? 'a' : 'span');
+    el.className = 'sora-uv-pill sora-uv-pill-remix';
+    Object.assign(el.style, {
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      minWidth: '24px',
+      height: '24px',
+      borderRadius: '999px',
+      background: 'rgba(37,37,37,0.7)',
+      color: '#fff',
+      lineHeight: '1',
+      userSelect: 'none',
+      backdropFilter: 'blur(8px)',
+      WebkitBackdropFilter: 'blur(8px)',
+      boxShadow:
+        'inset 0 0 1px rgba(0,0,0,0.10), inset 0 0 1px rgba(255,255,255,0.50), 0 2px 20px rgba(0,0,0,0.25)',
+      textDecoration: 'none',
+      cursor: useLink ? 'pointer' : 'not-allowed',
+    });
+    el.innerHTML = REMIX_ICON_SVG;
+    if (useLink) {
+      el.href = href;
+      el.addEventListener('click', (event) => {
+        event.stopPropagation();
+      });
+    } else {
+      el.style.opacity = '0.72';
+      el.setAttribute('aria-disabled', 'true');
+      el.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      });
+    }
+    parent.appendChild(el);
+    attachTooltip(el, tooltipText, !!tooltipText);
+    return el;
+  }
+
   function badgeStateFor(likes, ageMin) {
-    const flameCount = flameCountByRate(likes, ageMin);
     return {
-      flameCount,
-      isSuperHot: flameCount === 5,
-      isVeryHot: flameCount === 4,
+      isSuperHot: isSuperHotByRate(likes, ageMin),
+      isVeryHot: isVeryHotByRate(likes, ageMin),
       isNearDay: isNearWholeDay(ageMin),
-      isHot: flameCount > 0,
+      isHot: likes >= 25,
     };
   }
 
@@ -1582,38 +3071,22 @@
     const ageMin = meta.ageMin;
     const likes = idToLikes.get(id) ?? 0;
     const state = badgeStateFor(likes, ageMin);
-    if (state.isHot) return colorForFlameCount(state.flameCount);
+    if (state.isSuperHot) return colorForAgeMin(0);
+    if (state.isVeryHot) return colorForAgeMin(0);
     if (state.isNearDay) return greenEmblemColor();
+    if (state.isHot) return colorForAgeMin(ageMin);
     return null;
   }
-function badgeEmojiFor(id, meta) {
+  function badgeEmojiFor(id, meta) {
     if (!meta) return '';
     const ageMin = meta.ageMin;
     const likes = idToLikes.get(id) ?? 0;
     const state = badgeStateFor(likes, ageMin);
-    return state.flameCount > 0 ? '🔥'.repeat(state.flameCount) : '';
-  }
-
-  function likesPerMinute(likes, ageMin) {
-    const likesNum = Number(likes);
-    const ageNum = Number(ageMin);
-    if (!Number.isFinite(likesNum) || likesNum < 0) return null;
-    if (!Number.isFinite(ageNum) || ageNum < 0) return null;
-    // Avoid division-by-zero at post creation time; treat first minute as 1m.
-    return likesNum / Math.max(ageNum, 1);
-  }
-
-  function viewsPerMinute(views, ageMin) {
-    const viewsNum = Number(views);
-    const ageNum = Number(ageMin);
-    if (!Number.isFinite(viewsNum) || viewsNum < 0) return null;
-    if (!Number.isFinite(ageNum) || ageNum < 0) return null;
-    return viewsNum / Math.max(ageNum, 1);
-  }
-
-  function formatPerMinute(rate) {
-    if (!Number.isFinite(rate) || rate < 0) return '';
-    return rate.toFixed(2);
+    if (state.isSuperHot) return '🔥🔥🔥🔥🔥';
+    if (state.isVeryHot) return '🔥🔥🔥🔥';
+    if (state.isNearDay) return '📝';
+    if (state.isHot) return fireForAge(ageMin);
+    return '';
   }
 
   function formatPostedAtLocal(tsMs) {
@@ -1662,9 +3135,11 @@ function badgeEmojiFor(id, meta) {
 
 
   function addBadge(card, views, meta) {
-    if (views == null && !meta) return;
-    const badge = ensureBadge(card);
     const id = extractIdFromCard(card);
+    if (!id) return;
+    const hasRemixIndicator = idToIsRemix.get(id) === true;
+    if (views == null && !meta && !hasRemixIndicator) return;
+    const badge = ensureBadge(card);
     const likes = idToLikes.get(id) ?? 0;
     const ageMin = meta?.ageMin;
     const isSuperHot = isSuperHotByRate(likes, ageMin);
@@ -1677,7 +3152,8 @@ function badgeEmojiFor(id, meta) {
 
     // Normalize IR/RR displays
     const irDisp = irRaw ? (parseFloat(irRaw) === 0 ? '0%' : irRaw) : null;
-    const rrDisp = rrRaw == null ? null : +rrRaw === 0 ? '0%' : `${Number(rrRaw).toFixed(1)}%`;
+    const rrDisp =
+      rrRaw == null ? null : +rrRaw === 0 ? '0%' : (rrRaw.endsWith('.00') ? rrRaw.slice(0, -3) : rrRaw) + '%';
 
     // Impact Score
     let impactStr = null;
@@ -1694,25 +3170,18 @@ function badgeEmojiFor(id, meta) {
     const irStr = irDisp ? `${irDisp} IR` : null;
     const rrStr = rrDisp ? `${rrDisp} RR` : null;
     const ageStr = Number.isFinite(ageMin) ? fmtAgeMinPill(ageMin) : null;
-    const flamesStr = badgeEmojiFor(id, meta);
-    const timeEmojiStr = ageStr || null;
-    const lpmVal = likesPerMinute(likes, ageMin);
-    const vpmVal = viewsPerMinute(totalViews, ageMin);
-    const rateBaseStr = Number.isFinite(vpmVal) ? `${vpmVal.toFixed(1)} VPM` : null;
-    const rateStr = rateBaseStr || null;
-    const flamesTip = flamesStr ? 'Hotness based on likes and post age' : null;
-    const lpmTip = rateBaseStr
-      ? [
-          Number.isFinite(vpmVal) ? `${vpmVal.toFixed(2)} views/minute` : null,
-          `${lpmVal.toFixed(2)} likes/minute`
-        ].filter(Boolean).join(' and ')
-      : null;
+    const emojiStr = badgeEmojiFor(id, meta);
+    const timeEmojiStr = (ageStr || emojiStr) ? [ageStr || '', emojiStr || ''].filter(Boolean).join(' ') : null;
+    const isRemix = idToIsRemix.get(id) === true;
+    const remixSourcePostId = normalizeSoraPostId(idToRemixSourcePostId.get(id));
+    const remixHref = remixSourcePostId ? `${location.origin}/p/${encodeURIComponent(remixSourcePostId)}` : '';
+    const remixStateKey = isRemix ? (remixSourcePostId ? `src:${remixSourcePostId}` : 'src:missing') : 'none';
 
     const bg = badgeBgFor(id, meta);
     badge.style.background = 'transparent';
     const pillBg = bg || 'rgba(37,37,37,0.7)';
 
-    const newKey = JSON.stringify([durationStr, viewsStr, irStr, rrStr, impactStr, timeEmojiStr, rateStr, flamesStr, pillBg]);
+    const newKey = JSON.stringify([remixStateKey, durationStr, viewsStr, irStr, rrStr, impactStr, timeEmojiStr, pillBg]);
     if (badge.dataset.key === newKey) {
       badge.style.boxShadow = 'none';
       return;
@@ -1720,16 +3189,19 @@ function badgeEmojiFor(id, meta) {
     badge.dataset.key = newKey;
 
     badge.innerHTML = '';
+    if (isRemix) {
+      const remixEl = createRemixIndicatorPill(badge, {
+        href: remixHref,
+        tooltipText: remixHref ? 'Watch parent/seed video' : 'Parent/seed video unavailable',
+      });
+      if (remixEl) remixEl.style.background = pillBg;
+    }
     if (viewsStr) {
       let tooltip = `${fmtInt(uv)} Unique Views`;
       if (impactStr) {
         tooltip += ` – ${fmtInt(totalViews)} Total Views – ${impactStr} Views Per Person`;
       }
       const el = createPill(badge, viewsStr, tooltip, true);
-      el.style.background = pillBg;
-    }
-    if (rateStr) {
-      const el = createPill(badge, rateStr, lpmTip, true);
       el.style.background = pillBg;
     }
     if (irStr) {
@@ -1746,6 +3218,11 @@ function badgeEmojiFor(id, meta) {
       const tipFinal = tip || (nearDay ? 'This gen was posted at this time of day!' : null);
       const el = createPill(badge, timeEmojiStr, tipFinal, !!tipFinal);
       el.style.background = pillBg;
+      if (isSuperHot) {
+        el.style.boxShadow = '0 0 10px 3px hsla(0, 100%, 50%, 0.7)';
+      } else if (isVeryHot) {
+        el.style.boxShadow = '0 0 8px 2px hsla(0, 100%, 50%, 0.5)';
+      }
     }
     if (durationStr) {
       const dims = idToDimensions.get(id);
@@ -1766,16 +3243,7 @@ function badgeEmojiFor(id, meta) {
       const el = createPill(badge, `${durationStr}`, tooltip, true);
       el.style.background = pillBg;
     }
-    if (flamesStr) {
-      const el = createPill(badge, flamesStr, flamesTip, true);
-      el.style.background = pillBg;
-      if (isSuperHot) {
-        el.style.boxShadow = '0 0 10px 3px hsla(0, 100%, 50%, 0.7)';
-      } else if (isVeryHot) {
-        el.style.boxShadow = '0 0 8px 2px hsla(0, 100%, 50%, 0.5)';
-      }
-    }
-  }
+  } 
 
   function renderBadges() {
     ensureControlBar();
@@ -1889,6 +3357,73 @@ function badgeEmojiFor(id, meta) {
     return badge;
   }
 
+  function ensureDraftRemixIndicator(draftCard, draftId) {
+    if (!draftId) return null;
+    const isRemix = idToDraftIsRemix.get(draftId) === true || idToRemixTarget.has(draftId) || idToRemixTargetDraft.has(draftId);
+    let indicator = draftCard.querySelector('.sora-uv-draft-remix-indicator');
+
+    if (!isRemix) {
+      if (indicator) indicator.remove();
+      return null;
+    }
+
+    if (getComputedStyle(draftCard).position === 'static') draftCard.style.position = 'relative';
+
+    const sourcePostId = normalizeSoraPostId(idToRemixTarget.get(draftId));
+    const sourceDraftId = normalizeSoraDraftId(idToRemixTargetDraft.get(draftId));
+    const sourceHref = sourcePostId
+      ? `https://sora.chatgpt.com/p/${encodeURIComponent(sourcePostId)}`
+      : sourceDraftId
+        ? `https://sora.chatgpt.com/d/${encodeURIComponent(sourceDraftId)}`
+        : '';
+    const title = sourcePostId
+      ? 'Watch parent video'
+      : sourceDraftId
+        ? 'Watch seed video'
+        : 'Parent/seed video unavailable';
+
+    if (indicator) indicator.remove();
+    indicator = document.createElement(sourceHref ? 'a' : 'span');
+    indicator.className = 'sora-uv-draft-remix-indicator';
+    Object.assign(indicator.style, {
+      position: 'absolute',
+      top: `${DRAFT_BUTTON_MARGIN}px`,
+      left: `${DRAFT_BUTTON_MARGIN}px`,
+      width: `${DRAFT_BUTTON_SIZE}px`,
+      height: `${DRAFT_BUTTON_SIZE}px`,
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      borderRadius: '999px',
+      background: 'rgba(0,0,0,0.75)',
+      color: '#fff',
+      zIndex: 9999,
+      backdropFilter: 'blur(4px)',
+      WebkitBackdropFilter: 'blur(4px)',
+      textDecoration: 'none',
+      boxShadow: '0 2px 8px rgba(0,0,0,0.3)',
+      cursor: sourceHref ? 'pointer' : 'not-allowed',
+      opacity: sourceHref ? '1' : '0.72',
+    });
+    indicator.innerHTML = REMIX_ICON_SVG;
+    indicator.setAttribute('aria-label', title);
+    attachTooltip(indicator, title, true);
+    if (sourceHref) {
+      indicator.href = sourceHref;
+      indicator.addEventListener('click', (event) => {
+        event.stopPropagation();
+      });
+    } else {
+      indicator.setAttribute('aria-disabled', 'true');
+      indicator.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      });
+    }
+    draftCard.appendChild(indicator);
+    return indicator;
+  }
+
 
   function renderDraftButtons() {
     if (!isDrafts()) return;
@@ -1907,6 +3442,7 @@ function badgeEmojiFor(id, meta) {
       const draftId = extractDraftIdFromCard(draftCard);
       if (!draftId) continue;
 
+      ensureDraftRemixIndicator(draftCard, draftId);
       ensureDurationBadge(draftCard, draftId);
       ensureCopyPromptButton(draftCard, draftId);
       ensureDownloadButton(draftCard, draftId);
@@ -1917,7 +3453,7 @@ function badgeEmojiFor(id, meta) {
     }
   }
 
-  // == Detail badge (post page only) ==
+  // == Detail badge (post + draft detail pages) ==
   
   function teardownDetailBadge() {
     if (detailBadgeRetryInterval) {
@@ -1930,6 +3466,24 @@ function badgeEmojiFor(id, meta) {
       } catch {}
     }
     detailBadgeEl = null;
+  }
+
+  function stopDraftDetailBadgeLoop() {
+    if (!draftDetailBadgeTimerId) return;
+    clearInterval(draftDetailBadgeTimerId);
+    draftDetailBadgeTimerId = null;
+  }
+
+  function startDraftDetailBadgeLoop() {
+    if (draftDetailBadgeTimerId) return;
+    renderDraftDetailBadge();
+    draftDetailBadgeTimerId = setInterval(() => {
+      if (!isDraftDetail()) {
+        stopDraftDetailBadgeLoop();
+        return;
+      }
+      renderDraftDetailBadge();
+    }, DRAFT_DETAIL_BADGE_POLL_MS);
   }
 
   // This function targets the visible video container
@@ -2076,7 +3630,8 @@ function badgeEmojiFor(id, meta) {
       const metrics = await responsePromise;
       if (metrics?.users) {
         // Helper function to load post data from a post object
-        const loadPostData = (post, postId) => {
+        const loadPostData = (post, postId, fallbackParentPostId = null) => {
+          setPostRemixState(postId, post, fallbackParentPostId);
           const latest = __sorauv_latestSnapshot(post.snapshots);
           if (latest) {
             // Only set values if they're not null/undefined
@@ -2168,7 +3723,7 @@ function badgeEmojiFor(id, meta) {
                   const remixId = remixPost.id || remixPost.post_id;
                   if (remixId === sid) {
                     // Pass the actual post object, not the wrapper
-                    loadPostData(remixPost, sid);
+                    loadPostData(remixPost, sid, parentId);
                     return; // Found and loaded remix
                   }
                 }
@@ -2282,6 +3837,127 @@ function badgeEmojiFor(id, meta) {
     }
   }
 
+  function draftDetailBadgeDataReady(draftId) {
+    const normalizedDraftId = normalizeSoraDraftId(draftId);
+    if (!normalizedDraftId) return false;
+    if (idToDuration.has(normalizedDraftId)) return true;
+    if (idToDraftIsRemix.has(normalizedDraftId)) return true;
+    if (idToRemixTarget.has(normalizedDraftId)) return true;
+    if (idToRemixTargetDraft.has(normalizedDraftId)) return true;
+    return false;
+  }
+
+  async function fetchDraftDetailDataIfNeeded(opts = {}) {
+    const draftId = normalizeSoraDraftId(opts?.draftId || currentDraftIdFromURL());
+    if (!draftId) return;
+    if (!opts?.force && draftDetailBadgeDataReady(draftId)) return;
+    if (pendingDraftDetailFetchIds.has(draftId)) return;
+    const now = Date.now();
+    const lastFetchAt = Number(draftDetailLastFetchAt.get(draftId) || 0);
+    if (!opts?.force && now - lastFetchAt < DRAFT_DETAIL_FETCH_RETRY_MS) return;
+    draftDetailLastFetchAt.set(draftId, now);
+    pendingDraftDetailFetchIds.add(draftId);
+    try {
+      const urls = [
+        `${location.origin}/backend/project_y/profile/drafts?limit=50`,
+        `${location.origin}/backend/profile/drafts?limit=50`,
+        `${location.origin}/backend/project_y/profile/drafts/${encodeURIComponent(draftId)}`,
+        `${location.origin}/backend/profile/drafts/${encodeURIComponent(draftId)}`,
+      ];
+      for (const url of urls) {
+        try {
+          const response = await fetch(url, {
+            method: 'GET',
+            credentials: 'include',
+            headers: { 'Accept': 'application/json' },
+          });
+          if (!response.ok) continue;
+          const json = await response.json();
+          processDraftsJson(json);
+          if (draftDetailBadgeDataReady(draftId)) break;
+        } catch {}
+      }
+    } finally {
+      pendingDraftDetailFetchIds.delete(draftId);
+    }
+  }
+
+  function renderDraftDetailBadge() {
+    if (!isDraftDetail()) {
+      teardownDetailBadge();
+      return;
+    }
+
+    const el = ensureDetailBadgeContainer();
+    if (!el) return;
+
+    const draftId = currentDraftIdFromURL();
+    if (!draftId) {
+      el.innerHTML = '';
+      return;
+    }
+
+    if (!draftDetailBadgeDataReady(draftId)) {
+      fetchDraftDetailDataIfNeeded({ draftId }).catch(() => {});
+      if (pendingDraftDetailFetchIds.has(draftId)) renderDetailLoading(el);
+      else {
+        el.innerHTML = '';
+        el.dataset.key = '';
+      }
+      return;
+    }
+
+    const sourcePostId = normalizeSoraPostId(idToRemixTarget.get(draftId));
+    const sourceDraftId = normalizeSoraDraftId(idToRemixTargetDraft.get(draftId));
+    const isRemix = idToDraftIsRemix.get(draftId) === true || !!sourcePostId || !!sourceDraftId;
+    const remixHref = sourcePostId
+      ? `${location.origin}/p/${encodeURIComponent(sourcePostId)}`
+      : sourceDraftId
+        ? `${location.origin}/d/${encodeURIComponent(sourceDraftId)}`
+        : '';
+    const remixTooltip = sourcePostId
+      ? 'Watch parent video'
+      : sourceDraftId
+        ? 'Watch seed video'
+        : 'Parent/seed video unavailable';
+    const duration = idToDuration.get(draftId);
+    const durationStr = duration ? formatDuration(duration) : null;
+
+    if (!isRemix && !durationStr) {
+      el.innerHTML = '';
+      el.dataset.key = '';
+      return;
+    }
+
+    const remixStateKey = isRemix
+      ? (sourcePostId ? `p:${sourcePostId}` : sourceDraftId ? `d:${sourceDraftId}` : 'missing')
+      : 'none';
+    const newKey = JSON.stringify(['draft-detail', remixStateKey, durationStr || '']);
+    const hasPills = el.querySelectorAll('.sora-uv-pill').length > 0;
+    if (el.dataset.key === newKey && hasPills) return;
+    el.dataset.key = newKey;
+
+    el.innerHTML = '';
+    const pillBg = 'rgba(37,37,37,0.7)';
+    if (isRemix) {
+      const remixEl = createRemixIndicatorPill(el, {
+        href: remixHref,
+        tooltipText: remixTooltip,
+      });
+      if (remixEl) {
+        remixEl.style.background = pillBg;
+        remixEl.style.pointerEvents = 'auto';
+      }
+    }
+    if (durationStr) {
+      const durationEl = createPill(el, durationStr, `${durationStr} video`, true);
+      if (durationEl) {
+        durationEl.style.background = pillBg;
+        durationEl.style.pointerEvents = 'auto';
+      }
+    }
+  }
+
   function renderDetailBadge() {
     if (!isPost()) {
       teardownDetailBadge();
@@ -2379,7 +4055,7 @@ function badgeEmojiFor(id, meta) {
     const irRaw = commentsVal == null ? null : interactionRate(likes, comments, uv);
     const rrRaw = remixRate(likes, remixes);
     const irDisp = irRaw ? (parseFloat(irRaw) === 0 ? '0%' : irRaw) : null;
-    const rrDisp = rrRaw == null ? null : +rrRaw === 0 ? '0%' : `${Number(rrRaw).toFixed(1)}%`;
+    const rrDisp = rrRaw == null ? null : +rrRaw === 0 ? '0%' : (rrRaw.endsWith('.00') ? rrRaw.slice(0, -3) : rrRaw) + '%';
     
     // Impact Score
     let impactStr = null;
@@ -2398,19 +4074,12 @@ function badgeEmojiFor(id, meta) {
     const irStr = irDisp ? `${irDisp} IR` : null;
     const rrStr = rrDisp ? `${rrDisp} RR` : null;
     const ageStr = Number.isFinite(ageMin) ? fmtAgeMinPill(ageMin) : null;
-    const flamesStr = badgeEmojiFor(sid, meta);
-    const timeEmojiStr = ageStr || null;
-    const lpmVal = likesPerMinute(likes ?? 0, ageMin);
-    const vpmVal = viewsPerMinute(totalViews, ageMin);
-    const rateBaseStr = Number.isFinite(vpmVal) ? `${vpmVal.toFixed(1)} VPM` : null;
-    const rateStr = rateBaseStr || null;
-    const flamesTip = flamesStr ? 'Hotness based on likes and post age' : null;
-    const lpmTip = rateBaseStr
-      ? [
-          Number.isFinite(vpmVal) ? `${vpmVal.toFixed(2)} views/minute` : null,
-          `${lpmVal.toFixed(2)} likes/minute`
-        ].filter(Boolean).join(' and ')
-      : null;
+    const emojiStr = badgeEmojiFor(sid, meta);
+    const timeEmojiStr = (ageStr || emojiStr) ? [ageStr || '', emojiStr || ''].filter(Boolean).join(' ') : null;
+    const isRemix = idToIsRemix.get(sid) === true;
+    const remixSourcePostId = normalizeSoraPostId(idToRemixSourcePostId.get(sid));
+    const remixHref = remixSourcePostId ? `${location.origin}/p/${encodeURIComponent(remixSourcePostId)}` : '';
+    const remixStateKey = isRemix ? (remixSourcePostId ? `src:${remixSourcePostId}` : 'src:missing') : 'none';
 
     // Get duration if available
     let duration = idToDuration.get(sid);
@@ -2438,7 +4107,7 @@ function badgeEmojiFor(id, meta) {
     const durationStr = duration ? formatDuration(duration) : null;
 
     // Determine if we have any data to display
-    if (viewsStr == null && irStr == null && rrStr == null && impactStr == null && timeEmojiStr == null && durationStr == null && rateStr == null && !flamesStr) {
+    if (viewsStr == null && irStr == null && rrStr == null && impactStr == null && timeEmojiStr == null && durationStr == null && !isRemix) {
       el.innerHTML = '';
       return;
     }
@@ -2446,14 +4115,24 @@ function badgeEmojiFor(id, meta) {
     // Use a key to prevent unnecessary DOM updates - match feed badge key format
     const bg = badgeBgFor(sid, meta);
     const pillBg = bg || 'rgba(37,37,37,0.7)';
-    const newKey = JSON.stringify([durationStr, viewsStr, irStr, rrStr, impactStr, timeEmojiStr, rateStr, flamesStr, pillBg]);
+    const newKey = JSON.stringify([remixStateKey, durationStr, viewsStr, irStr, rrStr, impactStr, timeEmojiStr, pillBg]);
     const hasPills = el.querySelectorAll('.sora-uv-pill').length > 0;
     if (el.dataset.key === newKey && hasPills) return;
     el.dataset.key = newKey;
     
     el.innerHTML = ''; 
+
+    // 1. Remix Pill - match feed badge exactly
+    if (isRemix) {
+      const remixEl = createRemixIndicatorPill(el, {
+        href: remixHref,
+        tooltipText: remixHref ? 'Watch parent/seed video' : 'Parent/seed video unavailable',
+      });
+      remixEl.style.background = pillBg;
+      remixEl.style.pointerEvents = 'auto';
+    }
     
-    // 1. Views Pill - match feed badge exactly
+    // 2. Views Pill - match feed badge exactly
     if (viewsStr) {
       let tooltip = `${fmtInt(uv)} Unique Views`;
       if (impactStr) {
@@ -2464,13 +4143,6 @@ function badgeEmojiFor(id, meta) {
       metEl.style.pointerEvents = 'auto';
     }
     
-    // 2. VPM Pill
-    if (rateStr) {
-      const metEl = createPill(el, rateStr, lpmTip, true);
-      metEl.style.background = pillBg;
-      metEl.style.pointerEvents = 'auto';
-    }
-
     // 3. IR Pill - match feed badge exactly
     if (irStr) {
       const metEl = createPill(el, irStr, 'Likes + Comments relative to Unique Views', true);
@@ -2494,9 +4166,15 @@ function badgeEmojiFor(id, meta) {
       const timeEl = createPill(el, timeEmojiStr, tipFinal, !!tipFinal);
       timeEl.style.background = pillBg;
       timeEl.style.pointerEvents = 'auto';
+
+      if (isSuperHot) {
+        timeEl.style.boxShadow = '0 0 10px 3px hsla(0, 100%, 50%, 0.7)';
+      } else if (isVeryHot) {
+        timeEl.style.boxShadow = '0 0 8px 2px hsla(0, 100%, 50%, 0.5)';
+      }
     }
 
-    // 6. Duration Pill
+    // 6. Duration Pill - moved to end
     if (durationStr) {
       const dims = idToDimensions.get(sid);
       let modelName = '';
@@ -2516,18 +4194,6 @@ function badgeEmojiFor(id, meta) {
       const metEl = createPill(el, `${durationStr}`, tooltip, true);
       metEl.style.background = pillBg;
       metEl.style.pointerEvents = 'auto';
-    }
-
-    // 7. Flames Pill - always last
-    if (flamesStr) {
-      const flameEl = createPill(el, flamesStr, flamesTip, true);
-      flameEl.style.background = pillBg;
-      flameEl.style.pointerEvents = 'auto';
-      if (isSuperHot) {
-        flameEl.style.boxShadow = '0 0 10px 3px hsla(0, 100%, 50%, 0.7)';
-      } else if (isVeryHot) {
-        flameEl.style.boxShadow = '0 0 8px 2px hsla(0, 100%, 50%, 0.5)';
-      }
     }
 
     // Keep container pointerEvents: none to allow clicks to pass through to video controls, 
@@ -2738,7 +4404,6 @@ function badgeEmojiFor(id, meta) {
 
     const bar = document.createElement('div');
     bar.className = 'sora-uv-controls';
-    const BAR_RIGHT_DEFAULT_PX = 12;
     
     // Helper function to calculate top position based on scroll distance
     // Linear movement: starts at 42px (12px + 30px), moves to 8px over 30px of scroll
@@ -2774,7 +4439,7 @@ function badgeEmojiFor(id, meta) {
     Object.assign(bar.style, {
       position: 'fixed',
       top: getBarTopPosition(), // Start 30px lower (42px), move linearly to 12px
-      right: `${BAR_RIGHT_DEFAULT_PX}px`,
+      right: '12px',
       zIndex: 2147483640, // Lower than max to allow notifications (toasts) to be on top
       display: 'flex',
       gap: '8px',
@@ -2843,7 +4508,6 @@ function badgeEmojiFor(id, meta) {
     // Initial position update and watch for dynamically added buttons
     const tryUpdateFeedButton = () => {
       updateFeedButtonPosition();
-      syncActivityButtonDocking(bar, bar.style.display !== 'none' && !isDrafts());
     };
     
     // Try immediately and after a delay
@@ -2868,14 +4532,6 @@ function badgeEmojiFor(id, meta) {
     };
     window.addEventListener('scroll', handleScroll, { passive: true });
     bar._handleScroll = handleScroll;
-
-    const handleResize = () => {
-      updateBarPosition();
-      updateFeedButtonPosition();
-    };
-    window.addEventListener('resize', handleResize, { passive: true });
-    bar._handleResize = handleResize;
-
     bar._feedButtonTimers = [
       setTimeout(tryUpdateFeedButton, 100),
       setTimeout(tryUpdateFeedButton, 500),
@@ -2887,7 +4543,7 @@ function badgeEmojiFor(id, meta) {
     const buttonRow = document.createElement('div');
     Object.assign(buttonRow.style, {
       display: 'flex',
-      gap: '6px',
+      gap: '8px',
       background: 'transparent',
       justifyContent: 'center',
       alignItems: 'center',
@@ -3006,6 +4662,12 @@ function badgeEmojiFor(id, meta) {
     gatherBtn.style.display = 'none';
     buttonRow.appendChild(gatherBtn);
 
+    const harvestBtn = document.createElement('button');
+    makePill(harvestBtn, 'Harvest');
+    harvestBtn.classList.add('sora-uv-harvest-btn');
+    harvestBtn.style.display = 'none';
+    buttonRow.appendChild(harvestBtn);
+
     // Analyze (Top only; visibility handled later)
     analyzeBtn = document.createElement('button');
     makePill(analyzeBtn, 'Analyze');
@@ -3100,6 +4762,168 @@ function badgeEmojiFor(id, meta) {
     buttonRow.appendChild(bookmarksContainer);
 
     bar.appendChild(buttonRow);
+
+    const harvestStatusEl = document.createElement('div');
+    harvestStatusEl.className = 'sora-uv-harvest-status';
+    Object.assign(harvestStatusEl.style, {
+      display: 'none',
+      width: '100%',
+      textAlign: 'center',
+      fontSize: '11px',
+      color: 'rgba(255, 255, 255, 0.75)',
+      lineHeight: '1.2',
+      paddingTop: '2px',
+      background: 'transparent',
+    });
+    bar.appendChild(harvestStatusEl);
+
+    // Drafts queue panel (only visible on /drafts).
+    const draftsQueuePanel = document.createElement('div');
+    draftsQueuePanel.className = 'sora-uv-drafts-queue-panel';
+    Object.assign(draftsQueuePanel.style, {
+      display: 'none',
+      flexDirection: 'column',
+      width: '100%',
+      maxWidth: '360px',
+      gap: '8px',
+      padding: '10px',
+      borderRadius: '14px',
+      border: '1px solid rgba(255, 255, 255, 0.16)',
+      background: 'rgba(37, 37, 37, 0.55)',
+      backdropFilter: 'blur(22px) saturate(2)',
+      WebkitBackdropFilter: 'blur(22px) saturate(2)',
+    });
+
+    const draftsActionRow = document.createElement('div');
+    Object.assign(draftsActionRow.style, {
+      display: 'flex',
+      gap: '8px',
+      alignItems: 'center',
+      justifyContent: 'stretch',
+      width: '100%',
+    });
+
+    const openUVDraftsBtn = document.createElement('button');
+    makePill(openUVDraftsBtn, 'Open Creator Tools');
+    openUVDraftsBtn.classList.add('sora-uv-open-uv-drafts-btn');
+    Object.assign(openUVDraftsBtn.style, {
+      flex: '1',
+      justifyContent: 'center',
+    });
+    openUVDraftsBtn.onclick = () => {
+      navigateToUVDraftsRoute();
+    };
+
+    const resumeQueueBtn = document.createElement('button');
+    makePill(resumeQueueBtn, 'Resume Queue');
+    resumeQueueBtn.classList.add('sora-uv-resume-queue-btn');
+    Object.assign(resumeQueueBtn.style, {
+      display: 'none',
+      flex: '1',
+      justifyContent: 'center',
+    });
+    resumeQueueBtn.onclick = () => {
+      resumePausedBatchQueueFromDrafts();
+      if (typeof bar.updateDraftsQueueUi === 'function') bar.updateDraftsQueueUi();
+    };
+
+    draftsActionRow.appendChild(openUVDraftsBtn);
+    draftsActionRow.appendChild(resumeQueueBtn);
+    draftsQueuePanel.appendChild(draftsActionRow);
+
+    const draftsQueueTitle = document.createElement('div');
+    draftsQueueTitle.className = 'sora-uv-drafts-queue-title';
+    Object.assign(draftsQueueTitle.style, {
+      fontSize: '12px',
+      fontWeight: '700',
+      color: 'rgba(255, 255, 255, 0.96)',
+      lineHeight: '1.25',
+      letterSpacing: '0.01em',
+    });
+    draftsQueuePanel.appendChild(draftsQueueTitle);
+
+    const draftsQueueDetail = document.createElement('div');
+    draftsQueueDetail.className = 'sora-uv-drafts-queue-detail';
+    Object.assign(draftsQueueDetail.style, {
+      fontSize: '11px',
+      fontWeight: '500',
+      color: 'rgba(255, 255, 255, 0.78)',
+      lineHeight: '1.35',
+    });
+    draftsQueuePanel.appendChild(draftsQueueDetail);
+
+    const draftsRetryPanel = document.createElement('div');
+    draftsRetryPanel.className = 'sora-uv-drafts-retry-panel';
+    Object.assign(draftsRetryPanel.style, {
+      display: 'none',
+      flexDirection: 'column',
+      gap: '6px',
+      paddingTop: '4px',
+      borderTop: '1px solid rgba(255, 255, 255, 0.12)',
+    });
+
+    const draftsRetryCountdown = document.createElement('div');
+    draftsRetryCountdown.className = 'sora-uv-drafts-retry-countdown';
+    Object.assign(draftsRetryCountdown.style, {
+      fontSize: '11px',
+      fontWeight: '600',
+      color: 'rgba(255, 255, 255, 0.9)',
+      lineHeight: '1.25',
+    });
+    draftsRetryPanel.appendChild(draftsRetryCountdown);
+
+    const draftsRetryButtonsRow = document.createElement('div');
+    Object.assign(draftsRetryButtonsRow.style, {
+      display: 'flex',
+      flexWrap: 'wrap',
+      gap: '6px',
+      alignItems: 'center',
+    });
+    const draftsRetryDelayButtons = [];
+    for (const seconds of BATCH_RETRY_PUSHBACK_OPTIONS_SEC) {
+      const btn = document.createElement('button');
+      makePill(btn, `+${seconds}s`);
+      btn.classList.add('sora-uv-retry-delay-btn');
+      Object.assign(btn.style, {
+        fontSize: '11px',
+        padding: '4px 10px',
+        lineHeight: '1.1',
+      });
+      btn.onclick = () => {
+        pushBackPendingBatchRetrySeconds(seconds);
+        if (typeof bar.updateDraftsQueueUi === 'function') bar.updateDraftsQueueUi();
+      };
+      draftsRetryDelayButtons.push(btn);
+      draftsRetryButtonsRow.appendChild(btn);
+    }
+    draftsRetryPanel.appendChild(draftsRetryButtonsRow);
+    draftsQueuePanel.appendChild(draftsRetryPanel);
+
+    bar.appendChild(draftsQueuePanel);
+
+    bar.updateDraftsQueueUi = () => {
+      const onDrafts = isDrafts();
+      draftsQueuePanel.style.display = onDrafts ? 'flex' : 'none';
+      if (!onDrafts) return;
+      const summary = getDraftsQueueUiSummary();
+      draftsQueueTitle.textContent = summary.title;
+      draftsQueueDetail.textContent = summary.detail;
+      resumeQueueBtn.style.display = summary.canResume ? 'flex' : 'none';
+      resumeQueueBtn.disabled = !summary.canResume;
+      draftsRetryPanel.style.display = summary.canPushRetryBack ? 'flex' : 'none';
+      draftsRetryCountdown.textContent = `Next retry in ${summary.retryCountdownSec}s`;
+      for (const retryBtn of draftsRetryDelayButtons) {
+        retryBtn.disabled = !summary.canPushRetryBack;
+      }
+      openUVDraftsBtn.style.flex = summary.canResume ? '1' : '1 1 100%';
+    };
+    bar._draftsQueueUiIntervalId = setInterval(() => {
+      if (controlBar !== bar) return;
+      try {
+        bar.updateDraftsQueueUi();
+      } catch {}
+    }, 1000);
+    bar.updateDraftsQueueUi();
 
     // Gather controls
     const gatherControlsWrapper = document.createElement('div');
@@ -3257,6 +5081,13 @@ function badgeEmojiFor(id, meta) {
       toggleAnalyzeMode();
     };
 
+    harvestBtn.onclick = () => {
+      if (harvestBtn.disabled) return;
+      if (harvestActive) stopApiHarvestRun('cancelled');
+      else startApiHarvestRun();
+      syncHarvestControlState(bar);
+    };
+
     bookmarksBtn.onclick = (e) => {
       if (bookmarksBtn.disabled) return;
       e.stopPropagation();
@@ -3345,15 +5176,14 @@ function badgeEmojiFor(id, meta) {
 
       // Update label text; applyFilterLockState will no-op while gathering
       if (typeof bar.updateFilterLabel === 'function') bar.updateFilterLabel();
-      enforceControlButtonTypography(bar);
     };
 
     // Initial label + lock application
     bar.updateFilterLabel();
-    enforceControlButtonTypography(bar);
     
     // Set initial position based on current scroll
     updateBarPosition();
+    syncHarvestControlState(bar);
 
     document.documentElement.appendChild(bar);
     controlBar = bar;
@@ -3364,13 +5194,10 @@ function badgeEmojiFor(id, meta) {
     const bar = controlBar;
     if (!bar) return;
     try {
-      syncActivityButtonDocking(bar, false);
+      if (bar._draftsQueueUiIntervalId) clearInterval(bar._draftsQueueUiIntervalId);
     } catch {}
     try {
       if (bar._handleScroll) window.removeEventListener('scroll', bar._handleScroll);
-    } catch {}
-    try {
-      if (bar._handleResize) window.removeEventListener('resize', bar._handleResize);
     } catch {}
     try {
       if (bar._feedButtonObserver) bar._feedButtonObserver.disconnect();
@@ -3383,117 +5210,6 @@ function badgeEmojiFor(id, meta) {
       if (document.contains(bar)) bar.remove();
     } catch {}
     controlBar = null;
-  }
-
-  function findTopRightActivityButton() {
-    const vw = window.innerWidth || document.documentElement.clientWidth || 0;
-    const vh = window.innerHeight || document.documentElement.clientHeight || 0;
-    const maxTop = Math.min(180, Math.max(100, Math.round(vh * 0.35)));
-    const minLeft = Math.round(vw * 0.45);
-    const candidates = Array.from(document.querySelectorAll('button[aria-label="Activity"]'))
-      .filter((btn) => !(controlBar && controlBar.contains(btn)))
-      .map((btn) => ({ btn, rect: btn.getBoundingClientRect() }))
-      .filter(({ rect }) => (
-        rect.width > 0 &&
-        rect.height > 0 &&
-        rect.top >= -20 &&
-        rect.top <= maxTop &&
-        rect.left >= minLeft
-      ))
-      .sort((a, b) => (b.rect.right - a.rect.right) || (a.rect.top - b.rect.top));
-    return candidates[0]?.btn || null;
-  }
-
-  function undockActivityButton(bar) {
-    if (!bar) return;
-    const state = bar._activityDockState;
-    if (!state) return;
-    const node = state.node;
-    const parent = state.originalParent;
-    const nextSibling = state.originalNextSibling;
-    if (node && state.nodeMarginLeft != null) node.style.marginLeft = state.nodeMarginLeft;
-    if (node && state.nodeMarginRight != null) node.style.marginRight = state.nodeMarginRight;
-    if (node && parent && parent.isConnected) {
-      if (nextSibling && nextSibling.parentNode === parent) parent.insertBefore(node, nextSibling);
-      else parent.appendChild(node);
-    }
-    if (state.nativeContainer && state.nativeContainer.isConnected) {
-      state.nativeContainer.style.display = state.nativeDisplay || '';
-    }
-    if (bar._activityDockSlot) {
-      bar._activityDockSlot.style.display = 'none';
-    }
-    bar._activityDockState = null;
-  }
-
-  function dockActivityButton(bar) {
-    if (!bar || !bar._buttonRow) return;
-    const existingState = bar._activityDockState;
-    if (existingState?.node && bar._activityDockSlot && bar._activityDockSlot.contains(existingState.node)) {
-      bar._activityDockSlot.style.display = 'flex';
-      return;
-    }
-
-    const activityBtn = findTopRightActivityButton();
-    if (!activityBtn) {
-      undockActivityButton(bar);
-      return;
-    }
-
-    const dockSlot = bar._activityDockSlot || (() => {
-      const slot = document.createElement('div');
-      slot.className = 'sora-uv-activity-dock';
-      Object.assign(slot.style, {
-        display: 'none',
-        alignItems: 'center',
-        marginLeft: '-5px',
-      });
-      bar._buttonRow.appendChild(slot);
-      bar._activityDockSlot = slot;
-      return slot;
-    })();
-
-    const moveNode = activityBtn.closest('.pointer-events-auto') || activityBtn;
-    const nativeContainer = moveNode.closest('.pointer-events-none.fixed') || moveNode.closest('.fixed');
-    if (!moveNode.parentNode) return;
-    const nodeMarginLeft = moveNode.style.marginLeft;
-    const nodeMarginRight = moveNode.style.marginRight;
-    undockActivityButton(bar);
-    bar._activityDockState = {
-      node: moveNode,
-      originalParent: moveNode.parentNode,
-      originalNextSibling: moveNode.nextSibling,
-      nativeContainer,
-      nativeDisplay: nativeContainer ? nativeContainer.style.display : '',
-      nodeMarginLeft,
-      nodeMarginRight,
-    };
-    moveNode.style.marginLeft = '0';
-    moveNode.style.marginRight = '0';
-    dockSlot.appendChild(moveNode);
-    dockSlot.style.display = 'flex';
-    if (nativeContainer) nativeContainer.style.display = 'none';
-  }
-
-  function syncActivityButtonDocking(bar, shouldDock) {
-    if (!bar) return;
-    if (!shouldDock) {
-      undockActivityButton(bar);
-      return;
-    }
-    dockActivityButton(bar);
-  }
-
-  function enforceControlButtonTypography(bar) {
-    if (!bar) return;
-    const selector = '[data-role="filter-btn"], .sora-uv-gather-btn, .sora-uv-analyze-btn, .sora-uv-bookmarks-btn';
-    const btns = bar.querySelectorAll(selector);
-    for (const btn of btns) {
-      btn.style.fontWeight = '500';
-      btn.style.fontSize = '0.875rem';
-      btn.style.letterSpacing = '0.01em';
-      btn.style.lineHeight = '1.2';
-    }
   }
 
 
@@ -3894,6 +5610,7 @@ function badgeEmojiFor(id, meta) {
     const NOW = Date.now();
     const windowHours = Number(analyzeWindowHours) || 24;
     const WINDOW_MS = windowHours * 60 * 60 * 1000;
+    const windowMin = windowHours * 60;
 
     for (const [, user] of Object.entries(metrics?.users || {})) {
       for (const [pid, p] of Object.entries(user?.posts || {})) {
@@ -3913,13 +5630,8 @@ function badgeEmojiFor(id, meta) {
           isFinite(likes) && likes > 0 && isFinite(remixes) && remixes >= 0 ? (remixes / likes) * 100 : null;
         const irVal = isFinite(uv) && uv > 0 ? (((Number(likes) || 0) + (Number(comments) || 0)) / uv) * 100 : null;
 
-        const ageMinExact = Math.max(0, (NOW - tPost) / 60000);
-        const ageMin = Math.floor(ageMinExact);
-        const expiringMin = Math.max(0, ANALYZE_EXPIRES_WINDOW_MIN - ageMin);
-        const lpmVal = likesPerMinute(likes, ageMinExact);
-        const vpmVal = viewsPerMinute(uv, ageMinExact);
-        const lpmStr = formatPerMinute(lpmVal);
-        const vpmStr = formatPerMinute(vpmVal);
+        const ageMin = Math.max(0, Math.floor((NOW - tPost) / 60000));
+        const expiringMin = Math.max(0, windowMin - ageMin);
 
         const caption =
           typeof p?.caption === 'string' && p.caption ? p.caption : typeof p?.text === 'string' && p.text ? p.text : '';
@@ -3979,15 +5691,10 @@ function badgeEmojiFor(id, meta) {
           likes: isFinite(likes) ? likes : 0,
           remixes: isFinite(remixes) ? remixes : 0,
           comments: isFinite(comments) ? comments : 0,
-          lpmVal: lpmVal == null ? -1 : lpmVal,
-          lpmStr,
-          vpmVal: vpmVal == null ? -1 : vpmVal,
-          vpmStr,
           rrPctStr,
           rrPctVal: rrVal == null ? -1 : rrVal,
           irPctStr,
           irPctVal: irVal == null ? -1 : irVal,
-          ageMin,
           expiringMin,
           caption,
           cameo_usernames: Array.isArray(p?.cameo_usernames) ? p.cameo_usernames : null,
@@ -4004,12 +5711,8 @@ function badgeEmojiFor(id, meta) {
     const windowMin = windowHours * 60;
     for (const [id, likes] of idToLikes.entries()) {
       const meta = idToMeta.get(id);
-      const createdAtMs = Number(meta?.createdAtMs);
-      const ageFromCreatedAt = Number.isFinite(createdAtMs) && createdAtMs > 0
-        ? (Date.now() - createdAtMs) / 60000
-        : NaN;
-      const ageMin = Number.isFinite(ageFromCreatedAt) ? ageFromCreatedAt : Number(meta?.ageMin);
-      if (!Number.isFinite(ageMin) || ageMin < 0 || ageMin > windowMin) continue;
+      const ageMin = meta?.ageMin;
+      if (!Number.isFinite(ageMin) || ageMin > windowMin) continue;
       if (!Number.isFinite(likes) || likes < 15) continue;
 
       const uv = Number(idToUnique.get(id) ?? 0);
@@ -4022,13 +5725,8 @@ function badgeEmojiFor(id, meta) {
 
       const irVal = uv > 0 ? (((Number(likes) || 0) + (Number(comments) || 0)) / uv) * 100 : null;
       const irPctStr = irVal == null ? '' : irVal === 0 ? '0%' : irVal.toFixed(1).replace(/\.0$/, '') + '%';
-      const lpmVal = likesPerMinute(likes, ageMin);
-      const vpmVal = viewsPerMinute(uv, ageMin);
-      const lpmStr = formatPerMinute(lpmVal);
-      const vpmStr = formatPerMinute(vpmVal);
 
-      const ageMinInt = Math.floor(ageMin);
-      const expiringMin = Math.max(0, ANALYZE_EXPIRES_WINDOW_MIN - ageMinInt);
+      const expiringMin = Math.max(0, windowMin - Math.floor(ageMin));
 
       const duration = idToDuration.get(id);
       const durationStr = duration ? formatDuration(duration) : null;
@@ -4042,15 +5740,10 @@ function badgeEmojiFor(id, meta) {
         likes: Number(likes) || 0,
         remixes: remixes || 0,
         comments: comments || 0,
-        lpmVal: lpmVal == null ? -1 : lpmVal,
-        lpmStr,
-        vpmVal: vpmVal == null ? -1 : vpmVal,
-        vpmStr,
         rrPctStr,
         rrPctVal,
         irPctStr,
         irPctVal: irVal == null ? -1 : irVal,
-        ageMin: ageMinInt,
         expiringMin,
         caption: '', // live map path doesn't retain caption reliably
         cameo_usernames: null, // live maps don't retain cameo_usernames reliably
@@ -4406,7 +6099,7 @@ function badgeEmojiFor(id, meta) {
       colPost.style.minWidth = '140px';
       cg.appendChild(colPost);
 
-      ['100px', '60px', '60px', '60px', '60px', '75px', '75px', '75px', '75px', '100px'].forEach((w) => {
+      ['100px', '60px', '60px', '60px', '60px', '75px', '75px', '100px'].forEach((w) => {
         const c = document.createElement('col');
         c.style.width = w;
         c.style.maxWidth = w;
@@ -4428,8 +6121,6 @@ function badgeEmojiFor(id, meta) {
         ['likes', '👍'],
         ['remixes', '🌀'],
         ['comments', '💬'],
-        ['lpm', 'LPM'],
-        ['vpm', 'VPM'],
         ['rr', 'RR %'],
         ['ir', 'IR %'],
         ['expiring', 'Expires'],
@@ -4438,8 +6129,6 @@ function badgeEmojiFor(id, meta) {
         th.dataset.key = key;
         th.textContent = label;
         if (key === 'prompt') th.title = 'Prompt';
-        if (key === 'lpm') th.title = 'Likes per minute since post';
-        if (key === 'vpm') th.title = 'Views per minute since post';
         Object.assign(th.style, {
           background: 'rgba(24,24,24,0.88)',
           textAlign: key === 'post' ? 'left' : (key === 'prompt' ? 'center' : 'right'),
@@ -4531,8 +6220,9 @@ async function renderAnalyzeTable(force = false) {
     }
 
     const windowMin = (Number(analyzeWindowHours) || 24) * 60;
-    // Filter rows by selected Analyze window (1h..24h) using post age.
-    rows = rows.filter((r) => Number.isFinite(r.ageMin) && r.ageMin >= 0 && r.ageMin <= windowMin);
+    // Filter rows: expiringMin represents minutes until the post expires from the window
+    // A post with expiringMin >= 0 is still within the window
+    rows = rows.filter((r) => Number.isFinite(r.expiringMin) && r.expiringMin >= 0);
     
     // Filter by cameo username if selected
     if (analyzeCameoFilterUsername) {
@@ -4727,11 +6417,9 @@ async function renderAnalyzeTable(force = false) {
       const tdLikes = mkTdNum(r.likes);
       const tdRemixes = mkTdNum(r.remixes);
       const tdComments = mkTdNum(r.comments);
-      const tdLPM = mkTdNum(r.lpmStr || '—');
-      const tdVPM = mkTdNum(r.vpmStr || '—');
       const tdRR = mkTdNum(r.rrPctStr || '—');
       const tdIR = mkTdNum(r.irPctStr || '—');
-      const expStr = fmtHoursMinutesRemaining(r.expiringMin);
+      const expStr = typeof r.expiringMin === 'number' ? (r.expiringMin <= 0 ? '0m' : fmtAgeMin(r.expiringMin)) : '—';
       const tdExp = mkTdNum(expStr);
 
       tr.appendChild(tdPrompt);
@@ -4741,8 +6429,6 @@ async function renderAnalyzeTable(force = false) {
       tr.appendChild(tdLikes);
       tr.appendChild(tdRemixes);
       tr.appendChild(tdComments);
-      tr.appendChild(tdLPM);
-      tr.appendChild(tdVPM);
       tr.appendChild(tdRR);
       tr.appendChild(tdIR);
       tr.appendChild(tdExp);
@@ -4860,8 +6546,6 @@ async function renderAnalyzeTable(force = false) {
 	      else if (key === 'likes') primary = (a.likes - b.likes) * dir;
 	      else if (key === 'remixes') primary = (a.remixes - b.remixes) * dir;
 	      else if (key === 'comments') primary = (a.comments - b.comments) * dir;
-	      else if (key === 'lpm') primary = ((a.lpmVal ?? -1) - (b.lpmVal ?? -1)) * dir;
-	      else if (key === 'vpm') primary = ((a.vpmVal ?? -1) - (b.vpmVal ?? -1)) * dir;
 	      else if (key === 'rr') primary = ((a.rrPctVal ?? -1) - (b.rrPctVal ?? -1)) * dir;
 	      else if (key === 'ir') primary = ((a.irPctVal ?? -1) - (b.irPctVal ?? -1)) * dir;
 	      else if (key === 'expiring') primary = (a.expiringMin - b.expiringMin) * dir;
@@ -5405,6 +7089,631 @@ async function renderAnalyzeTable(force = false) {
   // If pending v2 is unavailable, we can still populate drafts metadata by calling the drafts endpoint directly.
   // Throttle to avoid spamming in case Sora repeatedly polls a broken endpoint.
   const DRAFTS_BACKUP_THROTTLE_MS = 15000;
+  function waitMs(ms) {
+    return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+  }
+
+  function getHeaderValue(headers, name) {
+    if (!headers || !name) return null;
+    const lower = String(name).toLowerCase();
+    try {
+      if (headers instanceof Headers) return headers.get(name) || headers.get(lower) || null;
+      if (Array.isArray(headers)) {
+        const row = headers.find((entry) => String(entry?.[0] || '').toLowerCase() === lower);
+        return row ? row[1] : null;
+      }
+      if (typeof headers === 'object') {
+        return headers[name] || headers[lower] || null;
+      }
+    } catch {}
+    return null;
+  }
+
+  function captureHarvestHeaders(headers) {
+    if (!headers) return;
+    const auth = getHeaderValue(headers, 'Authorization');
+    const device = getHeaderValue(headers, 'OAI-Device-Id');
+    const language = getHeaderValue(headers, 'OAI-Language');
+    if (typeof auth === 'string' && auth.trim()) {
+      const normalized = auth.trim();
+      harvestHeaderBank.authorization = normalized;
+      if (normalized.startsWith('Bearer ')) {
+        capturedAuthToken = normalized;
+        ensureUVDraftsPageModule()?.setCapturedAuthToken?.(capturedAuthToken);
+      }
+    }
+    if (typeof device === 'string' && device.trim()) harvestHeaderBank.oaiDeviceId = device.trim();
+    if (typeof language === 'string' && language.trim()) harvestHeaderBank.oaiLanguage = language.trim();
+    harvestHeaderBank.updatedAt = Date.now();
+  }
+
+  function captureHarvestTemplateFromRequest(input, init) {
+    try {
+      const reqUrl = typeof input === 'string' ? input : input?.url || '';
+      if (!reqUrl) return;
+      const parsed = new URL(reqUrl, location.origin);
+      if (parsed.origin !== location.origin) return;
+
+      const method = String(init?.method || (input instanceof Request ? input.method : 'GET') || 'GET').toUpperCase();
+      if (method !== 'GET') return;
+
+      let context = null;
+      if (DRAFTS_RE.test(parsed.pathname)) {
+        context = 'drafts';
+      } else if (/\/backend\/project_[a-z]+\/profile_feed\//i.test(parsed.pathname)) {
+        context = 'profile';
+      } else if (/\/backend\/project_[a-z]+\/feed/i.test(parsed.pathname) && parsed.searchParams.get('feed') === 'top') {
+        context = 'top';
+      }
+      if (!context) return;
+
+      const sourceHeaders = init?.headers || (input instanceof Request ? input.headers : null);
+      captureHarvestHeaders(sourceHeaders);
+      const canonicalHeaders = {};
+      if (harvestHeaderBank.authorization) canonicalHeaders.Authorization = harvestHeaderBank.authorization;
+      if (harvestHeaderBank.oaiDeviceId) canonicalHeaders['OAI-Device-Id'] = harvestHeaderBank.oaiDeviceId;
+      if (harvestHeaderBank.oaiLanguage) canonicalHeaders['OAI-Language'] = harvestHeaderBank.oaiLanguage;
+
+      harvestTemplates[context] = {
+        context,
+        url: parsed.toString(),
+        method,
+        headers: canonicalHeaders,
+        capturedAt: Date.now(),
+      };
+    } catch {}
+  }
+
+  function setHarvestStatus(text) {
+    harvestStatusText = String(text || '').trim();
+    const bar = controlBar;
+    if (!bar || !document.contains(bar)) return;
+    const statusEl = bar.querySelector('.sora-uv-harvest-status');
+    if (!statusEl) return;
+    statusEl.textContent = harvestStatusText;
+    statusEl.style.display = harvestStatusText ? '' : 'none';
+  }
+
+  function flushHarvestQueue(forceAll = false) {
+    if (!harvestQueue.length) return;
+    const sendCount = forceAll ? harvestQueue.length : Math.min(HARVEST_BATCH_CHUNK_MAX, harvestQueue.length);
+    const items = harvestQueue.splice(0, sendCount);
+    if (!items.length) return;
+    try {
+      window.postMessage({ __sora_uv__: true, type: 'harvest_batch', items }, '*');
+    } catch {}
+  }
+
+  function scheduleHarvestFlush() {
+    if (harvestFlushTimer) return;
+    harvestFlushTimer = setTimeout(() => {
+      harvestFlushTimer = null;
+      flushHarvestQueue(false);
+      if (harvestQueue.length) scheduleHarvestFlush();
+    }, HARVEST_BATCH_FLUSH_MS);
+  }
+
+  function queueHarvestRecords(records) {
+    if (!harvestActive || !Array.isArray(records) || !records.length) return;
+    for (const rec of records) {
+      if (!rec || !rec.id || !rec.kind) continue;
+      harvestQueue.push(rec);
+      if (harvestQueue.length >= HARVEST_BATCH_CHUNK_MAX) flushHarvestQueue(false);
+    }
+    scheduleHarvestFlush();
+  }
+
+  function extractCursorFromPayload(payload) {
+    if (!payload || typeof payload !== 'object') return null;
+    const cursor = payload?.next_cursor ?? payload?.cursor ?? payload?.data?.next_cursor ?? payload?.data?.cursor ?? null;
+    return cursor == null || cursor === '' ? null : String(cursor);
+  }
+
+  function extractDurationAndDimensionsFromPost(post, id) {
+    const p = post && typeof post === 'object' ? post : {};
+    const dims = idToDimensions.get(id) || null;
+    let width = dims?.width ?? null;
+    let height = dims?.height ?? null;
+    let duration = idToDuration.get(id) ?? null;
+    try {
+      const attachment = Array.isArray(p.attachments) && p.attachments.length ? p.attachments[0] : null;
+      if (attachment?.width != null && width == null) width = Number(attachment.width);
+      if (attachment?.height != null && height == null) height = Number(attachment.height);
+      const nFrames = attachment?.n_frames ?? p?.creation_config?.n_frames ?? p?.n_frames ?? p?.video_metadata?.n_frames ?? null;
+      if (nFrames != null && duration == null) {
+        const fps = Number(p?.creation_config?.fps) || 30;
+        const nf = Number(nFrames);
+        if (Number.isFinite(nf) && nf > 0 && Number.isFinite(fps) && fps > 0) duration = nf / fps;
+      }
+    } catch {}
+    return {
+      duration_s: Number.isFinite(Number(duration)) ? Number(duration) : null,
+      width: Number.isFinite(Number(width)) ? Number(width) : null,
+      height: Number.isFinite(Number(height)) ? Number(height) : null,
+    };
+  }
+
+  function buildHarvestRecordFromFeedItem(item, context, source, runId) {
+    const id = getItemId(item);
+    if (!id) return null;
+    const p = item?.post || item || {};
+    const owner = getOwner(item);
+    const cameoNames = getCameoUsernames(item) || [];
+    const dims = extractDurationAndDimensionsFromPost(p, id);
+    const now = Date.now();
+    const createdAt =
+      p?.created_at ?? p?.uploaded_at ?? p?.createdAt ?? p?.created ?? p?.posted_at ?? p?.timestamp ?? null;
+    const prompt =
+      (typeof p?.caption === 'string' && p.caption.trim()) ||
+      (typeof p?.text === 'string' && p.text.trim()) ||
+      null;
+    return {
+      id: String(id),
+      kind: 'published',
+      context,
+      detail_url: `${location.origin}/backend/project_y/post/${id}`,
+      source,
+      prompt,
+      prompt_source: prompt ? 'inline' : null,
+      title: typeof p?.title === 'string' ? p.title : null,
+      generation_type: typeof p?.kind === 'string' ? p.kind : (typeof p?.generation_type === 'string' ? p.generation_type : null),
+      generation_id: p?.generation_id ? String(p.generation_id) : null,
+      width: dims.width,
+      height: dims.height,
+      duration_s: dims.duration_s,
+      created_at: createdAt,
+      posted_at: p?.posted_at ?? null,
+      updated_at: p?.updated_at ?? null,
+      view_count: getTotalViews(item),
+      unique_view_count: getUniqueViews(item),
+      like_count: getLikes(item),
+      dislike_count: p?.dislike_count ?? null,
+      reply_count: getComments(item),
+      recursive_reply_count: p?.recursive_reply_count ?? null,
+      remix_count: getRemixes(item),
+      post_permalink: `${location.origin}/p/${id}`,
+      post_visibility: typeof p?.visibility === 'string' ? p.visibility : null,
+      cast_count: cameoNames.length || null,
+      cast_names: cameoNames.length ? cameoNames : null,
+      cameos: cameoNames.length ? cameoNames : null,
+      first_seen_ts: now,
+      last_seen_ts: now,
+      last_harvest_run_id: runId,
+      user_handle: owner?.handle || null,
+      user_id: owner?.id || null,
+    };
+  }
+
+  function buildHarvestRecordFromDraftItem(item, source, runId) {
+    let draftId = item?.id || item?.generation_id || item?.draft_id;
+    if (!draftId) return null;
+    draftId = normalizeId(draftId);
+    if (!draftId) return null;
+
+    const cc = item?.creation_config && typeof item.creation_config === 'object' ? item.creation_config : {};
+    const nFrames = Number(cc?.n_frames);
+    const fps = Number(cc?.fps) || SORA_DEFAULT_FPS;
+    const duration = Number.isFinite(nFrames) && nFrames > 0 && Number.isFinite(fps) && fps > 0 ? (nFrames / fps) : (idToDuration.get(draftId) ?? null);
+    const width = cc?.width ?? idToDimensions.get(draftId)?.width ?? null;
+    const height = cc?.height ?? idToDimensions.get(draftId)?.height ?? null;
+    const prompt =
+      (typeof cc?.prompt === 'string' && cc.prompt.trim()) ||
+      (typeof item?.prompt === 'string' && item.prompt.trim()) ||
+      (idToPrompt.get(draftId) || null);
+    const cameoNames = Array.isArray(item?.cameos) ? item.cameos.filter(Boolean).map((v) => String(v)) : null;
+    const now = Date.now();
+    return {
+      id: String(draftId),
+      kind: 'draft',
+      context: 'drafts',
+      detail_url: `${location.origin}/backend/project_y/profile/drafts/v2/${draftId}`,
+      source,
+      prompt,
+      prompt_source: prompt ? 'creation_config' : null,
+      title: typeof item?.title === 'string' ? item.title : null,
+      generation_type: typeof item?.kind === 'string' ? item.kind : null,
+      generation_id: item?.generation_id ? String(item.generation_id) : null,
+      width: Number.isFinite(Number(width)) ? Number(width) : null,
+      height: Number.isFinite(Number(height)) ? Number(height) : null,
+      duration_s: Number.isFinite(Number(duration)) ? Number(duration) : null,
+      created_at: item?.created_at ?? null,
+      posted_at: item?.posted_at ?? null,
+      updated_at: item?.updated_at ?? null,
+      post_permalink: `${location.origin}/d/${draftId}`,
+      cast_count: cameoNames?.length || null,
+      cast_names: cameoNames?.length ? cameoNames : null,
+      cameos: cameoNames?.length ? cameoNames : null,
+      first_seen_ts: now,
+      last_seen_ts: now,
+      last_harvest_run_id: runId,
+    };
+  }
+
+  function buildHarvestRecordsFromFeedJson(json, context, source, runId) {
+    const items = json?.items || json?.data?.items || [];
+    if (!Array.isArray(items) || !items.length) return [];
+    const out = [];
+    for (const item of items) {
+      const rec = buildHarvestRecordFromFeedItem(item, context, source, runId);
+      if (rec) out.push(rec);
+    }
+    return out;
+  }
+
+  function buildHarvestRecordsFromDraftsJson(json, source, runId) {
+    const items = extractDraftItemsFromPayload(json);
+    if (!Array.isArray(items) || !items.length) return [];
+    const out = [];
+    for (const item of items) {
+      const rec = buildHarvestRecordFromDraftItem(item, source, runId);
+      if (rec) out.push(rec);
+    }
+    return out;
+  }
+
+  function buildHarvestHeaders(template) {
+    const headers = {
+      Accept: 'application/json',
+    };
+    if (template?.headers && typeof template.headers === 'object') {
+      Object.assign(headers, template.headers);
+    }
+    if (!headers.Authorization && capturedAuthToken) headers.Authorization = capturedAuthToken;
+    if (!headers.Authorization && harvestHeaderBank.authorization) headers.Authorization = harvestHeaderBank.authorization;
+    if (!headers['OAI-Device-Id'] && harvestHeaderBank.oaiDeviceId) headers['OAI-Device-Id'] = harvestHeaderBank.oaiDeviceId;
+    if (!headers['OAI-Language'] && harvestHeaderBank.oaiLanguage) headers['OAI-Language'] = harvestHeaderBank.oaiLanguage;
+    return headers;
+  }
+
+  async function harvestFetchJson(template, opts = {}) {
+    const baseUrl = opts.urlOverride || template?.url;
+    if (!baseUrl) throw new Error('missing_harvest_template_url');
+    const url = new URL(baseUrl, location.origin);
+    if (opts.limit != null && !Number.isNaN(Number(opts.limit))) url.searchParams.set('limit', String(opts.limit));
+    if (opts.cursor) url.searchParams.set('cursor', String(opts.cursor));
+    if (opts.context === 'top') url.searchParams.set('feed', 'top');
+
+    const response = await fetch(url.toString(), {
+      method: 'GET',
+      credentials: 'include',
+      headers: buildHarvestHeaders(template),
+    });
+    if (!response.ok) throw new Error(`harvest_http_${response.status}`);
+    return response.json();
+  }
+
+  async function enrichHarvestRecords(records, template) {
+    if (!Array.isArray(records) || !records.length) return;
+    if (harvestDetailLookupsTotal >= DETAIL_LOOKUPS_TOTAL_MAX) return;
+    const candidates = records.filter((rec) => !rec.prompt && rec?.id && rec?.kind).slice(0, DETAIL_LOOKUPS_PER_PAGE);
+    if (!candidates.length) return;
+    for (const rec of candidates) {
+      if (!harvestActive || harvestCancelRequested) return;
+      if (harvestDetailLookupsTotal >= DETAIL_LOOKUPS_TOTAL_MAX) return;
+      harvestDetailLookupsTotal += 1;
+      try {
+        const detailUrl = rec.kind === 'draft'
+          ? `${location.origin}/backend/project_y/profile/drafts/v2/${rec.id}`
+          : `${location.origin}/backend/project_y/post/${rec.id}`;
+        const detail = await harvestFetchJson(template, { urlOverride: detailUrl });
+        const prompt =
+          (typeof detail?.prompt === 'string' && detail.prompt.trim()) ||
+          (typeof detail?.post?.prompt === 'string' && detail.post.prompt.trim()) ||
+          (typeof detail?.creation_config?.prompt === 'string' && detail.creation_config.prompt.trim()) ||
+          (typeof detail?.draft?.creation_config?.prompt === 'string' && detail.draft.creation_config.prompt.trim()) ||
+          null;
+        if (prompt) {
+          rec.prompt = prompt;
+          rec.prompt_source = 'detail';
+        }
+      } catch {}
+      await waitMs(DETAIL_LOOKUP_DELAY_MS);
+    }
+  }
+
+  function collectDomHarvestRecordsFromMaps(runId, context) {
+    const out = [];
+    const now = Date.now();
+    if (context === 'drafts') {
+      for (const [id, prompt] of idToPrompt.entries()) {
+        const rec = {
+          id: String(id),
+          kind: 'draft',
+          context: 'drafts',
+          detail_url: `${location.origin}/backend/project_y/profile/drafts/v2/${id}`,
+          source: 'dom',
+          prompt: typeof prompt === 'string' ? prompt : null,
+          prompt_source: prompt ? 'dom_map' : null,
+          width: Number.isFinite(Number(idToDimensions.get(id)?.width)) ? Number(idToDimensions.get(id).width) : null,
+          height: Number.isFinite(Number(idToDimensions.get(id)?.height)) ? Number(idToDimensions.get(id).height) : null,
+          duration_s: Number.isFinite(Number(idToDuration.get(id))) ? Number(idToDuration.get(id)) : null,
+          post_permalink: `${location.origin}/d/${id}`,
+          first_seen_ts: now,
+          last_seen_ts: now,
+          last_harvest_run_id: runId,
+        };
+        const key = `${rec.kind}:${rec.id}`;
+        if (harvestDomSeenKeys.has(key)) continue;
+        harvestDomSeenKeys.add(key);
+        out.push(rec);
+      }
+      return out;
+    }
+
+    for (const [id, meta] of idToMeta.entries()) {
+      const cameos = idToCameos.get(id);
+      const rec = {
+        id: String(id),
+        kind: 'published',
+        context,
+        detail_url: `${location.origin}/backend/project_y/post/${id}`,
+        source: 'dom',
+        prompt: null,
+        prompt_source: null,
+        width: Number.isFinite(Number(idToDimensions.get(id)?.width)) ? Number(idToDimensions.get(id).width) : null,
+        height: Number.isFinite(Number(idToDimensions.get(id)?.height)) ? Number(idToDimensions.get(id).height) : null,
+        duration_s: Number.isFinite(Number(idToDuration.get(id))) ? Number(idToDuration.get(id)) : null,
+        unique_view_count: Number.isFinite(Number(idToUnique.get(id))) ? Number(idToUnique.get(id)) : null,
+        like_count: Number.isFinite(Number(idToLikes.get(id))) ? Number(idToLikes.get(id)) : null,
+        view_count: Number.isFinite(Number(idToViews.get(id))) ? Number(idToViews.get(id)) : null,
+        reply_count: Number.isFinite(Number(idToComments.get(id))) ? Number(idToComments.get(id)) : null,
+        remix_count: Number.isFinite(Number(idToRemixes.get(id))) ? Number(idToRemixes.get(id)) : null,
+        post_permalink: `${location.origin}/p/${id}`,
+        cast_count: Array.isArray(cameos) ? cameos.length : null,
+        cast_names: Array.isArray(cameos) && cameos.length ? cameos : null,
+        cameos: Array.isArray(cameos) && cameos.length ? cameos : null,
+        created_at: meta?.createdAtMs || null,
+        first_seen_ts: now,
+        last_seen_ts: now,
+        last_harvest_run_id: runId,
+      };
+      const key = `${rec.kind}:${rec.id}`;
+      if (harvestDomSeenKeys.has(key)) continue;
+      harvestDomSeenKeys.add(key);
+      out.push(rec);
+    }
+    return out;
+  }
+
+  async function waitForHarvestTemplate(runId, context, timeoutMs = HARVEST_TEMPLATE_WAIT_MS) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (!harvestActive || harvestCancelRequested || runId !== harvestRunId) return null;
+      const template = pickHarvestTemplateForContext(context);
+      if (template) return template;
+      await waitMs(120);
+    }
+    return pickHarvestTemplateForContext(context);
+  }
+
+  async function resolveProfileTemplate(baseTemplate) {
+    if (baseTemplate?.context === 'profile' || /\/profile_feed\//i.test(String(baseTemplate?.url || ''))) return baseTemplate;
+    const slug = currentProfileHandleFromURL();
+    if (!slug) return baseTemplate || null;
+    const profileLookupUrl = `${location.origin}/backend/project_y/profile/username/${encodeURIComponent(slug)}`;
+    const headers = buildHarvestHeaders(baseTemplate || {});
+    const response = await fetch(profileLookupUrl, { method: 'GET', credentials: 'include', headers });
+    if (!response.ok) return baseTemplate || null;
+    const json = await response.json();
+    const profileId = json?.id || json?.user_id || json?.profile?.id || json?.profile?.user_id || null;
+    if (!profileId) return baseTemplate || null;
+    return {
+      context: 'profile',
+      url: `${location.origin}/backend/project_y/profile_feed/${profileId}?limit=${HARVEST_FEED_PAGE_SIZE}`,
+      method: 'GET',
+      headers: {
+        Authorization: headers.Authorization || undefined,
+        'OAI-Device-Id': headers['OAI-Device-Id'] || undefined,
+        'OAI-Language': headers['OAI-Language'] || undefined,
+      },
+      capturedAt: Date.now(),
+    };
+  }
+
+  async function runTopApiHarvest(runId, template) {
+    let cursor = null;
+    let pages = 0;
+    let records = 0;
+    while (pages < HARVEST_PAGE_LIMIT && harvestActive && !harvestCancelRequested && runId === harvestRunId) {
+      const json = await harvestFetchJson(template, { cursor, limit: HARVEST_FEED_PAGE_SIZE, context: 'top' });
+      processFeedJson(json);
+      const pageRecords = buildHarvestRecordsFromFeedJson(json, 'top', 'api', runId);
+      await enrichHarvestRecords(pageRecords, template);
+      queueHarvestRecords(pageRecords);
+      pages += 1;
+      records += pageRecords.length;
+      setHarvestStatus(`Harvesting Top (API): page ${pages}, records ${records}`);
+      const nextCursor = extractCursorFromPayload(json);
+      const hasItems = Array.isArray(json?.items || json?.data?.items) && (json?.items || json?.data?.items || []).length > 0;
+      if (!nextCursor || !hasItems || nextCursor === cursor) break;
+      cursor = nextCursor;
+    }
+    return records > 0;
+  }
+
+  async function runProfileApiHarvest(runId, template) {
+    const resolvedTemplate = await resolveProfileTemplate(template);
+    if (!resolvedTemplate) return false;
+    let cursor = null;
+    let pages = 0;
+    let records = 0;
+    while (pages < HARVEST_PAGE_LIMIT && harvestActive && !harvestCancelRequested && runId === harvestRunId) {
+      const json = await harvestFetchJson(resolvedTemplate, { cursor, limit: HARVEST_FEED_PAGE_SIZE, context: 'profile' });
+      processFeedJson(json);
+      const pageRecords = buildHarvestRecordsFromFeedJson(json, 'profile', 'api', runId);
+      await enrichHarvestRecords(pageRecords, resolvedTemplate);
+      queueHarvestRecords(pageRecords);
+      pages += 1;
+      records += pageRecords.length;
+      setHarvestStatus(`Harvesting Profile (API): page ${pages}, records ${records}`);
+      const nextCursor = extractCursorFromPayload(json);
+      const hasItems = Array.isArray(json?.items || json?.data?.items) && (json?.items || json?.data?.items || []).length > 0;
+      if (!nextCursor || !hasItems || nextCursor === cursor) break;
+      cursor = nextCursor;
+    }
+    return records > 0;
+  }
+
+  async function runDraftsApiHarvest(runId, template) {
+    let cursor = null;
+    let pages = 0;
+    let records = 0;
+    while (pages < HARVEST_PAGE_LIMIT && harvestActive && !harvestCancelRequested && runId === harvestRunId) {
+      const json = await harvestFetchJson(template, { cursor, limit: HARVEST_DRAFTS_PAGE_SIZE, context: 'drafts' });
+      processDraftsJson(json);
+      const pageRecords = buildHarvestRecordsFromDraftsJson(json, 'api', runId);
+      await enrichHarvestRecords(pageRecords, template);
+      queueHarvestRecords(pageRecords);
+      pages += 1;
+      records += pageRecords.length;
+      setHarvestStatus(`Harvesting Drafts (API): page ${pages}, records ${records}`);
+      const nextCursor = extractCursorFromPayload(json);
+      const pageItems = extractDraftItemsFromPayload(json);
+      const hasItems = Array.isArray(pageItems) && pageItems.length > 0;
+      if (!nextCursor || !hasItems || nextCursor === cursor) break;
+      cursor = nextCursor;
+    }
+    return records > 0;
+  }
+
+  async function runHarvestDomFallback(runId, context) {
+    let noProgressTicks = 0;
+    let tick = 0;
+    let total = 0;
+    setHarvestStatus(`Harvest fallback (DOM) started on ${context}...`);
+    while (tick < HARVEST_SCROLL_MAX_TICKS && noProgressTicks < HARVEST_SCROLL_NO_PROGRESS_LIMIT && harvestActive && !harvestCancelRequested && runId === harvestRunId) {
+      tick += 1;
+      runRenderPass();
+      const records = collectDomHarvestRecordsFromMaps(runId, context);
+      if (records.length) {
+        total += records.length;
+        noProgressTicks = 0;
+        queueHarvestRecords(records);
+      } else {
+        noProgressTicks += 1;
+      }
+      setHarvestStatus(`Harvesting ${context} (DOM): tick ${tick}, records ${total}`);
+      window.scrollTo(0, window.scrollY + HARVEST_SCROLL_STEP_PX);
+      const waitFor = Math.min(HARVEST_SCROLL_MAX_DELAY_MS, HARVEST_SCROLL_BASE_DELAY_MS + Math.floor(Math.random() * 500));
+      await waitMs(waitFor);
+    }
+    return total > 0;
+  }
+
+  async function runApiHarvestPipeline(runId, context) {
+    const template = await waitForHarvestTemplate(runId, context, HARVEST_TEMPLATE_WAIT_MS);
+    if (!template) return false;
+    if (context === 'top') return runTopApiHarvest(runId, template);
+    if (context === 'profile') return runProfileApiHarvest(runId, template);
+    if (context === 'drafts') return runDraftsApiHarvest(runId, template);
+    return false;
+  }
+
+  function syncHarvestControlState(bar = controlBar) {
+    if (!bar || !document.contains(bar)) return;
+    const harvestBtn = bar.querySelector('.sora-uv-harvest-btn');
+    const statusEl = bar.querySelector('.sora-uv-harvest-status');
+    const filterBtn = bar.querySelector('[data-role="filter-btn"]');
+    const gatherBtn = bar.querySelector('.sora-uv-gather-btn');
+    const gatherControlsWrapper = bar.querySelector('.sora-uv-gather-controls-wrapper');
+    const analyze = bar.querySelector('.sora-uv-analyze-btn');
+    if (harvestBtn) {
+      harvestBtn.style.display = getHarvestContextFromRoute() ? 'flex' : 'none';
+      if (typeof harvestBtn.setLabel === 'function') harvestBtn.setLabel(harvestActive ? 'Harvesting...' : 'Harvest');
+      else harvestBtn.textContent = harvestActive ? 'Harvesting...' : 'Harvest';
+      harvestBtn.dataset.active = harvestActive ? 'true' : 'false';
+      harvestBtn.style.opacity = harvestActive ? '1' : '1';
+    }
+    if (statusEl) {
+      statusEl.textContent = harvestStatusText || '';
+      statusEl.style.display = harvestStatusText ? '' : 'none';
+    }
+    if (filterBtn) {
+      filterBtn.disabled = !!harvestActive;
+      filterBtn.style.opacity = harvestActive ? '0.5' : '';
+      filterBtn.style.pointerEvents = harvestActive ? 'none' : '';
+    }
+    if (gatherBtn) {
+      gatherBtn.disabled = !!harvestActive;
+      gatherBtn.style.opacity = harvestActive ? '0.5' : '';
+      gatherBtn.style.pointerEvents = harvestActive ? 'none' : '';
+    }
+    if (analyze) {
+      analyze.disabled = !!harvestActive;
+      analyze.style.opacity = harvestActive ? '0.5' : '';
+      analyze.style.pointerEvents = harvestActive ? 'none' : '';
+    }
+    if (harvestActive && gatherControlsWrapper) gatherControlsWrapper.style.display = 'none';
+  }
+
+  function stopApiHarvestRun(reason = 'stopped') {
+    harvestCancelRequested = true;
+    if (!harvestActive && !harvestRunId) return;
+    harvestActive = false;
+    harvestRunId = null;
+    if (harvestFlushTimer) {
+      clearTimeout(harvestFlushTimer);
+      harvestFlushTimer = null;
+    }
+    while (harvestQueue.length) flushHarvestQueue(true);
+    if (reason === 'completed') setHarvestStatus('Harvest complete');
+    else if (reason === 'cancelled') setHarvestStatus('Harvest stopped');
+    else if (reason === 'navigation') setHarvestStatus('Harvest stopped on navigation');
+    else if (reason) setHarvestStatus(`Harvest ${reason}`);
+    syncHarvestControlState(controlBar);
+  }
+
+  async function startApiHarvestRun() {
+    if (harvestActive) return;
+    const context = getHarvestContextFromRoute();
+    if (!context) {
+      setHarvestStatus('Harvest is available on Top, Profile, and Drafts pages.');
+      syncHarvestControlState(controlBar);
+      return;
+    }
+
+    if (isGatheringActiveThisTab) {
+      isGatheringActiveThisTab = false;
+      stopGathering(false);
+    }
+    if (analyzeActive) exitAnalyzeMode();
+
+    harvestActive = true;
+    harvestCancelRequested = false;
+    harvestRunId = `harvest_${Date.now()}`;
+    harvestDetailLookupsTotal = 0;
+    harvestDomSeenKeys.clear();
+    setHarvestStatus(`Preparing Harvest (${context})...`);
+    syncHarvestControlState(controlBar);
+
+    const runId = harvestRunId;
+    let apiWorked = false;
+    try {
+      apiWorked = await runApiHarvestPipeline(runId, context);
+      if (!apiWorked && harvestActive && !harvestCancelRequested && runId === harvestRunId) {
+        setHarvestStatus(`API harvest unavailable on ${context}, switching to DOM fallback...`);
+        await runHarvestDomFallback(runId, context);
+      }
+      if (harvestActive && !harvestCancelRequested && runId === harvestRunId) {
+        stopApiHarvestRun('completed');
+      }
+    } catch (err) {
+      try { console.warn('[SoraUV] harvest pipeline failed, using fallback', err); } catch {}
+      if (harvestActive && !harvestCancelRequested && runId === harvestRunId) {
+        try {
+          await runHarvestDomFallback(runId, context);
+        } catch {}
+        if (harvestActive && !harvestCancelRequested && runId === harvestRunId) {
+          stopApiHarvestRun('completed');
+        }
+      }
+    }
+  }
+
+  function forceStopHarvestOnNavigation() {
+    if (harvestActive) stopApiHarvestRun('navigation');
+  }
+
   let draftsBackupInFlight = false;
   let draftsBackupLastAttemptMs = 0;
   function scheduleDraftsBackupFetch(reason) {
@@ -5421,19 +7730,76 @@ async function renderAnalyzeTable(force = false) {
     } catch {}
   }
 
+  function isLikelyJsonContentType(value) {
+    try {
+      const ct = String(value || '').toLowerCase();
+      return ct.includes('application/json') || ct.includes('+json');
+    } catch {
+      return false;
+    }
+  }
+
+  function parseJsonPayloadSafely(text, meta = {}) {
+    if (typeof text !== 'string') return null;
+    const trimmed = text.trim();
+    if (!trimmed) return null;
+
+    const contentType = String(meta?.contentType || '');
+    const firstChar = trimmed[0];
+    const shouldParse = isLikelyJsonContentType(contentType) || firstChar === '{' || firstChar === '[';
+
+    if (!shouldParse) {
+      if (firstChar === '<') {
+        try {
+          dlog('feed', 'skipping non-json payload', {
+            source: meta?.source || '',
+            url: meta?.url || '',
+            contentType,
+            preview: truncateInline(trimmed.replace(/\s+/g, ' '), 120),
+          });
+        } catch {}
+      }
+      return null;
+    }
+
+    try {
+      return JSON.parse(trimmed);
+    } catch (err) {
+      if (firstChar === '<') {
+        try {
+          dlog('feed', 'skipping invalid html-like payload', {
+            source: meta?.source || '',
+            url: meta?.url || '',
+            contentType,
+            preview: truncateInline(trimmed.replace(/\s+/g, ' '), 120),
+          });
+        } catch {}
+        return null;
+      }
+      throw err;
+    }
+  }
+
+  async function cloneJsonResponseSafely(res, meta = {}) {
+    const clone = typeof res?.clone === 'function' ? res.clone() : null;
+    if (!clone) return null;
+    const contentType = String(clone.headers?.get?.('content-type') || '');
+    const text = await clone.text();
+    return parseJsonPayloadSafely(text, { ...meta, contentType });
+  }
+
   function installFetchSniffer() {
     dlog('feed', 'install fetch sniffer');
     const isLikelyJsonResponse = (res) => {
       try {
-        const ct = String(res?.headers?.get?.('content-type') || '').toLowerCase();
-        return ct.includes('application/json') || ct.includes('+json');
+        return isLikelyJsonContentType(res?.headers?.get?.('content-type') || '');
       } catch {
         return false;
       }
     };
     const origFetch = window.fetch;
     window.fetch = async function (input, init) {
-      // Capture Authorization header from outgoing requests for UV Drafts API
+      // Capture Authorization header from outgoing requests for the Creator Tools API
       try {
         let headers = init?.headers;
 
@@ -5456,46 +7822,158 @@ async function renderAnalyzeTable(force = false) {
             capturedAuthToken = authHeader;
             ensureUVDraftsPageModule()?.setCapturedAuthToken?.(capturedAuthToken);
           }
+          captureHarvestHeaders(headers);
         }
       } catch {}
 
-      // Intercept /backend/nf/create to inject composer overrides + model override
+      // Intercept create endpoints to inject composer/batch overrides.
+      let modifiedInput = input;
       let modifiedInit = init;
+      let pendingBatchRequest = null;
       try {
         const url = typeof input === 'string' ? input : input?.url || '';
-        if (NF_CREATE_RE.test(url) && init?.body && !init?.__sctDirect) {
-          let body = init.body;
+        if ((NF_CREATE_RE.test(url) || NF_BULK_CREATE_RE.test(url)) && !init?.__sctDirect) {
+          const isBulkCreateRequest = NF_BULK_CREATE_RE.test(url);
+          const onNativeDraftsRoute = /^\/drafts(?:\/|$)/i.test(String(location.pathname || ''));
+          const batchState = loadPendingCreateBatchState();
+          const batchActive = onNativeDraftsRoute && isPendingBatchStatus(batchState?.status);
+          const queuePeek = batchActive ? peekPendingCreateQueuePrompt() : null;
+          const queuePrompt =
+            batchActive && typeof queuePeek?.prompt === 'string'
+              ? queuePeek.prompt.trim()
+              : '';
+
+          if (batchActive) {
+            pendingBatchRequest = {
+              active: true,
+              prompt: queuePrompt,
+              batchState,
+            };
+          }
+
+          let body = init?.body;
+          if (body == null && input instanceof Request) {
+            try {
+              body = await input.clone().text();
+            } catch {}
+          }
+
           if (typeof body === 'string') {
             try {
               let nextBody = body;
-              const pendingOverrides = loadPendingCreateOverrides();
-              if (pendingOverrides) {
-                nextBody = applyComposerOverridesToCreateBody(nextBody, pendingOverrides);
+              let requestOverrides = null;
+
+              if (batchActive) {
+                const batchSettings = batchState?.settings && typeof batchState.settings === 'object'
+                  ? batchState.settings
+                  : null;
+                requestOverrides = {
+                  ...(batchSettings || {}),
+                  prompt: queuePrompt || null,
+                };
+              } else {
+                const pendingOverrides = loadPendingCreateOverrides();
+                if (pendingOverrides) {
+                  requestOverrides = pendingOverrides;
+                  clearPendingCreateOverrides();
+                }
               }
 
-              const activeModelOverride = getActiveModelOverride();
-              if (activeModelOverride) {
-                const parsed = JSON.parse(nextBody);
-                parsed.model = activeModelOverride;
-                nextBody = JSON.stringify(parsed);
+              if (requestOverrides) {
+                nextBody = applyCreateOverridesPreservingNativeShape(nextBody, requestOverrides, {
+                  isBulkRequest: isBulkCreateRequest,
+                });
               }
 
               if (nextBody !== body) {
-                modifiedInit = { ...init, body: nextBody };
-              }
-
-              if (pendingOverrides) {
-                clearPendingCreateOverrides();
+                if (input instanceof Request) {
+                  modifiedInput = new Request(input, { ...(init || {}), body: nextBody });
+                  modifiedInit = undefined;
+                } else {
+                  modifiedInit = { ...(init || {}), body: nextBody };
+                }
               }
             } catch {}
           }
         }
       } catch {}
 
-      const res = await origFetch.call(this, input, modifiedInit);
       try {
-        if (isDraftDetail()) return res;
-        const url = typeof input === 'string' ? input : input?.url || '';
+        captureHarvestTemplateFromRequest(modifiedInput, modifiedInit || init);
+      } catch {}
+
+      let res;
+      try {
+        res = await origFetch.call(this, modifiedInput, modifiedInit);
+      } catch (err) {
+        if (pendingBatchRequest?.active) {
+          const prev = pendingBatchRequest.batchState || loadPendingCreateBatchState();
+          savePendingCreateBatchState({
+            ...prev,
+            status: 'paused_error',
+            awaitingRequest: false,
+            lastError: String(err?.message || 'Network request failed'),
+          });
+        }
+        throw err;
+      }
+      try {
+        const url = typeof modifiedInput === 'string' ? modifiedInput : modifiedInput?.url || '';
+
+        if (pendingBatchRequest?.active) {
+          const prev = pendingBatchRequest.batchState || loadPendingCreateBatchState();
+          if (res.ok) {
+            notePendingBatchCreateAccepted(prev);
+            const advanced = advancePendingCreateQueuePrompt();
+            const submitted = Number(prev?.progress?.submitted || 0) + 1;
+            const total = Math.max(Number(prev?.progress?.total || 0), submitted);
+            if (Number(advanced?.remaining || 0) <= 0) {
+              savePendingCreateBatchState({
+                ...prev,
+                status: 'completed',
+                awaitingRequest: false,
+                completedAt: Date.now(),
+                progress: { submitted, total },
+                lastError: '',
+              });
+            } else {
+              savePendingCreateBatchState({
+                ...prev,
+                status: 'running',
+                awaitingRequest: false,
+                progress: { submitted, total },
+                lastError: '',
+              });
+            }
+          } else {
+            const failure = await classifyPendingBatchCreateFailure(res, prev);
+            if (failure.isCapacity) {
+              const backoffMs = notePendingBatchCapacityBackoff(prev);
+              const retrySeconds = Math.max(1, Math.ceil(Math.max(0, Number(backoffMs) || 0) / 1000));
+              savePendingCreateBatchState({
+                ...prev,
+                status: 'running',
+                awaitingRequest: false,
+                lastError: `Waiting for generation slots (${failure.message}). Retry in ~${retrySeconds}s.`,
+              });
+              refreshPendingBatchSlotObserver('capacity_failure');
+            } else {
+              savePendingCreateBatchState({
+                ...prev,
+                status: 'paused_error',
+                awaitingRequest: false,
+                lastError: failure.message || `HTTP ${res.status}`,
+              });
+            }
+          }
+        }
+
+        const skipDraftDetailProcessing =
+          isDraftDetail() &&
+          !DRAFTS_RE.test(url) &&
+          !NF_PENDING_V2_RE.test(url) &&
+          !NF_CREATE_RE.test(url);
+        if (skipDraftDetailProcessing) return res;
 
         // Intercept /backend/nf/create to capture task_id -> source draft mapping for draft remixes
         if (NF_CREATE_RE.test(url) && !init?.__sctDirect) {
@@ -5503,7 +7981,7 @@ async function renderAnalyzeTable(force = false) {
           const draftRemixMatch = location.pathname.match(/^\/d\/([A-Za-z0-9_-]+)/i);
           if (draftRemixMatch && location.search.includes('remix')) {
             const sourceDraftId = draftRemixMatch[1];
-            res.clone().json().then((json) => {
+            cloneJsonResponseSafely(res, { source: 'fetch', url }).then((json) => {
               const taskId = json?.id;
               if (taskId && sourceDraftId) {
                 saveTaskToSourceDraft(taskId, sourceDraftId);
@@ -5516,7 +7994,14 @@ async function renderAnalyzeTable(force = false) {
         // Pending tasks (v2): used by Sora to show running gens; parse to hydrate prompts/drafts.
         if (NF_PENDING_V2_RE.test(url)) {
           if (!res.ok) scheduleDraftsBackupFetch('pending_v2_not_ok');
-          res.clone().json().then(processPendingV2Json).catch(() => {
+          const limitHint = inferBatchSlotLimitFromHeaders(res?.headers);
+          cloneJsonResponseSafely(res, { source: 'fetch', url }).then((payload) => {
+            if (!payload) {
+              scheduleDraftsBackupFetch('pending_v2_parse_failed');
+              return;
+            }
+            processPendingV2Json(payload, { source: 'fetch', limitHint });
+          }).catch(() => {
             scheduleDraftsBackupFetch('pending_v2_parse_failed');
           });
           return res;
@@ -5526,27 +8011,33 @@ async function renderAnalyzeTable(force = false) {
         if (POST_DETAIL_RE.test(url)) {
           dlog('feed', 'fetch matched post detail', { url });
           rememberPostDetailTemplate(url);
-          res.clone().json().then((j) => {
+          cloneJsonResponseSafely(res, { source: 'fetch', url }).then((j) => {
+            if (!j) return;
             dlog('feed', 'post detail parsed', { url, hasPost: !!j?.post, hasRemixes: !!j?.remix_posts?.items });
             processPostDetailJson(j);
           }).catch((err) => {
             console.error('[SoraUV] Error parsing post detail fetch response:', err);
           });
         } else if (CHARACTERS_RE.test(url)) {
-          res.clone().json().then(processCharactersJson).catch((err) => {
+          cloneJsonResponseSafely(res, { source: 'fetch', url }).then((j) => {
+            if (!j) return;
+            processCharactersJson(j);
+          }).catch((err) => {
             console.error('[SoraUV] Error parsing characters fetch response:', err);
           });
         } else if (DRAFTS_RE.test(url)) {
           decorateDraftsResponse(res);
-          res.clone().json().then(processDraftsJson).catch((err) => {
+          cloneJsonResponseSafely(res, { source: 'fetch', url }).then((j) => {
+            if (!j) return;
+            processDraftsJson(j);
+          }).catch((err) => {
             console.error('[SoraUV] Error parsing drafts fetch response:', err);
           });
         } else if (FEED_RE.test(url)) {
           dlog('feed', 'fetch matched', { url });
-          res
-            .clone()
-            .json()
+          cloneJsonResponseSafely(res, { source: 'fetch', url })
             .then((j) => {
+              if (!j) return;
               dlog('feed', 'fetch parsed', { url, items: (j?.items || j?.data?.items || []).length });
               processFeedJson(j);
             })
@@ -5554,10 +8045,9 @@ async function renderAnalyzeTable(force = false) {
         } else if (typeof url === 'string' && url.startsWith(location.origin)) {
           // Avoid cloning/parsing bodies for non-JSON same-origin requests (can be very expensive on /d/...).
           if (isLikelyJsonResponse(res)) {
-            res
-              .clone()
-              .json()
+            cloneJsonResponseSafely(res, { source: 'fetch', url })
               .then((j) => {
+                if (!j) return;
                 if (looksLikePostDetail(j)) {
                   dlog('feed', 'fetch autodetected post detail', { url, hasPost: !!j?.post });
                   processPostDetailJson(j);
@@ -5576,17 +8066,35 @@ async function renderAnalyzeTable(force = false) {
     };
     const origOpen = XMLHttpRequest.prototype.open;
     XMLHttpRequest.prototype.open = function (method, url) {
+      try {
+        captureHarvestTemplateFromRequest(String(url || ''), { method: method || 'GET' });
+      } catch {}
       this.addEventListener('load', function () {
         try {
-          if (isDraftDetail()) return;
             if (typeof url === 'string') {
+              const responseContentType =
+                typeof this.getResponseHeader === 'function'
+                  ? String(this.getResponseHeader('content-type') || '')
+                  : '';
+              const parseXhrJson = () =>
+                parseJsonPayloadSafely(this.responseText, {
+                  source: 'xhr',
+                  url,
+                  contentType: responseContentType,
+                });
+              const skipDraftDetailProcessing =
+                isDraftDetail() &&
+                !DRAFTS_RE.test(url) &&
+                !NF_PENDING_V2_RE.test(url) &&
+                !NF_CREATE_RE.test(url);
+              if (skipDraftDetailProcessing) return;
               // Intercept /backend/nf/create for draft remix tracking
               if (NF_CREATE_RE.test(url)) {
                 const draftRemixMatch = location.pathname.match(/^\/d\/([A-Za-z0-9_-]+)/i);
                 if (draftRemixMatch && location.search.includes('remix')) {
                 const sourceDraftId = draftRemixMatch[1];
                 try {
-                  const json = JSON.parse(this.responseText);
+                  const json = parseXhrJson();
                   const taskId = json?.id;
                   if (taskId && sourceDraftId) {
                     saveTaskToSourceDraft(taskId, sourceDraftId);
@@ -5600,7 +8108,14 @@ async function renderAnalyzeTable(force = false) {
               if (NF_PENDING_V2_RE.test(url)) {
                 if (this.status && this.status >= 400) scheduleDraftsBackupFetch('pending_v2_xhr_not_ok');
                 try {
-                  processPendingV2Json(JSON.parse(this.responseText));
+                  const payload = parseXhrJson();
+                  if (!payload) throw new Error('non-json pending/v2 payload');
+                  processPendingV2Json(payload, {
+                    source: 'xhr',
+                    limitHint: inferBatchSlotLimitFromHeaders(
+                      typeof this.getAllResponseHeaders === 'function' ? this.getAllResponseHeaders() : ''
+                    ),
+                  });
                 } catch {
                   scheduleDraftsBackupFetch('pending_v2_xhr_parse_failed');
                 }
@@ -5612,7 +8127,8 @@ async function renderAnalyzeTable(force = false) {
                 dlog('feed', 'xhr matched post detail', { url });
                 rememberPostDetailTemplate(url);
                 try {
-                const j = JSON.parse(this.responseText);
+                const j = parseXhrJson();
+                if (!j) return;
                 dlog('feed', 'post detail parsed (XHR)', { url, hasPost: !!j?.post, hasRemixes: !!j?.remix_posts?.items });
                 processPostDetailJson(j);
               } catch (err) {
@@ -5620,28 +8136,33 @@ async function renderAnalyzeTable(force = false) {
               }
             } else if (CHARACTERS_RE.test(url)) {
               try {
-                processCharactersJson(JSON.parse(this.responseText));
+                const j = parseXhrJson();
+                if (!j) return;
+                processCharactersJson(j);
               } catch (err) {
                 console.error('[SoraUV] Error parsing characters XHR:', err);
               }
             } else if (DRAFTS_RE.test(url)) {
               try {
-                processDraftsJson(JSON.parse(this.responseText));
+                const j = parseXhrJson();
+                if (!j) return;
+                processDraftsJson(j);
               } catch (err) {
                 console.error('[SoraUV] Error parsing drafts XHR:', err);
               }
             } else if (FEED_RE.test(url)) {
               dlog('feed', 'xhr matched', { url });
               try {
-                const j = JSON.parse(this.responseText);
+                const j = parseXhrJson();
+                if (!j) return;
                 dlog('feed', 'xhr parsed', { url, items: (j?.items || j?.data?.items || []).length });
                 processFeedJson(j);
               } catch {}
             } else if (url.startsWith(location.origin)) {
               try {
-                const ct = String(this.getResponseHeader('content-type') || '').toLowerCase();
-                if (ct.includes('application/json') || ct.includes('+json')) {
-                  const j = JSON.parse(this.responseText);
+                if (isLikelyJsonContentType(responseContentType)) {
+                  const j = parseXhrJson();
+                  if (!j) return;
                   if (looksLikePostDetail(j)) {
                     dlog('feed', 'xhr autodetected post detail', { url, hasPost: !!j?.post });
                     processPostDetailJson(j);
@@ -5789,6 +8310,7 @@ async function renderAnalyzeTable(force = false) {
         }
       }
       const p = it?.post || it || {};
+      setPostRemixState(id, p, null);
       const created_at =
         p?.created_at ?? p?.uploaded_at ?? p?.createdAt ?? p?.created ?? p?.posted_at ?? p?.timestamp ?? null;
       const caption =
@@ -5984,6 +8506,7 @@ async function renderAnalyzeTable(force = false) {
           const remixCameoUsernames = getCameoUsernames(remixItem);
           
           const remixP = remixItem?.post || remixItem || {};
+          setPostRemixState(remixId, remixP, id);
           const remixCreatedAt = remixP?.created_at ?? remixP?.uploaded_at ?? remixP?.createdAt ?? remixP?.created ?? remixP?.posted_at ?? remixP?.timestamp ?? null;
           const remixCaption = (typeof remixP?.caption === 'string' && remixP.caption) ? remixP.caption : (typeof remixP?.text === 'string' && remixP.text ? remixP.text : null);
           const remixAgeMin = minutesSince(remixCreatedAt);
@@ -6257,7 +8780,8 @@ async function renderAnalyzeTable(force = false) {
     return Array.isArray(items) ? items : [];
   }
 
-  function processPendingV2Json(json) {
+  function processPendingV2Json(json, observerMeta = null) {
+    updatePendingBatchSlotObserverFromPayload(json, observerMeta);
     const gens = extractDraftItemsFromPayload(json);
     if (!Array.isArray(gens) || gens.length === 0) return;
 
@@ -6310,21 +8834,57 @@ async function renderAnalyzeTable(force = false) {
           idToViolation.set(draftId, false);
         }
 
-        // Extract remix target post ID if this is a remix of a post
-        const remixTargetPostId = item?.creation_config?.remix_target_post?.post?.id;
-        if (remixTargetPostId && typeof remixTargetPostId === 'string') {
+        // Recompute remix mapping each pass to avoid stale source links.
+        idToRemixTarget.delete(draftId);
+        idToRemixTargetDraft.delete(draftId);
+        idToDraftIsRemix.delete(draftId);
+        const creationConfig = item?.creation_config && typeof item.creation_config === 'object'
+          ? item.creation_config
+          : {};
+
+        const remixTargetPostId = firstValidPostId([
+          item?.remix_target_post_id,
+          creationConfig?.remix_target_post?.id,
+          creationConfig?.remix_target_post?.post?.id,
+          item?.source_post_id,
+          creationConfig?.source_post_id,
+        ]);
+        if (remixTargetPostId) {
           idToRemixTarget.set(draftId, remixTargetPostId);
         }
 
-        // Check if this draft is a remix of another draft (only if not already mapped)
+        const parsedSourceDraftId = firstValidDraftId([
+          item?.remix_target_draft_id,
+          creationConfig?.remix_target_draft?.id,
+          creationConfig?.remix_target_draft?.draft?.id,
+          creationConfig?.source_draft_id,
+          item?.source_draft_id,
+        ]);
+        if (parsedSourceDraftId) {
+          idToRemixTargetDraft.set(draftId, parsedSourceDraftId);
+        }
+
+        // Fallback via task->source mapping for draft remix flows.
         if (!idToRemixTargetDraft.has(draftId)) {
           const taskId = item?.task_id;
           if (taskId && taskToSourceDraft.has(taskId)) {
-            const sourceDraftId = taskToSourceDraft.get(taskId);
-            idToRemixTargetDraft.set(draftId, sourceDraftId);
-            dlog('drafts', `Mapped draft ${draftId} -> source draft ${sourceDraftId}`);
+            const sourceDraftId = normalizeSoraDraftId(taskToSourceDraft.get(taskId));
+            if (sourceDraftId) {
+              idToRemixTargetDraft.set(draftId, sourceDraftId);
+              dlog('drafts', `Mapped draft ${draftId} -> source draft ${sourceDraftId}`);
+            }
           }
         }
+
+        const mode = String(creationConfig?.mode || '').trim().toLowerCase();
+        const isDraftRemix = (
+          !!remixTargetPostId ||
+          idToRemixTargetDraft.has(draftId) ||
+          item?.is_remix === true ||
+          creationConfig?.is_remix === true ||
+          mode === 'remix'
+        );
+        idToDraftIsRemix.set(draftId, isDraftRemix);
       } catch (e) {
         console.error('[SoraUV] Error processing draft item:', e);
       }
@@ -6971,7 +9531,11 @@ async function renderAnalyzeTable(force = false) {
   // == Observers & Lifecycle ==
   function runRenderPass() {
     if (renderPassInFlight) return;
-    if (isDraftDetail()) return;
+    if (isDraftDetail()) {
+      renderDraftDetailBadge();
+      scheduleInjectDashboardButton();
+      return;
+    }
     const onExplore = isExplore();
     const onProfile = isProfile();
     const onPost = isPost();
@@ -7117,14 +9681,111 @@ async function renderAnalyzeTable(force = false) {
     return (a === 'explore' || a === 'post') && (b === 'explore' || b === 'post');
   }
 
+  function findTopRightActivityButton() {
+    const vw = window.innerWidth || document.documentElement.clientWidth || 0;
+    const vh = window.innerHeight || document.documentElement.clientHeight || 0;
+    const maxTop = Math.min(180, Math.max(100, Math.round(vh * 0.35)));
+    const minLeft = Math.round(vw * 0.45);
+    const candidates = Array.from(document.querySelectorAll('button[aria-label="Activity"]'))
+      .filter((btn) => !(controlBar && controlBar.contains(btn)))
+      .map((btn) => ({ btn, rect: btn.getBoundingClientRect() }))
+      .filter(({ rect }) => (
+        rect.width > 0 &&
+        rect.height > 0 &&
+        rect.top >= -20 &&
+        rect.top <= maxTop &&
+        rect.left >= minLeft
+      ))
+      .sort((a, b) => (b.rect.right - a.rect.right) || (a.rect.top - b.rect.top));
+    return candidates[0]?.btn || null;
+  }
+
+  function undockActivityButton(bar) {
+    if (!bar) return;
+    const state = bar._activityDockState;
+    if (!state) return;
+    const node = state.node;
+    const parent = state.originalParent;
+    const nextSibling = state.originalNextSibling;
+    if (node && state.nodeMarginLeft != null) node.style.marginLeft = state.nodeMarginLeft;
+    if (node && state.nodeMarginRight != null) node.style.marginRight = state.nodeMarginRight;
+    if (node && parent && parent.isConnected) {
+      if (nextSibling && nextSibling.parentNode === parent) parent.insertBefore(node, nextSibling);
+      else parent.appendChild(node);
+    }
+    if (state.nativeContainer && state.nativeContainer.isConnected) {
+      state.nativeContainer.style.display = state.nativeDisplay || '';
+    }
+    if (bar._activityDockSlot) {
+      bar._activityDockSlot.style.display = 'none';
+    }
+    bar._activityDockState = null;
+  }
+
+  function dockActivityButton(bar) {
+    if (!bar) return;
+    const buttonRow = bar._buttonRow;
+    if (!buttonRow) return;
+
+    const existingState = bar._activityDockState;
+    if (existingState?.node && bar._activityDockSlot && bar._activityDockSlot.contains(existingState.node)) {
+      bar._activityDockSlot.style.display = 'flex';
+      return;
+    }
+
+    const activityBtn = findTopRightActivityButton();
+    if (!activityBtn) {
+      undockActivityButton(bar);
+      return;
+    }
+
+    const dockSlot = bar._activityDockSlot || (() => {
+      const slot = document.createElement('div');
+      slot.className = 'sora-uv-activity-dock';
+      Object.assign(slot.style, {
+        display: 'none',
+        alignItems: 'center',
+        marginLeft: '-5px',
+      });
+      buttonRow.appendChild(slot);
+      bar._activityDockSlot = slot;
+      return slot;
+    })();
+
+    const moveNode = activityBtn.closest('.pointer-events-auto') || activityBtn;
+    const nativeContainer = moveNode.closest('.pointer-events-none.fixed') || moveNode.closest('.fixed');
+    if (!moveNode.parentNode) return;
+    const nodeMarginLeft = moveNode.style.marginLeft;
+    const nodeMarginRight = moveNode.style.marginRight;
+    undockActivityButton(bar);
+    bar._activityDockState = {
+      node: moveNode,
+      originalParent: moveNode.parentNode,
+      originalNextSibling: moveNode.nextSibling,
+      nativeContainer,
+      nativeDisplay: nativeContainer ? nativeContainer.style.display : '',
+      nodeMarginLeft,
+      nodeMarginRight,
+    };
+    moveNode.style.marginLeft = '0';
+    moveNode.style.marginRight = '0';
+    dockSlot.appendChild(moveNode);
+    dockSlot.style.display = 'flex';
+    if (nativeContainer) nativeContainer.style.display = 'none';
+  }
+
+  function syncActivityButtonDocking(bar, shouldDock) {
+    if (!bar) return;
+    if (!shouldDock) {
+      undockActivityButton(bar);
+      return;
+    }
+    dockActivityButton(bar);
+  }
+
   function updateControlsVisibility() {
     const bar = ensureControlBar();
     if (!bar) return;
-    const alignBarRight = () => {
-      bar.style.left = 'auto';
-      bar.style.transform = 'none';
-      bar.style.right = '12px';
-    };
 
     // Show control bar on drafts page for bookmarks feature, hide on other filter-hidden pages
     if (isFilterHiddenPage() && !isDrafts()) {
@@ -7136,6 +9797,7 @@ async function renderAnalyzeTable(force = false) {
     const filterBtn = bar.querySelector('[data-role="filter-btn"]');
     const filterContainer = filterBtn ? filterBtn.closest('.sora-uv-filter-container') : null;
     const gatherBtn = bar.querySelector('.sora-uv-gather-btn');
+    const harvestBtn = bar.querySelector('.sora-uv-harvest-btn');
     const gatherControlsWrapper = bar.querySelector('.sora-uv-gather-controls-wrapper');
     const sliderContainer = bar.querySelector('.sora-uv-slider-container');
     const filterDropdown = bar.querySelector('.sora-uv-filter-dropdown');
@@ -7146,6 +9808,7 @@ async function renderAnalyzeTable(force = false) {
     if (analyzeActive) {
       if (filterContainer) filterContainer.style.display = 'none';
       if (gatherBtn) gatherBtn.style.display = 'none';
+      if (harvestBtn) harvestBtn.style.display = 'none';
       if (gatherControlsWrapper) gatherControlsWrapper.style.display = 'none';
       if (typeof bar.updateFilterLabel === 'function') bar.updateFilterLabel();
 
@@ -7155,8 +9818,9 @@ async function renderAnalyzeTable(force = false) {
       } else {
         bar.style.top = '12px';
       }
-      alignBarRight();
-      syncActivityButtonDocking(bar, true);
+      bar.style.right = '12px';
+      bar.style.left = 'auto';
+      bar.style.transform = 'none';
 
       return; // nothing else to manage while analyzing
     }
@@ -7189,7 +9853,6 @@ async function renderAnalyzeTable(force = false) {
       bar.style.left = '50%';
       bar.style.right = 'auto';
       bar.style.transform = 'translateX(-50%)';
-      syncActivityButtonDocking(bar, false);
     } else if (isProfile() || isTopFeed()) {
       // Show Gather on Profile pages or Top feed
       if (gatherBtn) gatherBtn.style.display = 'flex';
@@ -7204,8 +9867,9 @@ async function renderAnalyzeTable(force = false) {
       } else {
         bar.style.top = '12px';
       }
-      alignBarRight();
-      syncActivityButtonDocking(bar, true);
+      bar.style.right = '12px';
+      bar.style.left = 'auto';
+      bar.style.transform = 'none';
     } else {
       // On other explore feeds (feed=following, feed=latest, or no feed param) or other pages, hide Gather
       if (gatherBtn) gatherBtn.style.display = 'none';
@@ -7226,17 +9890,21 @@ async function renderAnalyzeTable(force = false) {
       } else {
         bar.style.top = '12px';
       }
-      alignBarRight();
-      syncActivityButtonDocking(bar, true);
+      bar.style.right = '12px';
+      bar.style.left = 'auto';
+      bar.style.transform = 'none';
     }
 
     // Analyze button on all feeds except Drafts
     if (analyzeBtn) analyzeBtn.style.display = isDrafts() ? 'none' : '';
+    if (harvestBtn) harvestBtn.style.display = getHarvestContextFromRoute() ? '' : 'none';
 
     // Bookmarks button only on Drafts page
     if (bookmarksBtn) bookmarksBtn.style.display = isDrafts() ? '' : 'none';
+    if (typeof bar.updateDraftsQueueUi === 'function') bar.updateDraftsQueueUi();
 
     if (typeof bar.updateFilterLabel === 'function') bar.updateFilterLabel();
+    syncHarvestControlState(bar);
   }
 
   function onRouteChange() {
@@ -7245,8 +9913,10 @@ async function renderAnalyzeTable(force = false) {
     const navigated = rk !== prev;
     lastRouteKey = rk;
 
-    // Handle UV Drafts page
+    // Handle Creator Tools page
     if (isUVDrafts()) {
+      stopDraftDetailBadgeLoop();
+      teardownDetailBadge();
       // Hide other overlays
       try {
         if (analyzeOverlayEl) analyzeOverlayEl.style.display = 'none';
@@ -7256,29 +9926,38 @@ async function renderAnalyzeTable(force = false) {
       try {
         isGatheringActiveThisTab = false;
         stopGathering(false);
+        stopApiHarvestRun('navigation');
       } catch {}
 
-      // Hide control bar on UV Drafts
+      // Hide control bar on Creator Tools
       teardownControlBar();
+      stopPendingCreateBatchAutomation();
 
-      // Show UV Drafts page
+      // Show Creator Tools page
       const uvDraftsPageEl = ensureUVDraftsPage();
       if (!uvDraftsPageEl) requestUVDraftsScriptLoad(true);
-      // /uv-drafts is an extension virtual route; keep tab title from falling back to 404.
+      // The drafts route is extension-owned; keep the tab title from falling back to Sora's 404 title.
       startUVDraftsTitleGuard();
       return;
     } else {
-      // Hide UV Drafts page if we're not on that route
+      // Hide Creator Tools page if we're not on that route
       hideUVDraftsPage();
       restoreDocumentTitleAfterUVDrafts();
     }
 
     if (isDrafts() || String(location.search || '').includes('remix')) {
+      requestUVDraftsScriptLoad();
       checkPendingComposePrompt();
+    }
+    if (isDrafts()) {
+      startPendingCreateBatchAutomation();
+      setTimeout(tickPendingCreateBatchAutomation, 0);
+    } else {
+      stopPendingCreateBatchAutomation();
     }
 
     if (isDraftDetail()) {
-      // /d/... draft detail pages are extremely sensitive; avoid all injected work here.
+      // /d/... draft detail pages are sensitive; keep only dashboard + lightweight detail badge.
       try {
         stopRapidAnalyzeGather();
         stopAnalyzeAutoRefresh();
@@ -7291,6 +9970,7 @@ async function renderAnalyzeTable(force = false) {
       try {
         isGatheringActiveThisTab = false;
         stopGathering(false);
+        stopApiHarvestRun('navigation');
         const s = getGatherState() || {};
         s.isGathering = false;
         delete s.refreshDeadline;
@@ -7300,6 +9980,8 @@ async function renderAnalyzeTable(force = false) {
       teardownDetailBadge();
       teardownControlBar();
       stopObservers();
+      startDraftDetailBadgeLoop();
+      fetchDraftDetailDataIfNeeded().catch(() => {});
 
       try {
         if (dashboardInjectRafId) cancelAnimationFrame(dashboardInjectRafId);
@@ -7311,12 +9993,17 @@ async function renderAnalyzeTable(force = false) {
       dashboardInjectRetryId = null;
       scheduleInjectDashboardButton();
       return;
-    } else if (!observersActive) {
+    } else {
+      stopDraftDetailBadgeLoop();
+      teardownDetailBadge();
+    }
+    if (!observersActive) {
       // If we previously disabled for /d/... and navigated back, resume observers.
       startObservers();
     }
 
     if (navigated) {
+      forceStopHarvestOnNavigation();
       forceStopGatherOnNavigation();
       if (!shouldPreserveFilterAcrossNavigation(prev, rk)) resetFilterOnNavigation();
       // Reset bookmarks filter on navigation
@@ -7560,11 +10247,11 @@ async function renderAnalyzeTable(force = false) {
       dlog('feed', 'Dashboard button injected into left sidebar');
     } catch {}
 
-    // Also inject UV Drafts button
+    // Also inject the Creator Tools button
     injectUVDraftsButton();
   }
 
-  // Inject UV Drafts button into sidebar
+  // Inject Creator Tools button into the sidebar
   let uvDraftsBtnEl = null;
 
   function injectUVDraftsButton() {
@@ -7580,10 +10267,10 @@ async function renderAnalyzeTable(force = false) {
     const dashboardBtn = document.querySelector('.sora-uv-dashboard-btn');
     if (!dashboardBtn) return;
 
-    // Create UV Drafts button
+    // Create Creator Tools button
     const uvDraftsBtn = document.createElement('button');
     uvDraftsBtn.className = 'sora-uv-drafts-btn p-3.5 group data-[state=open]:opacity-100 opacity-50 hover:opacity-100 focus-visible:opacity-100';
-    uvDraftsBtn.setAttribute('aria-label', 'UV Drafts');
+    uvDraftsBtn.setAttribute('aria-label', 'Creator Tools');
     uvDraftsBtn.setAttribute('type', 'button');
     uvDraftsBtn.style.padding = '13px';
 
@@ -7608,7 +10295,7 @@ async function renderAnalyzeTable(force = false) {
 
     const srOnly = document.createElement('div');
     srOnly.className = 'sr-only';
-    srOnly.textContent = 'UV Drafts';
+    srOnly.textContent = 'Creator Tools';
 
     uvDraftsBtn.appendChild(iconSpanInline);
     uvDraftsBtn.appendChild(iconSpanHover);
@@ -7619,7 +10306,7 @@ async function renderAnalyzeTable(force = false) {
     uvDraftsBtnEl = uvDraftsBtn;
   }
 
-  // Global click delegation for UV Drafts button
+  // Global click delegation for the Creator Tools button
   document.addEventListener('click', (e) => {
     const btn = e.target.closest('.sora-uv-drafts-btn');
     if (!btn) return;
@@ -7627,12 +10314,7 @@ async function renderAnalyzeTable(force = false) {
     e.preventDefault();
     e.stopPropagation();
 
-    // Navigate to UV Drafts page
-    if (uvDraftsPrevDocTitle == null && typeof document.title === 'string' && document.title.trim()) {
-      uvDraftsPrevDocTitle = document.title;
-    }
-    history.pushState({}, '', '/creatortools');
-    onRouteChange();
+    navigateToUVDraftsRoute();
   }, true);
 
   // Global click delegation for the dashboard button
@@ -7687,8 +10369,13 @@ async function renderAnalyzeTable(force = false) {
     dlog('feed', 'init');
     ensureToastStyles();
     if (isDraftDetail()) {
-      dlog('feed', 'draft detail route detected; injecting dashboard only');
-      scheduleInjectDashboardButton();
+      dlog('feed', 'draft detail route detected; enabling draft-detail overlay mode');
+      loadTaskToSourceDraft();
+      installFetchSniffer();
+      startMenuObserver();
+      window.addEventListener('storage', handleStorageChange);
+      startScheduledPostsTimer();
+      onRouteChange();
       return;
     }
     // Allow auto-starting Gather on Top feed or Profile via URL param.
@@ -7725,6 +10412,9 @@ async function renderAnalyzeTable(force = false) {
 
     // Check for pending redo prompt (from remix navigation)
     checkPendingRedoPrompt();
+    if (isDrafts() || String(location.search || '').includes('remix')) {
+      requestUVDraftsScriptLoad();
+    }
     checkPendingComposePrompt();
 
     // If this tab had Gather running pre-refresh, resume it AND start a fresh timer.
@@ -7753,6 +10443,9 @@ async function renderAnalyzeTable(force = false) {
       idToPrompt,
       idToDownloadUrl,
       idToViolation,
+      idToIsRemix,
+      idToRemixSourcePostId,
+      idToDraftIsRemix,
       idToRemixTarget,
       idToRemixTargetDraft,
       taskToSourceDraft,

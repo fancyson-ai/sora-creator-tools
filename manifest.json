@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Sora Creator Tools",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Unofficial community overlays and analytics for Sora creators. Not affiliated with or endorsed by OpenAI.",
   "icons": {
     "16": "icons/16.png",

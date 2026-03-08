@@ -6,6 +6,15 @@ const vm = require('node:vm');
 
 const INJECT_PATH = path.join(__dirname, '..', 'inject.js');
 
+test('inject defines the activity docking helper before control visibility logic', () => {
+  const src = fs.readFileSync(INJECT_PATH, 'utf8');
+  const dockingHelperStart = src.indexOf('  function syncActivityButtonDocking(bar, shouldDock) {');
+  assert.notEqual(dockingHelperStart, -1, 'inject activity docking helper not found');
+  const visibilityStart = src.indexOf('  function updateControlsVisibility() {');
+  assert.notEqual(visibilityStart, -1, 'inject visibility snippet start not found');
+  assert.ok(dockingHelperStart < visibilityStart, 'activity docking helper must be defined before updateControlsVisibility');
+});
+
 function buildControlVisibilityHarness() {
   const src = fs.readFileSync(INJECT_PATH, 'utf8');
   const helperStart = src.indexOf('  const normalizeId = (s) => s?.toString().split(/[?#]/)[0].trim();');

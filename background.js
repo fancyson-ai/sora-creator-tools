@@ -7,6 +7,11 @@ chrome.action.onClicked.addListener(() => {
 
 const PENDING = [];
 let flushTimer = null;
+const HARVEST_PENDING = [];
+let harvestFlushTimer = null;
+let isHarvestFlushing = false;
+let needsHarvestFlush = false;
+let harvestDbPromise = null;
 const METRICS_STORAGE_KEY = 'metrics';
 const METRICS_UPDATED_AT_KEY = 'metricsUpdatedAt';
 const METRICS_USERS_INDEX_KEY = 'metricsUsersIndex';
@@ -14,6 +19,18 @@ const TRUSTED_TAB_URL_RE = /^https:\/\/sora\.chatgpt\.com\//i;
 const MAX_MESSAGE_BATCH_ITEMS = 250;
 const MAX_SNAPSHOT_HISTORY_PER_POST = 720;
 const MAX_PROFILE_SERIES_POINTS = 720;
+const MAX_HARVEST_BATCH_ITEMS = 250;
+const MAX_HARVEST_RECORDS = 25000;
+const MAX_HARVEST_CAST_NAMES = 32;
+const HARVEST_FLUSH_DEBOUNCE_MS = 900;
+const HARVEST_UPDATED_AT_KEY = 'harvestUpdatedAt';
+const HARVEST_STORAGE_VERSION_KEY = 'harvestStorageVersion';
+const HARVEST_STORAGE_KEY = 'harvestRecordsV1';
+const HARVEST_STORAGE_VERSION = 1;
+const HARVEST_DB_NAME = 'SCT_HARVEST_DB_V1';
+const HARVEST_DB_VERSION = 1;
+const HARVEST_STORE = 'records';
+const HARVEST_META_STORE = 'meta';
 
 // Debug toggles
 const DEBUG = { storage: false, thumbs: false };
@@ -162,6 +179,222 @@ function sanitizeMetricsBatch(items) {
     const snap = sanitizeMetricsSnapshot(items[i]);
     if (snap) out.push(snap);
   }
+  return out;
+}
+
+function normalizeHarvestKind(value) {
+  const kind = sanitizeString(value, 16);
+  if (!kind) return null;
+  const n = kind.toLowerCase();
+  if (n === 'published' || n === 'draft' || n === 'unknown') return n;
+  return null;
+}
+
+function normalizeHarvestContext(value) {
+  const context = sanitizeString(value, 16);
+  if (!context) return null;
+  const n = context.toLowerCase();
+  if (n === 'top' || n === 'profile' || n === 'drafts') return n;
+  return null;
+}
+
+function normalizeHarvestSource(value) {
+  const source = sanitizeString(value, 16);
+  if (!source) return null;
+  const n = source.toLowerCase();
+  if (n === 'api' || n === 'dom') return n;
+  return null;
+}
+
+function sanitizeStringArray(value, maxItems = MAX_HARVEST_CAST_NAMES, maxLen = 80) {
+  if (!Array.isArray(value)) return null;
+  const out = [];
+  for (const raw of value) {
+    if (out.length >= maxItems) break;
+    const next = sanitizeString(raw, maxLen);
+    if (!next) continue;
+    out.push(next);
+  }
+  return out.length ? out : null;
+}
+
+function sanitizeHarvestRecord(raw) {
+  if (!isPlainObject(raw)) return null;
+  const rec = {};
+
+  const id = sanitizeIdToken(raw.id);
+  if (!id) return null;
+  rec.id = id;
+
+  const kind = normalizeHarvestKind(raw.kind);
+  if (!kind) return null;
+  rec.kind = kind;
+
+  const context = normalizeHarvestContext(raw.context);
+  if (context) rec.context = context;
+  const source = normalizeHarvestSource(raw.source);
+  if (source) rec.source = source;
+
+  const userHandle = sanitizeString(raw.user_handle, 80);
+  if (userHandle) rec.user_handle = userHandle;
+  const userId = sanitizeUserId(raw.user_id);
+  if (userId != null) rec.user_id = userId;
+
+  const detailUrl = sanitizeString(raw.detail_url, 2048);
+  if (detailUrl) rec.detail_url = detailUrl;
+
+  const prompt = sanitizeString(raw.prompt, 4096);
+  if (prompt) rec.prompt = prompt;
+  const promptSource = sanitizeString(raw.prompt_source, 32);
+  if (promptSource) rec.prompt_source = promptSource;
+  const title = sanitizeString(raw.title, 512);
+  if (title) rec.title = title;
+  const generationType = sanitizeString(raw.generation_type, 64);
+  if (generationType) rec.generation_type = generationType;
+  const generationId = sanitizeIdToken(raw.generation_id);
+  if (generationId) rec.generation_id = generationId;
+
+  const width = sanitizeNumber(raw.width, 1, 20000);
+  if (width != null) rec.width = width;
+  const height = sanitizeNumber(raw.height, 1, 20000);
+  if (height != null) rec.height = height;
+  const duration = sanitizeNumber(raw.duration_s, 0, 60 * 60 * 10);
+  if (duration != null) rec.duration_s = duration;
+
+  if (typeof raw.created_at === 'string') {
+    const createdAt = sanitizeString(raw.created_at, 64);
+    if (createdAt) rec.created_at = createdAt;
+  } else {
+    const createdAt = sanitizeNumber(raw.created_at, 0);
+    if (createdAt != null) rec.created_at = createdAt;
+  }
+  if (typeof raw.posted_at === 'string') {
+    const postedAt = sanitizeString(raw.posted_at, 64);
+    if (postedAt) rec.posted_at = postedAt;
+  } else {
+    const postedAt = sanitizeNumber(raw.posted_at, 0);
+    if (postedAt != null) rec.posted_at = postedAt;
+  }
+  if (typeof raw.updated_at === 'string') {
+    const updatedAt = sanitizeString(raw.updated_at, 64);
+    if (updatedAt) rec.updated_at = updatedAt;
+  } else {
+    const updatedAt = sanitizeNumber(raw.updated_at, 0);
+    if (updatedAt != null) rec.updated_at = updatedAt;
+  }
+
+  const viewCount = sanitizeNumber(raw.view_count, 0);
+  if (viewCount != null) rec.view_count = viewCount;
+  const uniqueViewCount = sanitizeNumber(raw.unique_view_count, 0);
+  if (uniqueViewCount != null) rec.unique_view_count = uniqueViewCount;
+  const likeCount = sanitizeNumber(raw.like_count, 0);
+  if (likeCount != null) rec.like_count = likeCount;
+  const dislikeCount = sanitizeNumber(raw.dislike_count, 0);
+  if (dislikeCount != null) rec.dislike_count = dislikeCount;
+  const replyCount = sanitizeNumber(raw.reply_count, 0);
+  if (replyCount != null) rec.reply_count = replyCount;
+  const recursiveReplyCount = sanitizeNumber(raw.recursive_reply_count, 0);
+  if (recursiveReplyCount != null) rec.recursive_reply_count = recursiveReplyCount;
+  const remixCount = sanitizeNumber(raw.remix_count, 0);
+  if (remixCount != null) rec.remix_count = remixCount;
+
+  const postPermalink = sanitizeString(raw.post_permalink, 2048);
+  if (postPermalink) rec.post_permalink = postPermalink;
+  const postVisibility = sanitizeString(raw.post_visibility, 32);
+  if (postVisibility) rec.post_visibility = postVisibility;
+
+  const castCount = sanitizeNumber(raw.cast_count, 0, MAX_HARVEST_CAST_NAMES);
+  if (castCount != null) rec.cast_count = castCount;
+  const castNames = sanitizeStringArray(raw.cast_names, MAX_HARVEST_CAST_NAMES, 80);
+  if (castNames) rec.cast_names = castNames;
+  const cameos = sanitizeStringArray(raw.cameos, MAX_HARVEST_CAST_NAMES, 80);
+  if (cameos) rec.cameos = cameos;
+
+  const firstSeenTs = sanitizeNumber(raw.first_seen_ts, 0);
+  if (firstSeenTs != null) rec.first_seen_ts = firstSeenTs;
+  const lastSeenTs = sanitizeNumber(raw.last_seen_ts, 0);
+  if (lastSeenTs != null) rec.last_seen_ts = lastSeenTs;
+  const runId = sanitizeIdToken(raw.last_harvest_run_id);
+  if (runId) rec.last_harvest_run_id = runId;
+
+  rec.recordKey = `${rec.kind}:${rec.id}`;
+  return rec;
+}
+
+function sanitizeHarvestBatch(items) {
+  if (!Array.isArray(items)) return [];
+  const out = [];
+  const limit = Math.min(items.length, MAX_HARVEST_BATCH_ITEMS);
+  for (let i = 0; i < limit; i++) {
+    const rec = sanitizeHarvestRecord(items[i]);
+    if (rec) out.push(rec);
+  }
+  return out;
+}
+
+function mergeHarvestRecord(existing, incoming) {
+  const prev = isPlainObject(existing) ? existing : null;
+  const next = isPlainObject(incoming) ? incoming : null;
+  if (!next) return prev;
+  if (!prev) return { ...next };
+
+  const out = { ...prev, ...next };
+  out.recordKey = next.recordKey || prev.recordKey;
+  out.id = prev.id || next.id;
+  out.kind = prev.kind || next.kind || 'unknown';
+
+  const firstSeenPrev = sanitizeNumber(prev.first_seen_ts, 0);
+  const firstSeenNext = sanitizeNumber(next.first_seen_ts, 0);
+  if (firstSeenPrev != null && firstSeenNext != null) out.first_seen_ts = Math.min(firstSeenPrev, firstSeenNext);
+  else out.first_seen_ts = firstSeenPrev != null ? firstSeenPrev : firstSeenNext;
+
+  const lastSeenPrev = sanitizeNumber(prev.last_seen_ts, 0);
+  const lastSeenNext = sanitizeNumber(next.last_seen_ts, 0);
+  if (lastSeenPrev != null && lastSeenNext != null) out.last_seen_ts = Math.max(lastSeenPrev, lastSeenNext);
+  else out.last_seen_ts = lastSeenPrev != null ? lastSeenPrev : lastSeenNext;
+
+  const maxField = (name) => {
+    const a = sanitizeNumber(prev[name], 0);
+    const b = sanitizeNumber(next[name], 0);
+    if (a != null && b != null) out[name] = Math.max(a, b);
+    else if (a != null || b != null) out[name] = a != null ? a : b;
+  };
+  maxField('view_count');
+  maxField('unique_view_count');
+  maxField('like_count');
+  maxField('dislike_count');
+  maxField('reply_count');
+  maxField('recursive_reply_count');
+  maxField('remix_count');
+  maxField('cast_count');
+
+  const preferIncomingIfExistingEmpty = (name) => {
+    const prevVal = prev[name];
+    const nextVal = next[name];
+    const prevEmpty = prevVal == null || prevVal === '' || (Array.isArray(prevVal) && prevVal.length === 0);
+    const nextNonEmpty = !(nextVal == null || nextVal === '' || (Array.isArray(nextVal) && nextVal.length === 0));
+    if (prevEmpty && nextNonEmpty) out[name] = nextVal;
+    else out[name] = prevVal != null ? prevVal : nextVal;
+  };
+  preferIncomingIfExistingEmpty('prompt');
+  preferIncomingIfExistingEmpty('prompt_source');
+  preferIncomingIfExistingEmpty('title');
+  preferIncomingIfExistingEmpty('generation_type');
+  preferIncomingIfExistingEmpty('generation_id');
+  preferIncomingIfExistingEmpty('detail_url');
+  preferIncomingIfExistingEmpty('created_at');
+  preferIncomingIfExistingEmpty('posted_at');
+  preferIncomingIfExistingEmpty('updated_at');
+  preferIncomingIfExistingEmpty('post_permalink');
+  preferIncomingIfExistingEmpty('post_visibility');
+  preferIncomingIfExistingEmpty('cast_names');
+  preferIncomingIfExistingEmpty('cameos');
+  preferIncomingIfExistingEmpty('user_handle');
+  preferIncomingIfExistingEmpty('user_id');
+
+  out.context = next.context || prev.context;
+  out.source = next.source || prev.source;
+  out.last_harvest_run_id = next.last_harvest_run_id || prev.last_harvest_run_id;
   return out;
 }
 
@@ -383,6 +616,8 @@ function trimPostForResponse(post, snapshotMode) {
     userHandle: post.userHandle ?? null,
     userKey: post.userKey ?? null,
     post_time: postTime || null,
+    parent_post_id: post.parent_post_id ?? null,
+    root_post_id: post.root_post_id ?? null,
     duration: post.duration ?? null,
     width: post.width ?? null,
     height: post.height ?? null,
@@ -486,6 +721,11 @@ function buildMetricsForRequest(metrics, req) {
 function scheduleFlush() {
   if (flushTimer) return;
   flushTimer = setTimeout(flush, 750);
+}
+
+function scheduleHarvestFlush() {
+  if (harvestFlushTimer) return;
+  harvestFlushTimer = setTimeout(flushHarvest, HARVEST_FLUSH_DEBOUNCE_MS);
 }
 
 function scheduleColdWrite() {
@@ -795,6 +1035,164 @@ async function flushCold() {
   }
 }
 
+function openHarvestDB() {
+  if (harvestDbPromise) return harvestDbPromise;
+  harvestDbPromise = new Promise((resolve, reject) => {
+    try {
+      const request = indexedDB.open(HARVEST_DB_NAME, HARVEST_DB_VERSION);
+      request.onerror = () => reject(request.error || new Error('Failed to open harvest DB'));
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        if (!db.objectStoreNames.contains(HARVEST_STORE)) {
+          const store = db.createObjectStore(HARVEST_STORE, { keyPath: 'recordKey' });
+          store.createIndex('last_seen_ts', 'last_seen_ts', { unique: false });
+        }
+        if (!db.objectStoreNames.contains(HARVEST_META_STORE)) {
+          db.createObjectStore(HARVEST_META_STORE, { keyPath: 'key' });
+        }
+      };
+      request.onsuccess = () => resolve(request.result);
+    } catch (err) {
+      reject(err);
+    }
+  });
+  return harvestDbPromise;
+}
+
+async function harvestGetMany(recordKeys) {
+  if (!Array.isArray(recordKeys) || !recordKeys.length) return [];
+  const db = await openHarvestDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(HARVEST_STORE, 'readonly');
+    const store = tx.objectStore(HARVEST_STORE);
+    const out = new Array(recordKeys.length);
+    let pending = recordKeys.length;
+    for (let i = 0; i < recordKeys.length; i++) {
+      const req = store.get(recordKeys[i]);
+      req.onsuccess = () => {
+        out[i] = req.result || null;
+        pending -= 1;
+        if (pending === 0) resolve(out);
+      };
+      req.onerror = () => {
+        pending -= 1;
+        out[i] = null;
+        if (pending === 0) resolve(out);
+      };
+    }
+    tx.onerror = () => reject(tx.error || new Error('harvestGetMany transaction failed'));
+  });
+}
+
+async function harvestPutMany(records) {
+  if (!Array.isArray(records) || !records.length) return;
+  const db = await openHarvestDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(HARVEST_STORE, 'readwrite');
+    const store = tx.objectStore(HARVEST_STORE);
+    for (const rec of records) {
+      if (!rec || !rec.recordKey) continue;
+      store.put(rec);
+    }
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error || new Error('harvestPutMany transaction failed'));
+    tx.onabort = () => reject(tx.error || new Error('harvestPutMany transaction aborted'));
+  });
+}
+
+async function harvestCount() {
+  const db = await openHarvestDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(HARVEST_STORE, 'readonly');
+    const req = tx.objectStore(HARVEST_STORE).count();
+    req.onsuccess = () => resolve(Number(req.result) || 0);
+    req.onerror = () => reject(req.error || new Error('harvest count failed'));
+  });
+}
+
+async function harvestTrimOldest(maxRecords) {
+  const max = Math.max(1, Number(maxRecords) || MAX_HARVEST_RECORDS);
+  const currentCount = await harvestCount();
+  let toDelete = currentCount - max;
+  if (toDelete <= 0) return currentCount;
+
+  const db = await openHarvestDB();
+  await new Promise((resolve, reject) => {
+    const tx = db.transaction(HARVEST_STORE, 'readwrite');
+    const store = tx.objectStore(HARVEST_STORE);
+    const idx = store.index('last_seen_ts');
+    const cursorReq = idx.openCursor();
+    cursorReq.onsuccess = (ev) => {
+      const cursor = ev?.target?.result;
+      if (!cursor || toDelete <= 0) return;
+      store.delete(cursor.primaryKey);
+      toDelete -= 1;
+      cursor.continue();
+    };
+    cursorReq.onerror = () => reject(cursorReq.error || new Error('harvest trim cursor failed'));
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error || new Error('harvest trim transaction failed'));
+    tx.onabort = () => reject(tx.error || new Error('harvest trim transaction aborted'));
+  });
+  return harvestCount();
+}
+
+async function flushHarvest() {
+  harvestFlushTimer = null;
+  if (isHarvestFlushing) {
+    needsHarvestFlush = true;
+    return;
+  }
+  if (!HARVEST_PENDING.length) return;
+
+  isHarvestFlushing = true;
+  try {
+    const items = HARVEST_PENDING.splice(0, HARVEST_PENDING.length);
+    const mergedIncoming = new Map();
+    for (const rec of items) {
+      const key = rec.recordKey || `${rec.kind || 'unknown'}:${rec.id || ''}`;
+      if (!key) continue;
+      const current = mergedIncoming.get(key);
+      mergedIncoming.set(key, mergeHarvestRecord(current, rec));
+    }
+    const keys = Array.from(mergedIncoming.keys());
+    if (!keys.length) return;
+
+    const existing = await harvestGetMany(keys);
+    const writes = [];
+    for (let i = 0; i < keys.length; i++) {
+      const key = keys[i];
+      const merged = mergeHarvestRecord(existing[i], mergedIncoming.get(key));
+      if (!merged) continue;
+      merged.recordKey = key;
+      writes.push(merged);
+    }
+    if (!writes.length) return;
+
+    await harvestPutMany(writes);
+    const count = await harvestTrimOldest(MAX_HARVEST_RECORDS);
+    const now = Date.now();
+    await chrome.storage.local.set({
+      [HARVEST_UPDATED_AT_KEY]: now,
+      [HARVEST_STORAGE_VERSION_KEY]: HARVEST_STORAGE_VERSION,
+      [HARVEST_STORAGE_KEY]: {
+        backend: 'indexeddb',
+        db: HARVEST_DB_NAME,
+        store: HARVEST_STORE,
+        count,
+      },
+    });
+  } catch (err) {
+    try { console.warn('[SoraHarvest] flush failed', err); } catch {}
+  } finally {
+    isHarvestFlushing = false;
+    if (needsHarvestFlush) {
+      needsHarvestFlush = false;
+      scheduleHarvestFlush();
+    }
+  }
+}
+
 /* ─── Message handlers ─── */
 
 function openOrFocusDashboard(sendResponse) {
@@ -832,6 +1230,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (items.length) {
       for (const it of items) PENDING.push(it);
       scheduleFlush();
+    }
+    return false; // fire-and-forget
+  }
+
+  if (message.action === 'harvest_batch') {
+    const items = sanitizeHarvestBatch(message.items);
+    if (items.length) {
+      for (const it of items) HARVEST_PENDING.push(it);
+      scheduleHarvestFlush();
     }
     return false; // fire-and-forget
   }
@@ -894,3 +1301,20 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 
 // Run one-time migration from v1 (monolithic) to v2 (hot/cold split)
 migrateStorageIfNeeded();
+
+// Ensure harvest metadata is initialized.
+(async () => {
+  try {
+    const current = await chrome.storage.local.get([HARVEST_STORAGE_VERSION_KEY, HARVEST_STORAGE_KEY]);
+    if (Number(current[HARVEST_STORAGE_VERSION_KEY]) === HARVEST_STORAGE_VERSION && current[HARVEST_STORAGE_KEY]) return;
+    await chrome.storage.local.set({
+      [HARVEST_STORAGE_VERSION_KEY]: HARVEST_STORAGE_VERSION,
+      [HARVEST_STORAGE_KEY]: {
+        backend: 'indexeddb',
+        db: HARVEST_DB_NAME,
+        store: HARVEST_STORE,
+        count: 0,
+      },
+    });
+  } catch {}
+})();
