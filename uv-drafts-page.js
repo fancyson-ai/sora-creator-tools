@@ -31,6 +31,43 @@
     return available.find((model) => composerModelMatchesFamily(model, family))?.value || '';
   }
 
+  function parseStoredVideoGensBalanceValue(rawStorageValue) {
+    try {
+      const parsed = JSON.parse(rawStorageValue || 'null');
+      if (!parsed || typeof parsed !== 'object') return null;
+      const count = Number(parsed.count);
+      const resetsInSeconds = Number(parsed.resetsInSeconds);
+      return {
+        count: Number.isFinite(count) ? Math.max(0, Math.round(count)) : null,
+        resetsInSeconds: Number.isFinite(resetsInSeconds) ? Math.max(0, Math.round(resetsInSeconds)) : null,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  function formatVideoGensBalanceCount(count) {
+    if (count == null || count === '') return '';
+    const n = Number(count);
+    if (!Number.isFinite(n)) return '';
+    const rounded = Math.max(0, Math.round(n));
+    try {
+      return new Intl.NumberFormat('en-US').format(rounded);
+    } catch {
+      return String(rounded);
+    }
+  }
+
+  function formatVideoGensResetSummary(seconds) {
+    if (seconds == null || seconds === '') return '';
+    const n = Number(seconds);
+    if (!Number.isFinite(n)) return '';
+    const totalMinutes = Math.max(0, Math.ceil(n / 60));
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+    return `Resets in ${hours}h ${minutes}m`;
+  }
+
   function mergePendingDraftStatesById(primaryDrafts, secondaryDrafts) {
     const merged = [];
     const seen = new Set();
@@ -1179,6 +1216,8 @@
     const SORA_DEFAULT_FPS = Number(deps.defaultFps) > 0 ? Number(deps.defaultFps) : 30;
     const BOOKMARKS_KEY = 'SORA_UV_BOOKMARKS_V1';
     const GENS_COUNT_KEY = 'SCT_GENS_COUNT_V1';
+    const VIDEO_GENS_BALANCE_KEY = 'SCT_VIDEO_GENS_BALANCE_V1';
+    const VIDEO_GENS_BALANCE_EVENT = 'sct_video_gens_balance';
     const UV_DRAFTS_GENS_COUNT_KEY = 'SORA_UV_DRAFTS_GENS_COUNT_V1';
     const UV_DRAFTS_COMPOSER_PROMPT_KEY = 'SORA_UV_DRAFTS_PROMPT_V1';
     const ULTRA_MODE_KEY = 'SCT_ULTRA_MODE_V1';
@@ -1351,6 +1390,14 @@
           JSON.stringify({ prompt: nextPrompt, setAt: Date.now() })
         );
       } catch {}
+    }
+
+    function readStoredVideoGensBalance() {
+      try {
+        return parseStoredVideoGensBalanceValue(localStorage.getItem(VIDEO_GENS_BALANCE_KEY));
+      } catch {
+        return null;
+      }
     }
 
     function escapeHtml(str) {
@@ -4466,6 +4513,15 @@
         <button type="button" class="uvd-requires-source" data-uvd-compose-extend="1">Extend</button>
       </div>
       <div class="uvd-compose-status" data-uvd-compose-status="1"></div>
+      <div class="uvd-composer-footer">
+        <div class="uvd-gens-balance" data-uvd-compose-gens-balance="1" hidden>
+          <div class="uvd-gens-balance-top">
+            <span>Remaining</span>
+            <strong data-uvd-compose-gens-balance-value="1"></strong>
+          </div>
+          <div class="uvd-gens-balance-meta" data-uvd-compose-gens-balance-meta="1"></div>
+        </div>
+      </div>
     `;
 
     const statusEl = composer.querySelector('[data-uvd-compose-status="1"]');
@@ -4473,6 +4529,9 @@
     const modelEl = composer.querySelector('[data-uvd-compose-model="1"]');
     const durationEl = composer.querySelector('[data-uvd-compose-duration="1"]');
     const gensEl = composer.querySelector('[data-uvd-compose-gens="1"]');
+    const gensBalanceEl = composer.querySelector('[data-uvd-compose-gens-balance="1"]');
+    const gensBalanceValueEl = composer.querySelector('[data-uvd-compose-gens-balance-value="1"]');
+    const gensBalanceMetaEl = composer.querySelector('[data-uvd-compose-gens-balance-meta="1"]');
     const orientationEl = composer.querySelector('[data-uvd-compose-orientation="1"]');
     const sizeEl = composer.querySelector('[data-uvd-compose-size="1"]');
     const styleEl = composer.querySelector('[data-uvd-compose-style="1"]');
@@ -4497,6 +4556,24 @@
       );
       if (sizeEl.value !== normalizedSize) sizeEl.value = normalizedSize;
       sizeEl.disabled = !allowLarge;
+    };
+
+    const renderComposerGensBalance = (balance = readStoredVideoGensBalance()) => {
+      if (!gensBalanceEl || !gensBalanceValueEl || !gensBalanceMetaEl) return;
+      const countText = formatVideoGensBalanceCount(balance?.count);
+      if (!countText) {
+        gensBalanceEl.hidden = true;
+        gensBalanceValueEl.textContent = '';
+        gensBalanceMetaEl.textContent = '';
+        gensBalanceEl.removeAttribute('title');
+        return;
+      }
+      const resetText = formatVideoGensResetSummary(balance?.resetsInSeconds);
+      gensBalanceEl.hidden = false;
+      gensBalanceValueEl.textContent = countText;
+      gensBalanceMetaEl.textContent = resetText || 'Estimated video gens remaining';
+      if (resetText) gensBalanceEl.title = resetText;
+      else gensBalanceEl.removeAttribute('title');
     };
 
     const syncStateFromFields = (options = {}) => {
@@ -4529,6 +4606,7 @@
     sizeEl.value = uvDraftsComposerState.size;
     styleEl.value = uvDraftsComposerState.style_id;
     syncGensFieldLimits();
+    renderComposerGensBalance();
     syncComposerSizeField();
     uvDraftsComposerState.size = sizeEl.value;
     persistUVDraftsComposerState();
@@ -4547,10 +4625,17 @@
       syncGensFieldLimits();
       syncStateFromFields();
     });
+    window.addEventListener(VIDEO_GENS_BALANCE_EVENT, (event) => {
+      renderComposerGensBalance(event?.detail || null);
+    });
     window.addEventListener('storage', (event) => {
       if (event.key === ULTRA_MODE_KEY) {
         syncGensFieldLimits();
         syncStateFromFields();
+        return;
+      }
+      if (event.key === VIDEO_GENS_BALANCE_KEY) {
+        renderComposerGensBalance(parseStoredVideoGensBalanceValue(event.newValue));
       }
     });
 
@@ -6899,7 +6984,7 @@
       .uvd-input:focus, .uvd-select:focus { outline: none; border-color: var(--uvd-border-strong); box-shadow: 0 0 0 3px rgba(255,255,255,0.08); background: var(--uvd-surface-hover); }
       .uvd-input { padding: 0 14px; min-width: 360px; flex: 1; }
       .uvd-select { padding: 0 12px; min-width: 190px; }
-      .uvd-composer { position: fixed; left: 0; top: 0; bottom: 0; width: 390px; box-sizing: border-box; padding: 22px 18px 24px; overflow: auto; border-right: 1px solid var(--uvd-border); background: var(--token-bg-primary, #0a0e18); z-index: 2; }
+      .uvd-composer { position: fixed; left: 0; top: 0; bottom: 0; width: 390px; box-sizing: border-box; padding: 22px 18px 24px; overflow: auto; border-right: 1px solid var(--uvd-border); background: var(--token-bg-primary, #0a0e18); z-index: 2; display: flex; flex-direction: column; }
       .uvd-composer-head h2 { margin: 0; font-size: 52px; line-height: .92; letter-spacing: -0.03em; color: var(--uvd-text); font-weight: 700; }
       .uvd-composer-head p { margin: 10px 0 0; color: var(--uvd-subtext); font-size: 16px; line-height: 1.35; }
       .uvd-dropzone { margin-top: 14px; border: 2px dashed var(--uvd-border-strong); border-radius: 12px; padding: 20px 14px; background: transparent; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:6px; text-align:center; transition: background .15s ease, border-color .15s ease; cursor: default; }
@@ -6936,6 +7021,12 @@
       .uvd-field span { font-size: 12px; color: var(--uvd-subtext); text-transform: uppercase; letter-spacing: .03em; font-weight: 600; }
       .uvd-field textarea, .uvd-field input, .uvd-field select { width:100%; border:1px solid var(--uvd-border); background: var(--uvd-surface); color: var(--uvd-text); border-radius: 10px; font-size: 15px; padding: 10px 11px; box-sizing: border-box; }
       .uvd-field textarea { min-height: 124px; resize: vertical; }
+      .uvd-composer-footer { margin-top: auto; padding-top: 14px; }
+      .uvd-gens-balance { border: 1px solid var(--uvd-border); border-radius: 10px; background: linear-gradient(180deg, rgba(255,255,255,0.045), rgba(255,255,255,0.02)); padding: 10px 11px; display: grid; gap: 4px; }
+      .uvd-gens-balance-top { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+      .uvd-gens-balance-top span { font-size: 10px; color: var(--uvd-subtext); text-transform: uppercase; letter-spacing: .08em; font-weight: 700; }
+      .uvd-gens-balance-top strong { font-size: 20px; line-height: 1; color: var(--uvd-text); font-weight: 700; }
+      .uvd-gens-balance-meta { font-size: 12px; line-height: 1.35; color: var(--uvd-subtext); }
       .uvd-field-grid { display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap:8px; }
       .uvd-field-grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
       .uvd-compose-actions { margin-top: 10px; display:grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 8px; }
@@ -7419,6 +7510,9 @@
       parseComposerGensInputValue,
       extractPersistedGensCountValue,
       resolvePreferredComposerGensCountValue,
+      parseStoredVideoGensBalanceValue,
+      formatVideoGensBalanceCount,
+      formatVideoGensResetSummary,
       extractPersistedComposerPromptValue,
       resolvePreferredComposerPromptValue,
       filterDraftsByWorkspace,

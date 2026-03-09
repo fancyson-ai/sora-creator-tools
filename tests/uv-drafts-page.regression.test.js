@@ -20,6 +20,9 @@ const {
   parseComposerGensInputValue,
   extractPersistedGensCountValue,
   resolvePreferredComposerGensCountValue,
+  parseStoredVideoGensBalanceValue,
+  formatVideoGensBalanceCount,
+  formatVideoGensResetSummary,
   extractPersistedComposerPromptValue,
   resolvePreferredComposerPromptValue,
   filterDraftsByWorkspace,
@@ -256,6 +259,16 @@ test('stored gens value wins on load, but live composer edits still take effect'
   assert.equal(resolvePreferredComposerGensCountValue(4, 1, false), 4);
   assert.equal(resolvePreferredComposerGensCountValue(null, 4, false), 4);
   assert.equal(resolvePreferredComposerGensCountValue('3', null, false), 3);
+});
+
+test('video gens balance helpers format composer balance content cleanly', () => {
+  const parsed = parseStoredVideoGensBalanceValue('{"count":12345,"resetsInSeconds":3661,"setAt":123}');
+  assert.equal(parsed.count, 12345);
+  assert.equal(parsed.resetsInSeconds, 3661);
+  assert.equal(formatVideoGensBalanceCount(parsed.count), '12,345');
+  assert.equal(formatVideoGensResetSummary(parsed.resetsInSeconds), 'Resets in 1h 2m');
+  assert.equal(formatVideoGensBalanceCount(null), '');
+  assert.equal(formatVideoGensResetSummary(null), '');
 });
 
 test('stored prompt value wins on load, but live prompt edits still take effect', () => {

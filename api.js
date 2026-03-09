@@ -22,6 +22,8 @@
   const SUBSCRIPTIONS_RE = /\/backend\/billing\/subscriptions/i;
   const DURATION_OVERRIDE_KEY = 'SCT_DURATION_OVERRIDE_V1'; // stored in sora.chatgpt.com localStorage
   const GENS_COUNT_KEY = 'SCT_GENS_COUNT_V1'; // stored in sora.chatgpt.com localStorage
+  const VIDEO_GENS_BALANCE_KEY = 'SCT_VIDEO_GENS_BALANCE_V1'; // stored in sora.chatgpt.com localStorage
+  const VIDEO_GENS_BALANCE_EVENT = 'sct_video_gens_balance';
   const UV_TASK_TO_DRAFT_KEY = 'SORA_UV_TASK_TO_DRAFT_V1'; // task_id -> source draft ID (draft remix redo)
   const UV_REDO_PROMPT_KEY = 'SORA_UV_REDO_PROMPT';
   const PLAN_FREE_KEY = 'SCT_PLAN_FREE_V1';
@@ -543,6 +545,106 @@
     } catch {
       return null;
     }
+  }
+
+  function normalizeVideoGensBalanceCount(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return null;
+    return Math.max(0, Math.round(n));
+  }
+
+  function normalizeVideoGensResetSeconds(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return null;
+    return Math.max(0, Math.round(n));
+  }
+
+  function dispatchVideoGensBalance(balance) {
+    try {
+      window.dispatchEvent(
+        new CustomEvent(VIDEO_GENS_BALANCE_EVENT, {
+          detail: {
+            count: balance?.count ?? null,
+            resetsInSeconds: balance?.resetsInSeconds ?? null,
+          },
+        })
+      );
+    } catch {}
+  }
+
+  function readStoredVideoGensBalance() {
+    try {
+      const raw = localStorage.getItem(VIDEO_GENS_BALANCE_KEY);
+      if (!raw) return null;
+      const parsed = safeJsonParse(raw);
+      if (!parsed || typeof parsed !== 'object') return null;
+      const count = normalizeVideoGensBalanceCount(parsed.count);
+      const resetsInSeconds = normalizeVideoGensResetSeconds(parsed.resetsInSeconds);
+      if (count == null && resetsInSeconds == null) return null;
+      return { count, resetsInSeconds };
+    } catch {
+      return null;
+    }
+  }
+
+  function writeVideoGensBalance(next) {
+    const prev = readStoredVideoGensBalance();
+    const count = normalizeVideoGensBalanceCount(next?.count ?? prev?.count);
+    const resetsInSeconds = normalizeVideoGensResetSeconds(next?.resetsInSeconds ?? prev?.resetsInSeconds);
+    if (count == null && resetsInSeconds == null) return false;
+
+    const changed = !prev || prev.count !== count || prev.resetsInSeconds !== resetsInSeconds;
+    try {
+      localStorage.setItem(
+        VIDEO_GENS_BALANCE_KEY,
+        JSON.stringify({ count, resetsInSeconds, setAt: Date.now() })
+      );
+    } catch {}
+    if (changed) dispatchVideoGensBalance({ count, resetsInSeconds });
+    return true;
+  }
+
+  function extractVideoGensBalance(payload, depth = 0, seen) {
+    if (!payload || typeof payload !== 'object') return null;
+    if (depth > 8) return null;
+
+    const seenSet = seen || new WeakSet();
+    if (seenSet.has(payload)) return null;
+    seenSet.add(payload);
+
+    const directCount = normalizeVideoGensBalanceCount(payload.estimated_num_videos_remaining);
+    const directReset = normalizeVideoGensResetSeconds(payload.access_resets_in_seconds);
+    if (directCount != null || directReset != null) {
+      return { count: directCount, resetsInSeconds: directReset };
+    }
+
+    const creditBalance = payload.rate_limit_and_credit_balance;
+    if (creditBalance && typeof creditBalance === 'object') {
+      const nestedCount = normalizeVideoGensBalanceCount(creditBalance.estimated_num_videos_remaining);
+      const nestedReset = normalizeVideoGensResetSeconds(creditBalance.access_resets_in_seconds);
+      if (nestedCount != null || nestedReset != null) {
+        return { count: nestedCount, resetsInSeconds: nestedReset };
+      }
+    }
+
+    if (Array.isArray(payload)) {
+      for (const item of payload) {
+        const found = extractVideoGensBalance(item, depth + 1, seenSet);
+        if (found) return found;
+      }
+      return null;
+    }
+
+    for (const value of Object.values(payload)) {
+      const found = extractVideoGensBalance(value, depth + 1, seenSet);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  function captureVideoGensBalance(json) {
+    const balance = extractVideoGensBalance(json);
+    if (balance) writeVideoGensBalance(balance);
   }
 
   function loadPlanIsFree() {
@@ -1165,6 +1267,26 @@
         } catch {}
       };
 
+      const attachVideoGensBalanceCapture = (promise) => {
+        if (!promise) return;
+        try {
+          promise
+            .then((res) => {
+              try {
+                res
+                  .clone()
+                  .json()
+                  .then((json) => {
+                    captureVideoGensBalance(json);
+                  })
+                  .catch(() => {});
+              } catch {}
+              return res;
+            })
+            .catch(() => {});
+        } catch {}
+      };
+
       const buildInit = () => {
         let nextInit = init;
         try {
@@ -1189,6 +1311,7 @@
         const p = makeRequest(input);
         attachTaskCapture(p);
         attachPlanCapture(p);
+        attachVideoGensBalanceCapture(p);
         return p;
       }
 
@@ -1208,6 +1331,7 @@
         const p = makeRequest(input);
         attachTaskCapture(p);
         attachPlanCapture(p);
+        attachVideoGensBalanceCapture(p);
         return p;
       }
 
@@ -1228,6 +1352,7 @@
           }
           attachTaskCapture(p);
           attachPlanCapture(p);
+          attachVideoGensBalanceCapture(p);
           p.then(resolve, reject);
         });
       });
@@ -1238,6 +1363,7 @@
             const p = makeRequest(getInputForIndex(i));
             attachTaskCapture(p);
             attachPlanCapture(p);
+            attachVideoGensBalanceCapture(p);
           } catch {}
         });
       }
@@ -1295,6 +1421,16 @@
             { once: true }
           );
         }
+
+        this.addEventListener(
+          'load',
+          () => {
+            try {
+              captureVideoGensBalance(safeJsonParse(this.responseText));
+            } catch {}
+          },
+          { once: true }
+        );
       } catch {}
       return origOpen.apply(this, arguments);
     };

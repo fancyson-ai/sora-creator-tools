@@ -43,6 +43,8 @@
   const ANALYZE_VISITED_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
   const BOOKMARKS_KEY = 'SORA_UV_BOOKMARKS_V1';
   const TASK_TO_DRAFT_KEY = 'SORA_UV_TASK_TO_DRAFT_V1'; // task_id -> source draft ID for draft remixes
+  const VIDEO_GENS_BALANCE_KEY = 'SCT_VIDEO_GENS_BALANCE_V1';
+  const VIDEO_GENS_BALANCE_EVENT = 'sct_video_gens_balance';
   const FEED_RE = /\/(backend\/project_[a-z]+\/)?(feed|profile_feed|profile\/)/i;
   const DRAFTS_RE = /\/(backend\/project_[a-z]+\/)?profile\/drafts($|\/|\?)/i;
   const CHARACTERS_RE = /\/(backend\/project_[a-z]+\/)?profile\/[^/]+\/characters($|\?)/i;
@@ -310,6 +312,7 @@
 
   // Dashboard injection perf guards
   let dashboardBtnEl = null;
+  let sidebarGensCounterEl = null;
   let dashboardInjectRafId = null;
   let dashboardInjectRetryId = null;
   let dashboardInjectLastAttemptMs = 0;
@@ -7439,6 +7442,12 @@ async function renderAnalyzeTable(force = false) {
   }
 
   function handleStorageChange(e) {
+    if (e.key === VIDEO_GENS_BALANCE_KEY) {
+      try {
+        injectSidebarGensCounter();
+      } catch {}
+      return;
+    }
     if (e.key !== PREF_KEY) return;
     try {
       const newPrefs = JSON.parse(e.newValue || '{}');
@@ -7473,9 +7482,186 @@ async function renderAnalyzeTable(force = false) {
     return false;
   }
 
+  function parseStoredVideoGensBalance(raw) {
+    try {
+      const parsed = JSON.parse(raw || 'null');
+      if (!parsed || typeof parsed !== 'object') return null;
+      const count = Number(parsed.count);
+      const resetsInSeconds = Number(parsed.resetsInSeconds);
+      return {
+        count: Number.isFinite(count) ? Math.max(0, Math.round(count)) : null,
+        resetsInSeconds: Number.isFinite(resetsInSeconds) ? Math.max(0, Math.round(resetsInSeconds)) : null,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  function readStoredVideoGensBalance() {
+    try {
+      return parseStoredVideoGensBalance(localStorage.getItem(VIDEO_GENS_BALANCE_KEY));
+    } catch {
+      return null;
+    }
+  }
+
+  function formatSidebarGensCount(count) {
+    if (count == null || count === '') return '';
+    const n = Number(count);
+    if (!Number.isFinite(n)) return '';
+    const rounded = Math.max(0, Math.round(n));
+    try {
+      return new Intl.NumberFormat('en-US').format(rounded);
+    } catch {
+      return String(rounded);
+    }
+  }
+
+  function formatSidebarGensResetTooltip(seconds) {
+    if (seconds == null || seconds === '') return '';
+    const n = Number(seconds);
+    if (!Number.isFinite(n)) return '';
+    const totalMinutes = Math.max(0, Math.ceil(n / 60));
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+    return `Resets in ${hours}h ${minutes}m`;
+  }
+
+  function ensureSidebarGensCounterStyles() {
+    if (document.getElementById('sora-uv-sidebar-gens-counter-style')) return;
+    const st = document.createElement('style');
+    st.id = 'sora-uv-sidebar-gens-counter-style';
+    st.textContent = `
+      .sora-uv-sidebar-gens-counter {
+        position: relative;
+      }
+      .sora-uv-sidebar-gens-counter[data-tooltip]:hover::after,
+      .sora-uv-sidebar-gens-counter[data-tooltip]:focus-visible::after {
+        content: attr(data-tooltip);
+        position: absolute;
+        left: calc(100% + 10px);
+        top: 50%;
+        transform: translateY(-50%);
+        white-space: nowrap;
+        padding: 6px 8px;
+        border-radius: 8px;
+        background: rgba(10, 14, 24, 0.96);
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        color: rgba(255, 255, 255, 0.96);
+        font-size: 11px;
+        font-weight: 600;
+        line-height: 1.2;
+        letter-spacing: 0.01em;
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.28);
+        pointer-events: none;
+        z-index: 2147483647;
+      }
+    `;
+    document.head.appendChild(st);
+  }
+
+  function updateSidebarGensCounter(balance = readStoredVideoGensBalance()) {
+    if (!sidebarGensCounterEl || !document.contains(sidebarGensCounterEl)) return false;
+    const countText = formatSidebarGensCount(balance?.count);
+    if (!countText) {
+      sidebarGensCounterEl.textContent = '';
+      sidebarGensCounterEl.hidden = true;
+      sidebarGensCounterEl.removeAttribute('data-tooltip');
+      sidebarGensCounterEl.setAttribute('aria-label', 'Estimated video gens remaining unavailable');
+      return false;
+    }
+
+    const tooltip = formatSidebarGensResetTooltip(balance?.resetsInSeconds);
+    sidebarGensCounterEl.hidden = false;
+    sidebarGensCounterEl.textContent = countText;
+    sidebarGensCounterEl.setAttribute(
+      'aria-label',
+      tooltip ? `${countText} video gens remaining. ${tooltip}.` : `${countText} video gens remaining.`
+    );
+    if (tooltip) sidebarGensCounterEl.setAttribute('data-tooltip', tooltip);
+    else sidebarGensCounterEl.removeAttribute('data-tooltip');
+    return true;
+  }
+
+  function injectSidebarGensCounter() {
+    const sidebar = document.querySelector('div.fixed.left-0.top-0.z-50');
+    if (!sidebar) {
+      scheduleDashboardInjectRetry(1000);
+      return;
+    }
+
+    const settingsButtons = sidebar.querySelectorAll('button[aria-label="Settings"][aria-haspopup="menu"]');
+    const settingsButton = settingsButtons[settingsButtons.length - 1];
+    if (!settingsButton) {
+      scheduleDashboardInjectRetry(1000);
+      return;
+    }
+
+    let stack = sidebar.querySelector('.sora-uv-sidebar-settings-stack');
+    if (!stack) {
+      stack = document.createElement('div');
+      stack.className = 'sora-uv-sidebar-settings-stack';
+      stack.style.position = 'relative';
+      stack.style.display = 'flex';
+      stack.style.alignItems = 'center';
+      stack.style.justifyContent = 'center';
+      stack.style.width = 'fit-content';
+      stack.style.flex = '0 0 auto';
+      sidebar.insertBefore(stack, settingsButton);
+      stack.appendChild(settingsButton);
+    } else if (!stack.contains(settingsButton)) {
+      stack.appendChild(settingsButton);
+    }
+
+    const existing = sidebar.querySelector('.sora-uv-sidebar-gens-counter');
+    if (existing) {
+      if (!stack.contains(existing)) {
+        stack.insertBefore(existing, settingsButton);
+      }
+      sidebarGensCounterEl = existing;
+      updateSidebarGensCounter();
+      return;
+    }
+
+    ensureSidebarGensCounterStyles();
+
+    const counter = document.createElement('div');
+    counter.className = 'sora-uv-sidebar-gens-counter opacity-50 hover:opacity-100';
+    counter.hidden = true;
+    counter.style.position = 'absolute';
+    counter.style.left = '50%';
+    counter.style.bottom = 'calc(100% + 1px)';
+    counter.style.transform = 'translateX(-50%)';
+    counter.style.marginLeft = '0.5px';
+    counter.style.display = 'flex';
+    counter.style.alignItems = 'center';
+    counter.style.justifyContent = 'center';
+    counter.style.width = 'max-content';
+    counter.style.fontSize = '14px';
+    counter.style.fontWeight = '950';
+    counter.style.lineHeight = '1';
+    counter.style.letterSpacing = '0';
+    counter.style.fontVariantNumeric = 'tabular-nums';
+    counter.style.textAlign = 'center';
+    counter.style.minHeight = '12px';
+    counter.style.pointerEvents = 'auto';
+    counter.style.cursor = 'default';
+    counter.style.userSelect = 'none';
+    counter.setAttribute('tabindex', '0');
+    counter.setAttribute('role', 'status');
+    counter.setAttribute('aria-live', 'polite');
+
+    stack.insertBefore(counter, settingsButton);
+    sidebarGensCounterEl = counter;
+    updateSidebarGensCounter();
+  }
+
   function scheduleInjectDashboardButton() {
     // Fast path: if we already hold a live reference, do nothing.
-    if (dashboardBtnEl && document.contains(dashboardBtnEl)) return;
+    if (dashboardBtnEl && document.contains(dashboardBtnEl)) {
+      injectSidebarGensCounter();
+      return;
+    }
 
     const now = Date.now();
     const since = now - dashboardInjectLastAttemptMs;
@@ -7494,7 +7680,10 @@ async function renderAnalyzeTable(force = false) {
 
   function injectDashboardButton() {
     // Check if button already exists
-    if (isDashboardButtonPresent()) return;
+    if (isDashboardButtonPresent()) {
+      injectSidebarGensCounter();
+      return;
+    }
 
     // Find the left sidebar - it has specific classes
     const sidebar = document.querySelector('div.fixed.left-0.top-0.z-50');
@@ -7559,6 +7748,8 @@ async function renderAnalyzeTable(force = false) {
     try {
       dlog('feed', 'Dashboard button injected into left sidebar');
     } catch {}
+
+    injectSidebarGensCounter();
 
     // Also inject UV Drafts button
     injectUVDraftsButton();
@@ -7668,6 +7859,13 @@ async function renderAnalyzeTable(force = false) {
       }, '*');
     } catch {}
   }, true); // Capture phase to ensure we get it first
+
+  window.addEventListener(VIDEO_GENS_BALANCE_EVENT, (ev) => {
+    try {
+      injectSidebarGensCounter();
+      updateSidebarGensCounter(ev?.detail || null);
+    } catch {}
+  });
 
   function ensureToastStyles() {
     if (document.getElementById('sora-uv-toast-style')) return;
