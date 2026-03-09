@@ -1,13 +1,6 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
 [![Add to Chrome](https://img.shields.io/badge/Chrome%20Extension-Add%20Now-blue?logo=googlechrome&logoColor=white)](https://chromewebstore.google.com/detail/sora-creator-tools-%E2%80%93-sora/nijonhldjpdanckbnkjgifghnkekmljk)
 
-<p>
-  <strong>🧡 Supported by Our Sponsors</strong><br>
-  <a href="https://sorastats.com">
-    <img src="/imagery/Sorastat-logo.png" alt="SoraStats Sponsor" width="187">
-  </a>
-</p>
-
 # Sora Creator Tools
 
 Chrome extension for `https://sora.chatgpt.com/*` that adds Sora feed overlays, gather/analyze tools, an advanced drafts workflow (`/uv-drafts`), and a local analytics dashboard.
