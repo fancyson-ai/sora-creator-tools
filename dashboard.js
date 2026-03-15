@@ -13,6 +13,7 @@
   const AUTO_REFRESH_MAX_NO_CHANGE_SKIPS = 2;
   const CAMEO_KEY_PREFIX = 'c:';
   const ULTRA_MODE_STORAGE_KEY = 'SCT_ULTRA_MODE_V1';
+  const DASHBOARD_DISCOVERY_PHRASE_STORAGE_KEY = 'SCT_DASHBOARD_DISCOVERY_PHRASE_V2';
   const ULTRA_MODE_TAP_COUNT = 5;
   const SITE_ORIGIN = 'https://sora.chatgpt.com';
   const COMPARE_TOTAL_VIEWS_TITLE = 'Total Views over time';
@@ -387,6 +388,7 @@
   let lastSessionCacheAt = 0;
   let currentUserKey = null;
   let lastSelectedUserKey = null;
+  let showDiscoveryPhrase = true;
   let nextAutoRefreshAt = 0;
   let autoRefreshCountdownTimer = null;
   let triggerMetricsAutoRefreshNow = null;
@@ -738,6 +740,9 @@
       if (typeof post.thumb === 'string') out.thumb = post.thumb;
       if (typeof post.caption === 'string') {
         out.caption = post.caption.length > 320 ? post.caption.slice(0, 320) : post.caption;
+      }
+      if (typeof post.discovery_phrase === 'string') {
+        out.discovery_phrase = post.discovery_phrase.length > 320 ? post.discovery_phrase.slice(0, 320) : post.discovery_phrase;
       }
       if (Array.isArray(post.cameos)) out.cameos = post.cameos.slice(0, 12);
       if (post.post_time != null) out.post_time = post.post_time;
@@ -1461,6 +1466,22 @@
   async function saveUltraModePreference(enabled){
     try {
       await chrome.storage.local.set({ [ULTRA_MODE_STORAGE_KEY]: !!enabled });
+    } catch {}
+  }
+
+  async function loadDiscoveryPhrasePreference(){
+    try {
+      const stored = await chrome.storage.local.get(DASHBOARD_DISCOVERY_PHRASE_STORAGE_KEY);
+      if (!Object.prototype.hasOwnProperty.call(stored, DASHBOARD_DISCOVERY_PHRASE_STORAGE_KEY)) return true;
+      return !!stored[DASHBOARD_DISCOVERY_PHRASE_STORAGE_KEY];
+    } catch {
+      return true;
+    }
+  }
+
+  async function saveDiscoveryPhrasePreference(enabled){
+    try {
+      await chrome.storage.local.set({ [DASHBOARD_DISCOVERY_PHRASE_STORAGE_KEY]: !!enabled });
     } catch {}
   }
 
@@ -3183,6 +3204,17 @@
     }
   }
 
+  function normalizeDiscoveryPhrase(value) {
+    if (typeof value !== 'string') return null;
+    const phrase = value.replace(/\s+/g, ' ').trim();
+    return phrase || null;
+  }
+
+  function buildDiscoveryPhraseLine(post) {
+    const phrase = normalizeDiscoveryPhrase(post?.discoveryPhrase ?? post?.discovery_phrase);
+    return phrase || '';
+  }
+
   function truncateForPurgeCaption(text){
     const clean = (typeof text === 'string' ? text.trim() : '') || 'this post';
     if (clean.length <= 100) return clean;
@@ -3480,6 +3512,7 @@
       const rr = rrRaw == null ? null : Number(rrRaw);
       const lastSeen = p?.lastSeen || 0;
       const cap = (typeof p?.caption === 'string' && p.caption) ? p.caption.trim() : null;
+      const discoveryPhrase = normalizeDiscoveryPhrase(p?.discovery_phrase);
       const cameos = Array.isArray(p?.cameo_usernames) ? p.cameo_usernames.filter(c => typeof c === 'string' && c.trim()) : [];
       const owner = isVirtual ? (p?.ownerHandle || '') : (user?.handle || '');
 
@@ -3514,6 +3547,7 @@
         cameos,
         owner,
         caption: cap,
+        discoveryPhrase,
         views,
         likes,
         lastSeen
@@ -3812,6 +3846,13 @@
       const nextStats = `${fmt(p.last?.likes)} Likes - ${fmt1(p.last?.uv)} Viewers - ${p.rate==null?'-':p.rate.toFixed(1)+'%'} IR`;
       if (statsDiv.textContent !== nextStats) statsDiv.textContent = nextStats;
     }
+    const discoveryDiv = cache.discoveryDiv || row.querySelector('.discovery');
+    if (discoveryDiv) {
+      const nextDiscovery = showDiscoveryPhrase ? buildDiscoveryPhraseLine(p) : '';
+      discoveryDiv.textContent = nextDiscovery;
+      discoveryDiv.title = nextDiscovery || '';
+      discoveryDiv.hidden = !nextDiscovery;
+    }
     const toggleDiv = cache.toggleDiv || row.querySelector('.toggle');
     const forceShowAll = !!opts?.forceShowAll;
     if (toggleDiv) {
@@ -3868,8 +3909,15 @@
     statsDiv.className = 'stats';
     statsDiv.textContent = `${fmt(p.last?.likes)} Likes - ${fmt1(p.last?.uv)} Viewers - ${p.rate==null?'-':p.rate.toFixed(1)+'%'} IR`;
 
+    const discoveryDiv = document.createElement('div');
+    discoveryDiv.className = 'discovery';
+    discoveryDiv.textContent = showDiscoveryPhrase ? buildDiscoveryPhraseLine(p) : '';
+    discoveryDiv.title = discoveryDiv.textContent || '';
+    discoveryDiv.hidden = !discoveryDiv.textContent;
+
     metaDiv.appendChild(idDiv);
     metaDiv.appendChild(statsDiv);
+    metaDiv.appendChild(discoveryDiv);
 
     const toggleDiv = document.createElement('div');
     toggleDiv.className = 'toggle';
@@ -3893,7 +3941,7 @@
     row.appendChild(metaDiv);
     row.appendChild(toggleDiv);
     row.appendChild(purgeBtn);
-    row._sctCache = { thumbDiv, thumbLink, dotDiv, link, statsDiv, toggleDiv };
+    row._sctCache = { thumbDiv, thumbLink, dotDiv, link, statsDiv, discoveryDiv, toggleDiv };
     row._sctLabelKey = buildPostLabelKey(p);
     row._sctThumbUrl = thumbChoice.displayUrl;
     row._sctThumbSourceUrl = thumbChoice.sourceUrl;
@@ -6105,7 +6153,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       // === SHEET 1: Posts Summary (one row per post with latest snapshot) ===
       const postsHeader = [
         'User Key', 'User Handle', 'User ID', 
-        'Post ID', 'Post URL', 'Post Time', 'Post Time (ISO)', 'Caption',
+        'Post ID', 'Post URL', 'Post Time', 'Post Time (ISO)', 'Caption', 'Discovery Phrase',
         'Thumbnail URL', 'Parent Post ID', 'Root Post ID', 'Last Seen Timestamp',
         'Owner Key', 'Owner Handle', 'Owner ID',
         'Latest Snapshot Timestamp', 'Unique Views', 'Total Views', 'Likes', 'Comments', 'Remixes',
@@ -6137,6 +6185,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           const lr = likeRate(likes, uv);
           
           const caption = (typeof post.caption === 'string' && post.caption) ? post.caption.replace(/\n/g, ' ').replace(/\r/g, '') : '';
+          const discoveryPhrase = (typeof post.discovery_phrase === 'string' && post.discovery_phrase) ? post.discovery_phrase.replace(/\n/g, ' ').replace(/\r/g, '') : '';
           const thumb = post.thumb || '';
           const url = post.url || `${SITE_ORIGIN}/p/${pid}`;
           const ownerKey = post.ownerKey || userKey;
@@ -6153,7 +6202,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           
           allLines.push([
             userKey, handle, userId,
-            pid, url, postTime, postTimeISO, caption,
+            pid, url, postTime, postTimeISO, caption, discoveryPhrase,
             thumb, parentPostId, rootPostId, lastSeen,
             ownerKey, ownerHandle, ownerId,
             latestTime, uv, views, likes, comments, remixes,
@@ -6168,7 +6217,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       allLines.push('=== POST SNAPSHOTS (Complete Historical Timeline) ===');
       const snapshotsHeader = [
         'User Key', 'User Handle', 'User ID',
-        'Post ID', 'Post URL', 'Post Caption', 'Post Time',
+        'Post ID', 'Post URL', 'Post Caption', 'Post Discovery Phrase', 'Post Time',
         'Owner Key', 'Owner Handle', 'Owner ID',
         'Snapshot Timestamp', 'Snapshot Timestamp (ISO)', 'Snapshot Age (minutes)',
         'Unique Views', 'Total Views', 'Likes', 'Comments', 'Remixes',
@@ -6186,6 +6235,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           const postTimeRaw = getPostTimeStrict(post);
           const postTime = fmtTimestamp(postTimeRaw);
           const caption = (typeof post.caption === 'string' && post.caption) ? post.caption.replace(/\n/g, ' ').replace(/\r/g, '') : '';
+          const discoveryPhrase = (typeof post.discovery_phrase === 'string' && post.discovery_phrase) ? post.discovery_phrase.replace(/\n/g, ' ').replace(/\r/g, '') : '';
           const url = post.url || `${SITE_ORIGIN}/p/${pid}`;
           const ownerKey = post.ownerKey || userKey;
           const ownerHandle = post.ownerHandle || handle;
@@ -6216,7 +6266,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
             
             allLines.push([
               userKey, handle, userId,
-              pid, url, caption, postTime,
+              pid, url, caption, discoveryPhrase, postTime,
               ownerKey, ownerHandle, ownerId,
               tFormatted, tISO, ageMin,
               uv, views, likes, comments, remixes,
@@ -6592,6 +6642,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         
         const url = getCol('Post URL') || `${SITE_ORIGIN}/p/${postId}`;
         const caption = getCol('Caption') || '';
+        const discoveryPhrase = getCol('Discovery Phrase') || '';
         const thumb = getCol('Thumbnail URL') || '';
         const postTimeISO = getCol('Post Time (ISO)') || getCol('Post Time');
         const postTime = parseTimestamp(postTimeISO);
@@ -6617,6 +6668,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
             url: url,
             thumb: thumb,
             caption: caption || null,
+            discovery_phrase: discoveryPhrase || null,
             snapshots: [],
             ownerKey: ownerKey,
             ownerHandle: ownerHandle,
@@ -6632,6 +6684,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           if (!post.url && url) post.url = url;
           if (!post.thumb && thumb) post.thumb = thumb;
           if (!post.caption && caption) post.caption = caption;
+          if (!post.discovery_phrase && discoveryPhrase) post.discovery_phrase = discoveryPhrase;
           if (!post.ownerKey && ownerKey) post.ownerKey = ownerKey;
           if (!post.ownerHandle && ownerHandle) post.ownerHandle = ownerHandle;
           if (!post.ownerId && ownerId) post.ownerId = ownerId;
@@ -6675,6 +6728,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         if (!user.posts[postId]) {
           const url = getCol('Post URL') || `${SITE_ORIGIN}/p/${postId}`;
           const caption = getCol('Post Caption') || '';
+          const discoveryPhrase = getCol('Post Discovery Phrase') || '';
           const postTimeISO = getCol('Post Time');
           const postTime = parseTimestamp(postTimeISO);
           const ownerKey = getCol('Owner Key') || userKey;
@@ -6685,6 +6739,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
             url: url,
             thumb: '',
             caption: caption || null,
+            discovery_phrase: discoveryPhrase || null,
             snapshots: [],
             ownerKey: ownerKey,
             ownerHandle: ownerHandle,
@@ -6802,6 +6857,13 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         ultraModeEnabled = val;
       })
       .catch(() => {});
+    const discoveryPhraseToggle = $('#discoveryPhraseToggle');
+    const discoveryPhrasePrefPromise = loadDiscoveryPhrasePreference()
+      .then((val)=>{
+        showDiscoveryPhrase = !!val;
+        if (discoveryPhraseToggle) discoveryPhraseToggle.checked = showDiscoveryPhrase;
+      })
+      .catch(() => {});
     perfEnd(perfUltra);
     const modeTapEl = $('#dashboardModeTap');
     if (modeTapEl) {
@@ -6873,6 +6935,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         'customFiltersByUser',
         'lastFilterAction',
         'lastFilterActionByUser',
+        DASHBOARD_DISCOVERY_PHRASE_STORAGE_KEY,
         VIEWS_TYPE_STORAGE_KEY,
         BEST_TIME_PREFS_KEY,
         CHART_MODE_STORAGE_KEY,
@@ -11077,6 +11140,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         'lastUserKey',
         'zoomStates',
         ULTRA_MODE_STORAGE_KEY,
+        DASHBOARD_DISCOVERY_PHRASE_STORAGE_KEY,
         COMB_MODE_STORAGE_KEY
       ]
         .concat(Object.values(STACKED_WINDOW_STORAGE_KEYS))
@@ -12440,10 +12504,19 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         refreshUserUI({ preserveEmpty: true, skipRestoreZoom: true }); persistVisibility();
       });
 
+      if (discoveryPhraseToggle) {
+        discoveryPhraseToggle.addEventListener('change', async (e) => {
+          showDiscoveryPhrase = !!e.target.checked;
+          await saveDiscoveryPhrasePreference(showDiscoveryPhrase);
+          await refreshUserUI({ preserveEmpty: true, skipRestoreZoom: true, skipCharts: true });
+        });
+      }
+
     // If compare section is empty on initial load, add current user to show who we're looking at
     if (compareUsers.size === 0 && currentUserKey && resolveUserForKey(metrics, currentUserKey)){
       addCompareUser(currentUserKey);
     }
+    await discoveryPhrasePrefPromise;
     const initialUser = resolveUserForKey(metrics, currentUserKey);
     if (initialUser) {
       const initAction = normalizeFilterAction(getSessionFilterAction(currentUserKey))
@@ -12506,6 +12579,10 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       }
       zoomStates = st.zoomStates || {};
       zoomStatesLoaded = true;
+      if (Object.prototype.hasOwnProperty.call(st, DASHBOARD_DISCOVERY_PHRASE_STORAGE_KEY)) {
+        showDiscoveryPhrase = !!st[DASHBOARD_DISCOVERY_PHRASE_STORAGE_KEY];
+        if (discoveryPhraseToggle) discoveryPhraseToggle.checked = showDiscoveryPhrase;
+      }
       applyDefaultInteractionRateZoom(currentUserKey);
       if (st.lastFilterAction && (!lastFilterAction || lastFilterAction === 'showAll')) {
         lastFilterAction = st.lastFilterAction;

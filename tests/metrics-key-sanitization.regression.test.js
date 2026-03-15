@@ -130,3 +130,23 @@ test('sanitizers still reject payloads with no metrics signal', () => {
     null
   );
 });
+
+test('sanitizers preserve discovery phrases when a metrics signal is present', () => {
+  const sanitizeMetricsItem = buildContentSanitizerHarness();
+  const sanitizeMetricsSnapshot = buildBackgroundSanitizerHarness();
+  const discoveryPhrase = 'delft   pottery \n organ   pug';
+  const payload = {
+    userKey: 'h:alice.sora',
+    postId: 's_123',
+    likes: 4,
+    discovery_phrase: `  ${discoveryPhrase}  `,
+  };
+
+  const contentOut = sanitizeMetricsItem(payload);
+  const backgroundOut = sanitizeMetricsSnapshot(payload);
+
+  assert.ok(contentOut);
+  assert.ok(backgroundOut);
+  assert.equal(contentOut.discovery_phrase, discoveryPhrase);
+  assert.equal(backgroundOut.discovery_phrase, discoveryPhrase);
+});
