@@ -13,6 +13,7 @@ const {
   resolveDraftPostData,
   applyPublishedPostToDraftData,
   extractRemixTargetPostId,
+  applyRetryButtonRemixTone,
   extractPublishedPostGenerationId,
   buildComposerSourceFromPublishedPost,
   isLargeComposerSizeAllowed,
@@ -193,6 +194,16 @@ test('extractRemixTargetPostId prefers nested published remix targets from draft
   assert.equal(extractRemixTargetPostId(apiDraft), 's_parent_123');
   assert.equal(extractRemixTargetPostId({}, { remix_target_post_id: 's_existing_456' }), 's_existing_456');
   assert.equal(extractRemixTargetPostId({ creation_config: { remix_target_post: { id: 'gen_parent_789' } } }), 'gen_parent_789');
+});
+
+test('applyRetryButtonRemixTone highlights creator tools redo buttons only for remix drafts', () => {
+  const button = { dataset: {} };
+
+  applyRetryButtonRemixTone(button, true);
+  assert.equal(button.dataset.tone, 'info');
+
+  applyRetryButtonRemixTone(button, false);
+  assert.equal('tone' in button.dataset, false);
 });
 
 test('buildComposerSourceFromPublishedPost preserves post media and any embedded generation ID', () => {
