@@ -95,6 +95,8 @@
     if (thumb) item.thumb = thumb;
     const caption = sanitizeString(raw.caption, MAX_STR_LEN);
     if (caption) item.caption = caption;
+    const discoveryPhrase = sanitizeString(raw.discovery_phrase, MAX_STR_LEN);
+    if (discoveryPhrase) item.discovery_phrase = discoveryPhrase;
 
     const cameoUsernames = sanitizeCameoUsernames(raw.cameo_usernames);
     if (cameoUsernames) item.cameo_usernames = cameoUsernames;
