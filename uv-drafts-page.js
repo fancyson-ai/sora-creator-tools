@@ -435,6 +435,16 @@
     return null;
   }
 
+  function applyRetryButtonRemixTone(button, isRemixDraft) {
+    if (!button || !button.dataset) return button;
+    if (isRemixDraft) {
+      button.dataset.tone = 'info';
+      return button;
+    }
+    delete button.dataset.tone;
+    return button;
+  }
+
   function extractPublishedPostGenerationId(post) {
     const candidates = [
       post?.generation_id,
@@ -5813,11 +5823,10 @@
     copyBtn.disabled = !String(draft.prompt || '').trim();
     actionsRow.appendChild(copyBtn);
 
+    const isRemixDraft = !!String(draft?.remix_target_draft_id || draft?.remix_target_post_id || '').trim();
     const retryBtn = createActionBtn(icons.retry, 'Retry (copy prompt to composer)', async () => {
       const prompt = String(draft.prompt || '').trim();
       if (!prompt) return;
-
-      const isRemixDraft = !!String(draft?.remix_target_draft_id || draft?.remix_target_post_id || '').trim();
       let source = null;
       let sourceError = '';
       if (isRemixDraft) {
@@ -5861,6 +5870,7 @@
       }
       flashIconSuccess(retryBtn, icons.retry);
     });
+    applyRetryButtonRemixTone(retryBtn, isRemixDraft);
     retryBtn.disabled = !String(draft.prompt || '').trim();
     actionsRow.appendChild(retryBtn);
 
@@ -7119,6 +7129,8 @@
       .uvd-actions-row2 { display:grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap:6px; padding: 0 10px 10px; }
       .uvd-icon-btn { width: 100%; height: 34px; border-radius: 9px; border: 1px solid var(--uvd-border); background: var(--uvd-surface); color: var(--uvd-text); display:flex; align-items:center; justify-content:center; cursor:pointer; transition: background .15s ease, border-color .15s ease, color .15s ease, opacity .15s ease; }
       .uvd-icon-btn:hover:not(:disabled) { background: var(--uvd-surface-hover); border-color: var(--uvd-border-strong); }
+      .uvd-icon-btn[data-tone="info"] { background: rgba(59,130,246,0.85); border-color: rgba(59,130,246,0.92); color: #fff; box-shadow: 0 0 0 1px rgba(255,255,255,0.12) inset; }
+      .uvd-icon-btn[data-tone="info"]:hover:not(:disabled) { background: rgba(37,99,235,0.96); border-color: rgba(37,99,235,0.96); }
       .uvd-icon-btn:disabled { opacity: .42; cursor:not-allowed; color: var(--uvd-text-dim); background: rgba(255,255,255,0.04); border-color: rgba(255,255,255,0.08); pointer-events: none; }
       .uvd-action-pill { width: 100%; min-height: 38px; border: 1px solid var(--uvd-border); background: var(--uvd-surface); border-radius: 9px; color: var(--uvd-text); font-size: 13px; font-weight: 600; cursor:pointer; transition: background .15s ease, border-color .15s ease, color .15s ease, opacity .15s ease; }
       .uvd-action-pill:hover:not(:disabled) { background: var(--uvd-surface-hover); border-color: var(--uvd-border-strong); }
@@ -7499,6 +7511,7 @@
       resolveDraftPostData,
       applyPublishedPostToDraftData,
       extractRemixTargetPostId,
+      applyRetryButtonRemixTone,
       extractPublishedPostGenerationId,
       buildComposerSourceFromPublishedPost,
       isLargeComposerSizeAllowed,
