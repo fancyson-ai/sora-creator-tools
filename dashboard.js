@@ -11372,7 +11372,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         // Convert to MB with 2 decimal places
         const mb = (bytes / (1024 * 1024)).toFixed(2);
         if (purgeStorageSize) {
-          purgeStorageSize.textContent = `Sora Creator Tools uses ${mb}MB of storage.\nExported data file will be larger because it's less overlapping.`;
+          purgeStorageSize.textContent = `Sora Creator Tools uses ${mb}MB of storage.\nExported data file will be larger because it's less overlapping.\nFiles are now exported as JSON, CSV import works for backwards compatibility.`;
         }
       } catch {
         if (purgeStorageSize) {
@@ -11795,12 +11795,6 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       setPurgeConfirmOpen(true);
       purgeConfirmDialog.style.display = 'flex';
     });
-    const purgeExportBtn = $('#purgeExport');
-    if (purgeExportBtn) {
-      purgeExportBtn.addEventListener('click', async ()=>{
-        await exportAllDataCSV();
-      });
-    }
     const purgeExportRawBtn = $('#purgeExportRaw');
     if (purgeExportRawBtn) {
       purgeExportRawBtn.addEventListener('click', async ()=>{
