@@ -137,15 +137,24 @@ function computeTotalsForUser(user) {
   return totals;
 }
 
-function buildExportHarness(metricsFixture) {
+function buildExportHarness(metricsFixture, opts = {}) {
   const snippet = extractBetween('function escapeCSV(str) {', '\n  // Parse CSV line handling quoted fields');
   const state = {
     blob: null,
     clickCount: 0,
+    downloadName: null,
     revokedUrl: null,
+    alerts: [],
+    warnings: [],
   };
+  const loadedMetricsFixture = opts.loadedMetricsFixture || metricsFixture;
+  const hydratedMetricsFixture = opts.hydratedMetricsFixture || metricsFixture;
   const context = {
-    __metricsFixture: metricsFixture,
+    __loadedMetricsFixture: loadedMetricsFixture,
+    __hydratedMetricsFixture: hydratedMetricsFixture,
+    __hydrationCompletes: opts.hydrationCompletes !== false,
+    __snapshotDebugEnabled: !!opts.snapshotDebugEnabled,
+    __throwOnAlert: opts.throwOnAlert !== false,
     __state: state,
     __latestSnapshot: latestSnapshot,
     __getPostTimeStrict: getPostTimeStrict,
@@ -157,8 +166,21 @@ function buildExportHarness(metricsFixture) {
   };
   const bootstrap = `
     const SITE_ORIGIN = 'https://sora.chatgpt.com';
-    const loadMetrics = async () => globalThis.__metricsFixture;
-    const ensureFullSnapshots = async () => {};
+    const SNAP_DEBUG_ENABLED = !!globalThis.__snapshotDebugEnabled;
+    let metrics = { users: {} };
+    let snapshotsHydrated = false;
+    let snapshotsHydratedForKey = null;
+    let snapshotsHydrationEpoch = 1;
+    let currentUserKey = 'h:test';
+    const loadMetrics = async () => {
+      metrics = globalThis.__loadedMetricsFixture;
+      return metrics;
+    };
+    const ensureFullSnapshots = async () => {
+      metrics = globalThis.__hydratedMetricsFixture;
+      snapshotsHydrated = !!globalThis.__hydrationCompletes;
+      snapshotsHydratedForKey = snapshotsHydrated ? 'users:h:test' : null;
+    };
     const latestSnapshot = globalThis.__latestSnapshot;
     const getPostTimeStrict = globalThis.__getPostTimeStrict;
     const interactionRate = globalThis.__interactionRate;
@@ -166,7 +188,16 @@ function buildExportHarness(metricsFixture) {
     const likeRate = globalThis.__likeRate;
     const computeTotalsForUser = globalThis.__computeTotalsForUser;
     const toTs = globalThis.__toTs;
-    const alert = () => { throw new Error('unexpected alert during export'); };
+    const alert = (message) => {
+      globalThis.__state.alerts.push(message);
+      if (globalThis.__throwOnAlert) throw new Error(message || 'unexpected alert during export');
+    };
+    const console = {
+      warn(...args) {
+        globalThis.__state.warnings.push(args);
+      },
+      log() {}
+    };
     class Blob {
       constructor(parts, opts = {}) {
         this.parts = parts;
@@ -194,6 +225,7 @@ function buildExportHarness(metricsFixture) {
           download: '',
           click() {
             globalThis.__state.clickCount += 1;
+            globalThis.__state.downloadName = this.download;
           }
         };
       }
@@ -201,31 +233,42 @@ function buildExportHarness(metricsFixture) {
     const setTimeout = (fn) => { fn(); return 1; };
     ${snippet}
     globalThis.__exportAllDataCSV = exportAllDataCSV;
+    globalThis.__exportRawBackupJSON = exportRawBackupJSON;
   `;
   vm.createContext(context);
   vm.runInContext(bootstrap, context, { filename: 'dashboard-discovery-export-harness.js' });
   return {
     state,
     exportAllDataCSV: context.__exportAllDataCSV,
+    exportRawBackupJSON: context.__exportRawBackupJSON,
   };
 }
 
 function buildImportHarness() {
+  const snapshotMergeHelpers = extractBetween('function mergeSnapshotPoint(existing, incoming){', '\n  // Strict post time lookup: only consider explicit post time fields; everything else sorts last');
   const snippet = extractBetween('function parseCSVLine(line) {', '\n  async function main(prefetchedCache){');
   const context = {
     __toTs: toTs,
   };
   const bootstrap = `
     const SITE_ORIGIN = 'https://sora.chatgpt.com';
+    const SNAP_DEBUG_ENABLED = false;
     const toTs = globalThis.__toTs;
+    ${snapshotMergeHelpers}
     ${snippet}
     globalThis.__importDataCSVText = importDataCSVText;
+    globalThis.__importDataText = importDataText;
   `;
   vm.createContext(context);
   vm.runInContext(bootstrap, context, { filename: 'dashboard-discovery-import-harness.js' });
   return {
     importDataCSVText: context.__importDataCSVText,
+    importDataText: context.__importDataText,
   };
+}
+
+function toPlainJson(value) {
+  return JSON.parse(JSON.stringify(value));
 }
 
 test('dashboard discovery phrase preference defaults to true and saves to the dashboard-specific key', async () => {
@@ -281,6 +324,309 @@ test('exportAllDataCSV includes discovery phrase columns and values', async () =
   assert.match(csv, /Discovery Phrase/);
   assert.match(csv, /Post Discovery Phrase/);
   assert.match(csv, /delft pottery organ pug/);
+});
+
+test('exportRawBackupJSON preserves hydrated metrics fields beyond the reporting CSV schema', async () => {
+  const metricsFixture = {
+    users: {
+      'h:alice': {
+        handle: 'alice',
+        id: 'user-1',
+        followers: [{ t: 1773541000000, count: 321 }],
+        cameos: [{ t: 1773541000000, count: 12 }],
+        posts: {
+          's_123': {
+            url: 'https://sora.chatgpt.com/p/s_123',
+            thumb: 'https://videos.example/thumb.jpg',
+            caption: 'Delft Pug',
+            discovery_phrase: 'delft pottery organ pug',
+            cameo_usernames: ['bob', 'carol'],
+            duration: 12.5,
+            width: 1920,
+            height: 1080,
+            post_time: 1773541644483,
+            snapshots: [
+              { t: 1773541932509, uv: 27, views: 37, likes: 9, comments: 1, remix_count: 0, duration: 12.5, width: 1920, height: 1080 },
+              { t: 1773542932509, uv: 29, views: 41, likes: 11, comments: 2, remix_count: 1, duration: 12.5, width: 1920, height: 1080 }
+            ]
+          }
+        }
+      }
+    }
+  };
+
+  const harness = buildExportHarness(metricsFixture);
+  await harness.exportRawBackupJSON();
+
+  assert.equal(harness.state.clickCount, 1);
+  assert.equal(harness.state.downloadName.endsWith('.json'), true);
+  assert.equal(harness.state.downloadName.startsWith('sora_full_backup_with_snapshots_'), true);
+  assert.equal(harness.state.blob.type, 'application/json;charset=utf-8;');
+
+  const payload = JSON.parse(harness.state.blob.parts.join(''));
+  assert.equal(payload.format, 'sora-creator-tools/raw-backup-v1');
+  assert.equal(payload.snapshotsHydrated, true);
+  assert.deepEqual(payload.metrics.users['h:alice'].posts['s_123'].cameo_usernames, ['bob', 'carol']);
+  assert.equal(payload.metrics.users['h:alice'].posts['s_123'].duration, 12.5);
+  assert.equal(payload.metrics.users['h:alice'].posts['s_123'].width, 1920);
+  assert.equal(payload.metrics.users['h:alice'].posts['s_123'].height, 1080);
+  assert.deepEqual(
+    payload.metrics.users['h:alice'].posts['s_123'].snapshots.map((snap) => snap.t),
+    [1773541932509, 1773542932509]
+  );
+});
+
+test('exportRawBackupJSON warns and aborts when snapshot hydration does not complete', async () => {
+  const metricsFixture = {
+    users: {
+      'h:alice': {
+        handle: 'alice',
+        id: 'user-1',
+        posts: {
+          's_123': {
+            url: 'https://sora.chatgpt.com/p/s_123',
+            caption: 'Delft Pug',
+            discovery_phrase: 'delft pottery organ pug',
+            post_time: 1773541644483,
+            snapshots: [
+              { t: 1773541932509, uv: 27, views: 37, likes: 9, comments: 1, remix_count: 0 }
+            ]
+          }
+        }
+      }
+    }
+  };
+
+  const harness = buildExportHarness(metricsFixture, { hydrationCompletes: false, throwOnAlert: false });
+  await harness.exportRawBackupJSON();
+
+  assert.equal(harness.state.clickCount, 0);
+  assert.equal(harness.state.blob, null);
+  assert.equal(harness.state.alerts.length, 1);
+  assert.match(harness.state.alerts[0], /hydration did not complete/i);
+  assert.equal(harness.state.warnings.length, 0);
+});
+
+test('exports use hydrated metrics after ensureFullSnapshots adds historical snapshots', async () => {
+  const loadedMetricsFixture = {
+    users: {
+      'h:alice': {
+        handle: 'alice',
+        id: 'user-1',
+        posts: {
+          's_123': {
+            url: 'https://sora.chatgpt.com/p/s_123',
+            caption: 'Delft Pug',
+            discovery_phrase: 'delft pottery organ pug',
+            post_time: 1773541644483,
+            snapshots: [
+              { t: 1773542932509, uv: 29, views: 41, likes: 11, comments: 2, remix_count: 1 }
+            ]
+          }
+        }
+      }
+    }
+  };
+  const hydratedMetricsFixture = {
+    users: {
+      'h:alice': {
+        handle: 'alice',
+        id: 'user-1',
+        posts: {
+          's_123': {
+            url: 'https://sora.chatgpt.com/p/s_123',
+            caption: 'Delft Pug',
+            discovery_phrase: 'delft pottery organ pug',
+            post_time: 1773541644483,
+            snapshots: [
+              { t: 1773541932509, uv: 27, views: 37, likes: 9, comments: 1, remix_count: 0 },
+              { t: 1773542932509, uv: 29, views: 41, likes: 11, comments: 2, remix_count: 1 }
+            ]
+          }
+        }
+      }
+    }
+  };
+
+  const rawHarness = buildExportHarness(hydratedMetricsFixture, { loadedMetricsFixture, hydratedMetricsFixture });
+  await rawHarness.exportRawBackupJSON();
+  const rawPayload = JSON.parse(rawHarness.state.blob.parts.join(''));
+  assert.deepEqual(
+    rawPayload.metrics.users['h:alice'].posts['s_123'].snapshots.map((snap) => snap.t),
+    [1773541932509, 1773542932509]
+  );
+
+  const csvHarness = buildExportHarness(hydratedMetricsFixture, { loadedMetricsFixture, hydratedMetricsFixture });
+  await csvHarness.exportAllDataCSV();
+  const csvText = csvHarness.state.blob.parts.join('');
+  const firstSnapshotIso = new Date(1773541932509).toISOString();
+  const lastSnapshotIso = new Date(1773542932509).toISOString();
+  assert.equal(csvText.includes(`,2,${firstSnapshotIso},${lastSnapshotIso}`), true);
+});
+
+test('raw backup JSON survives export/import round-trip through dashboard backup format', async () => {
+  const metricsFixture = {
+    users: {
+      'h:alice': {
+        handle: 'alice',
+        id: 'user-1',
+        followers: [{ t: 1773541000000, count: 321 }],
+        cameos: [{ t: 1773541000000, count: 12 }],
+        posts: {
+          's_123': {
+            url: 'https://sora.chatgpt.com/p/s_123',
+            caption: 'Delft Pug',
+            discovery_phrase: 'delft pottery organ pug',
+            cameo_usernames: ['bob', 'carol'],
+            duration: 12.5,
+            width: 1920,
+            height: 1080,
+            post_time: 1773541644483,
+            snapshots: [
+              { t: 1773541932509, uv: 27, views: 37, likes: 9, comments: 1, remix_count: 0, duration: 12.5, width: 1920, height: 1080 },
+              { t: 1773542932509, uv: 29, views: 41, likes: 11, comments: 2, remix_count: 1, duration: 12.5, width: 1920, height: 1080 }
+            ]
+          }
+        }
+      }
+    }
+  };
+
+  const exportHarness = buildExportHarness(metricsFixture);
+  await exportHarness.exportRawBackupJSON();
+  const json = exportHarness.state.blob.parts.join('');
+
+  const importHarness = buildImportHarness();
+  const importedMetrics = { users: {} };
+  const stats = {
+    postsAdded: 0,
+    postsUpdated: 0,
+    snapshotsAdded: 0,
+    snapshotsSkipped: 0,
+    followersAdded: 0,
+    followersSkipped: 0,
+    cameosAdded: 0,
+    cameosSkipped: 0,
+    usersAdded: 0,
+    usersUpdated: 0,
+  };
+
+  const didImport = await importHarness.importDataText(json, importedMetrics, stats);
+  assert.equal(didImport, true);
+  assert.deepEqual(toPlainJson(importedMetrics.users['h:alice'].posts['s_123'].cameo_usernames), ['bob', 'carol']);
+  assert.equal(importedMetrics.users['h:alice'].posts['s_123'].duration, 12.5);
+  assert.equal(importedMetrics.users['h:alice'].posts['s_123'].width, 1920);
+  assert.equal(importedMetrics.users['h:alice'].posts['s_123'].height, 1080);
+  assert.deepEqual(
+    toPlainJson(importedMetrics.users['h:alice'].posts['s_123'].snapshots.map((snap) => snap.t)),
+    [1773541932509, 1773542932509]
+  );
+  assert.deepEqual(toPlainJson(importedMetrics.users['h:alice'].followers), [{ t: 1773541000000, count: 321 }]);
+  assert.deepEqual(toPlainJson(importedMetrics.users['h:alice'].cameos), [{ t: 1773541000000, count: 12 }]);
+});
+
+test('raw backup JSON import merges alias user buckets into one identity', async () => {
+  const importHarness = buildImportHarness();
+  const importedBackup = JSON.stringify({
+    format: 'sora-creator-tools/raw-backup-v1',
+    metrics: {
+      users: {
+        'id:user-1': {
+          handle: 'alice',
+          id: 'user-1',
+          followers: [{ t: 1773543000000, count: 100 }],
+          cameos: [{ t: 1773543000000, count: 5 }],
+          posts: {
+            's_backup': {
+              url: 'https://sora.chatgpt.com/p/s_backup',
+              caption: 'Backup Post',
+              discovery_phrase: 'backup phrase',
+              post_time: 1773543000000,
+              snapshots: [
+                { t: 1773543600000, uv: 10, views: 20, likes: 3, comments: 1, remix_count: 0 }
+              ]
+            }
+          }
+        }
+      }
+    }
+  });
+  const metrics = {
+    users: {
+      'h:alice': {
+        handle: 'alice',
+        id: 'user-1',
+        followers: [{ t: 1773541000000, count: 90 }],
+        cameos: [],
+        posts: {
+          's_handle': {
+            url: 'https://sora.chatgpt.com/p/s_handle',
+            caption: 'Handle Post',
+            discovery_phrase: 'handle phrase',
+            post_time: 1773541000000,
+            snapshots: [
+              { t: 1773541600000, uv: 5, views: 8, likes: 1, comments: 0, remix_count: 0 }
+            ]
+          }
+        }
+      },
+      'id:user-1': {
+        handle: 'alice',
+        id: 'user-1',
+        followers: [{ t: 1773542000000, count: 95 }],
+        cameos: [{ t: 1773542000000, count: 2 }],
+        posts: {
+          's_id': {
+            url: 'https://sora.chatgpt.com/p/s_id',
+            caption: 'ID Post',
+            discovery_phrase: 'id phrase',
+            post_time: 1773542000000,
+            snapshots: [
+              { t: 1773542600000, uv: 7, views: 12, likes: 2, comments: 1, remix_count: 0 }
+            ]
+          }
+        }
+      }
+    }
+  };
+  const stats = {
+    postsAdded: 0,
+    postsUpdated: 0,
+    snapshotsAdded: 0,
+    snapshotsSkipped: 0,
+    followersAdded: 0,
+    followersSkipped: 0,
+    cameosAdded: 0,
+    cameosSkipped: 0,
+    usersAdded: 0,
+    usersUpdated: 0,
+  };
+
+  const didImport = await importHarness.importDataText(importedBackup, metrics, stats);
+  assert.equal(didImport, true);
+  assert.deepEqual(
+    Object.keys(metrics.users).sort(),
+    ['id:user-1']
+  );
+  assert.deepEqual(
+    Object.keys(metrics.users['id:user-1'].posts).sort(),
+    ['s_backup', 's_handle', 's_id']
+  );
+  assert.deepEqual(
+    toPlainJson(metrics.users['id:user-1'].followers),
+    [
+      { t: 1773541000000, count: 90 },
+      { t: 1773542000000, count: 95 },
+      { t: 1773543000000, count: 100 }
+    ]
+  );
+  assert.deepEqual(
+    toPlainJson(metrics.users['id:user-1'].cameos),
+    [
+      { t: 1773542000000, count: 2 },
+      { t: 1773543000000, count: 5 }
+    ]
+  );
 });
 
 test('discovery phrases survive export/import round-trip through dashboard CSV', async () => {

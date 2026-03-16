@@ -6144,10 +6144,62 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     }
   }
 
+  function triggerDownload(contents, mimeType, fileName) {
+    const blob = new Blob([contents], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fileName;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function warnIfSnapshotHydrationIncomplete(actionLabel) {
+    if (snapshotsHydrated) return false;
+    const message = `${actionLabel} could not include full snapshot history because hydration did not complete. Please wait a moment and try again.`;
+    if (SNAP_DEBUG_ENABLED) {
+      try {
+        console.warn('[SoraMetrics]', message, {
+          currentUserKey,
+          snapshotsHydrated,
+          snapshotsHydratedForKey,
+          snapshotsHydrationEpoch
+        });
+      } catch {}
+    }
+    alert(message);
+    return true;
+  }
+
+  async function exportRawBackupJSON(){
+    try {
+      metrics = await loadMetrics();
+      await ensureFullSnapshots();
+      if (warnIfSnapshotHydrationIncomplete('Full backup export')) return;
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
+      const payload = {
+        format: 'sora-creator-tools/raw-backup-v1',
+        exportedAt: new Date().toISOString(),
+        snapshotsHydrated: !!snapshotsHydrated,
+        metrics: metrics || { users: {} },
+      };
+      triggerDownload(
+        `${JSON.stringify(payload, null, 2)}\n`,
+        'application/json;charset=utf-8;',
+        `sora_full_backup_with_snapshots_${timestamp}.json`
+      );
+    } catch {
+      alert('Full backup export failed. Please try again.');
+    }
+  }
+
   async function exportAllDataCSV(){
     try {
-      const metrics = await loadMetrics();
+      metrics = await loadMetrics();
       await ensureFullSnapshots();
+      if (warnIfSnapshotHydrationIncomplete('CSV export')) return;
       const allLines = [];
       
       // === SHEET 1: Posts Summary (one row per post with latest snapshot) ===
@@ -6434,16 +6486,8 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       
       // Create and download CSV
       const csvContent = allLines.join('\n');
-      const blob = new Blob([csvContent], {type:'text/csv;charset=utf-8;'});
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
-      a.download = `sora_all_data_export_${timestamp}.csv`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      triggerDownload(csvContent, 'text/csv;charset=utf-8;', `sora_all_data_export_${timestamp}.csv`);
     } catch {
       alert('Export failed. Please try again.');
     }
@@ -6483,6 +6527,344 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     const d = Date.parse(tsStr);
     if (!isNaN(d)) return d;
     return toTs(tsStr);
+  }
+
+  function normalizeImportIdentityHandle(value) {
+    if (value == null) return '';
+    return String(value).trim().replace(/^@+/, '').toLowerCase();
+  }
+
+  function getImportIdentityHandle(userKey, user) {
+    const fromUser = normalizeImportIdentityHandle(user?.handle || user?.userHandle || '');
+    if (fromUser) return fromUser;
+    if (typeof userKey === 'string' && userKey.startsWith('h:')) {
+      return normalizeImportIdentityHandle(userKey.slice(2));
+    }
+    return '';
+  }
+
+  function getImportIdentityId(userKey, user) {
+    const fromUser = user?.id != null ? String(user.id).trim() : '';
+    if (fromUser) return fromUser;
+    if (typeof userKey === 'string' && userKey.startsWith('id:')) {
+      return String(userKey.slice(3) || '').trim();
+    }
+    return '';
+  }
+
+  function getImportUserPostCount(user) {
+    return Object.keys(user?.posts || {}).length;
+  }
+
+  function findImportIdentityKeys(metrics, userKey, user) {
+    const users = metrics?.users || {};
+    const identityId = getImportIdentityId(userKey, user);
+    const identityHandle = getImportIdentityHandle(userKey, user);
+    if (!identityId && !identityHandle) {
+      return (users[userKey] ? [userKey] : []).filter(Boolean);
+    }
+    const matches = [];
+    for (const [candidateKey, candidateUser] of Object.entries(users)) {
+      if (candidateKey === 'unknown' || candidateKey.startsWith('c:')) continue;
+      const candidateId = getImportIdentityId(candidateKey, candidateUser);
+      const candidateHandle = getImportIdentityHandle(candidateKey, candidateUser);
+      if ((identityId && candidateId && identityId === candidateId) || (identityHandle && candidateHandle && identityHandle === candidateHandle)) {
+        matches.push(candidateKey);
+      }
+    }
+    if (users[userKey] && !matches.includes(userKey)) matches.push(userKey);
+    return matches;
+  }
+
+  function resolveImportTargetUserKey(metrics, userKey, user) {
+    const matches = findImportIdentityKeys(metrics, userKey, user);
+    if (!matches.length) return userKey;
+    const prefPrefix = userKey.startsWith('h:') ? 'h:' : (userKey.startsWith('id:') ? 'id:' : '');
+    matches.sort((a, b) => {
+      const aPref = prefPrefix && a.startsWith(prefPrefix) ? 1 : 0;
+      const bPref = prefPrefix && b.startsWith(prefPrefix) ? 1 : 0;
+      if (aPref !== bPref) return bPref - aPref;
+      const aPosts = getImportUserPostCount(metrics?.users?.[a]);
+      const bPosts = getImportUserPostCount(metrics?.users?.[b]);
+      if (aPosts !== bPosts) return bPosts - aPosts;
+      return a.localeCompare(b);
+    });
+    return matches[0] || userKey;
+  }
+
+  function mergeImportedPostMetadata(targetPost, sourcePost) {
+    const target = targetPost && typeof targetPost === 'object' ? targetPost : {};
+    const source = sourcePost && typeof sourcePost === 'object' ? sourcePost : {};
+    const out = { ...target };
+    const copyFields = [
+      'url', 'thumb', 'caption', 'discovery_phrase',
+      'ownerKey', 'ownerHandle', 'ownerId',
+      'parent_post_id', 'root_post_id'
+    ];
+    for (const field of copyFields) {
+      if (source[field]) out[field] = source[field];
+    }
+    const nextPostTime = toTs(source.post_time) || toTs(source.postTime);
+    if (nextPostTime) out.post_time = nextPostTime;
+    const nextLastSeen = toTs(source.lastSeen);
+    if (nextLastSeen) out.lastSeen = nextLastSeen;
+    if (Array.isArray(source.cameo_usernames) && source.cameo_usernames.length) {
+      const existing = Array.isArray(out.cameo_usernames) ? out.cameo_usernames : [];
+      out.cameo_usernames = Array.from(new Set(existing.concat(source.cameo_usernames).filter(Boolean)));
+    }
+    if (Number.isFinite(Number(source.duration))) out.duration = Number(source.duration);
+    if (Number.isFinite(Number(source.width))) out.width = Number(source.width);
+    if (Number.isFinite(Number(source.height))) out.height = Number(source.height);
+    out.snapshots = mergeSnapshotsByTimestamp(out.snapshots, source.snapshots);
+    return out;
+  }
+
+  function collapseImportedIdentityBuckets(metrics, userKey, user) {
+    const users = metrics?.users || {};
+    const aliasKeys = findImportIdentityKeys(metrics, userKey, users[userKey] || user);
+    if (aliasKeys.length <= 1) return userKey;
+    const canonicalKey = resolveImportTargetUserKey(metrics, userKey, users[userKey] || user);
+    const orderedKeys = [canonicalKey].concat(aliasKeys.filter((key) => key !== canonicalKey));
+    const mergedPosts = {};
+    const followerSeries = [];
+    const cameoSeries = [];
+    let canonicalUser = users[canonicalKey] || users[userKey] || user || {};
+
+    for (const aliasKey of orderedKeys) {
+      const bucket = users[aliasKey];
+      if (!bucket || typeof bucket !== 'object') continue;
+      if (Array.isArray(bucket.followers) && bucket.followers.length) followerSeries.push(bucket.followers);
+      if (Array.isArray(bucket.cameos) && bucket.cameos.length) cameoSeries.push(bucket.cameos);
+      for (const [postId, post] of Object.entries(bucket.posts || {})) {
+        mergedPosts[postId] = mergeImportedPostMetadata(mergedPosts[postId], post);
+      }
+      if (!canonicalUser.handle && bucket.handle) canonicalUser.handle = bucket.handle;
+      if (!canonicalUser.id && bucket.id) canonicalUser.id = bucket.id;
+    }
+
+    users[canonicalKey] = {
+      ...canonicalUser,
+      handle: canonicalUser.handle || user?.handle || null,
+      id: canonicalUser.id || user?.id || null,
+      posts: mergedPosts,
+      followers: followerSeries.reduce((acc, series) => mergeCountSeriesByTimestamp(acc, series), []),
+      cameos: cameoSeries.reduce((acc, series) => mergeCountSeriesByTimestamp(acc, series), []),
+    };
+
+    for (const aliasKey of aliasKeys) {
+      if (aliasKey !== canonicalKey) delete users[aliasKey];
+    }
+
+    if (SNAP_DEBUG_ENABLED) {
+      try {
+        console.warn('[SCT][import] consolidated identity buckets', {
+          importedUserKey: userKey,
+          canonicalKey,
+          aliasKeys
+        });
+      } catch {}
+    }
+
+    return canonicalKey;
+  }
+
+  function countUniqueImportTimestamps(entries, fieldName = 't') {
+    const seen = new Set();
+    for (const entry of (Array.isArray(entries) ? entries : [])) {
+      const t = toTs(entry?.[fieldName]);
+      if (t) seen.add(t);
+    }
+    return seen.size;
+  }
+
+  function mergeCountSeriesByTimestamp(existingEntries, incomingEntries){
+    const byTs = new Map();
+    const mergeIn = (list)=>{
+      for (const rawEntry of (Array.isArray(list) ? list : [])) {
+        if (!rawEntry || typeof rawEntry !== 'object') continue;
+        const t = toTs(rawEntry.t);
+        if (!t) continue;
+        const count = Number(rawEntry.count);
+        const prev = byTs.get(t) || { t };
+        if (Number.isFinite(count)) prev.count = count;
+        byTs.set(t, prev);
+      }
+    };
+    mergeIn(existingEntries);
+    mergeIn(incomingEntries);
+    const out = Array.from(byTs.values()).filter((entry) => entry && Number.isFinite(entry.t));
+    out.sort((a, b) => (a.t || 0) - (b.t || 0));
+    return out;
+  }
+
+  function extractImportMetricsPayload(parsed) {
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    if (parsed.format === 'sora-creator-tools/raw-backup-v1' && parsed.metrics?.users && typeof parsed.metrics.users === 'object') {
+      return parsed.metrics;
+    }
+    if (parsed.metrics?.users && typeof parsed.metrics.users === 'object') {
+      return parsed.metrics;
+    }
+    if (parsed.users && typeof parsed.users === 'object') {
+      return parsed;
+    }
+    return null;
+  }
+
+  async function importRawBackupJSONText(text, metrics, stats){
+    const parsed = JSON.parse(text);
+    const importedMetrics = extractImportMetricsPayload(parsed);
+    if (!importedMetrics) {
+      throw new Error('Unsupported JSON import format. Expected a Sora Creator Tools full backup JSON file.');
+    }
+
+    const importedUsers = importedMetrics.users && typeof importedMetrics.users === 'object' ? importedMetrics.users : {};
+    const importedEntries = Object.entries(importedUsers);
+    if (!importedEntries.length) return false;
+
+    for (const [importedUserKey, rawUser] of importedEntries) {
+      if (!rawUser || typeof rawUser !== 'object' || Array.isArray(rawUser)) continue;
+      const userKey = resolveImportTargetUserKey(metrics, importedUserKey, rawUser);
+
+      const incomingPosts = rawUser.posts && typeof rawUser.posts === 'object' && !Array.isArray(rawUser.posts)
+        ? rawUser.posts
+        : {};
+      const incomingFollowers = Array.isArray(rawUser.followers) ? rawUser.followers : [];
+      const incomingCameos = Array.isArray(rawUser.cameos) ? rawUser.cameos : [];
+
+      if (!metrics.users[userKey]) {
+        const nextUser = {
+          handle: rawUser.handle || null,
+          id: rawUser.id || null,
+          posts: {},
+          followers: mergeCountSeriesByTimestamp([], incomingFollowers),
+          cameos: mergeCountSeriesByTimestamp([], incomingCameos),
+        };
+
+        for (const [postId, rawPost] of Object.entries(incomingPosts)) {
+          if (!rawPost || typeof rawPost !== 'object' || Array.isArray(rawPost)) continue;
+          const nextPost = JSON.parse(JSON.stringify(rawPost));
+          nextPost.snapshots = mergeSnapshotsByTimestamp([], rawPost.snapshots);
+          if (nextPost.post_time) nextPost.post_time = toTs(nextPost.post_time) || nextPost.post_time;
+          if (nextPost.lastSeen) nextPost.lastSeen = toTs(nextPost.lastSeen) || nextPost.lastSeen;
+          nextUser.posts[postId] = nextPost;
+        }
+
+        metrics.users[userKey] = nextUser;
+        stats.usersAdded++;
+        stats.postsAdded += Object.keys(nextUser.posts).length;
+        for (const post of Object.values(nextUser.posts)) {
+          stats.snapshotsAdded += countUniqueImportTimestamps(post.snapshots);
+        }
+        stats.followersAdded += nextUser.followers.length;
+        stats.cameosAdded += nextUser.cameos.length;
+        collapseImportedIdentityBuckets(metrics, userKey, rawUser);
+        continue;
+      }
+
+      const user = metrics.users[userKey];
+      if (rawUser.handle) user.handle = rawUser.handle;
+      if (rawUser.id) user.id = rawUser.id;
+      if (!user.posts || typeof user.posts !== 'object' || Array.isArray(user.posts)) user.posts = {};
+      if (!Array.isArray(user.followers)) user.followers = [];
+      if (!Array.isArray(user.cameos)) user.cameos = [];
+      stats.usersUpdated++;
+
+      const existingFollowerTs = new Set((user.followers || []).map((entry) => toTs(entry?.t)).filter(Boolean));
+      for (const entry of incomingFollowers) {
+        const t = toTs(entry?.t);
+        if (!t) continue;
+        if (existingFollowerTs.has(t)) stats.followersSkipped++;
+        else {
+          stats.followersAdded++;
+          existingFollowerTs.add(t);
+        }
+      }
+      user.followers = mergeCountSeriesByTimestamp(user.followers, incomingFollowers);
+
+      const existingCameoTs = new Set((user.cameos || []).map((entry) => toTs(entry?.t)).filter(Boolean));
+      for (const entry of incomingCameos) {
+        const t = toTs(entry?.t);
+        if (!t) continue;
+        if (existingCameoTs.has(t)) stats.cameosSkipped++;
+        else {
+          stats.cameosAdded++;
+          existingCameoTs.add(t);
+        }
+      }
+      user.cameos = mergeCountSeriesByTimestamp(user.cameos, incomingCameos);
+
+      for (const [postId, rawPost] of Object.entries(incomingPosts)) {
+        if (!rawPost || typeof rawPost !== 'object' || Array.isArray(rawPost)) continue;
+        const incomingSnaps = Array.isArray(rawPost.snapshots) ? rawPost.snapshots : [];
+        const incomingSnapTs = new Set();
+        for (const snap of incomingSnaps) {
+          const t = toTs(snap?.t);
+          if (t) incomingSnapTs.add(t);
+        }
+
+        if (!user.posts[postId]) {
+          const nextPost = JSON.parse(JSON.stringify(rawPost));
+          nextPost.snapshots = mergeSnapshotsByTimestamp([], incomingSnaps);
+          if (nextPost.post_time) nextPost.post_time = toTs(nextPost.post_time) || nextPost.post_time;
+          if (nextPost.lastSeen) nextPost.lastSeen = toTs(nextPost.lastSeen) || nextPost.lastSeen;
+          user.posts[postId] = nextPost;
+          stats.postsAdded++;
+          stats.snapshotsAdded += incomingSnapTs.size;
+          continue;
+        }
+
+        const post = user.posts[postId];
+        if (rawPost.url) post.url = rawPost.url;
+        if (rawPost.thumb) post.thumb = rawPost.thumb;
+        if (rawPost.caption) post.caption = rawPost.caption;
+        if (rawPost.discovery_phrase) post.discovery_phrase = rawPost.discovery_phrase;
+        if (rawPost.ownerKey) post.ownerKey = rawPost.ownerKey;
+        if (rawPost.ownerHandle) post.ownerHandle = rawPost.ownerHandle;
+        if (rawPost.ownerId) post.ownerId = rawPost.ownerId;
+        if (rawPost.parent_post_id) post.parent_post_id = rawPost.parent_post_id;
+        if (rawPost.root_post_id) post.root_post_id = rawPost.root_post_id;
+        if (rawPost.post_time) post.post_time = toTs(rawPost.post_time) || rawPost.post_time;
+        if (rawPost.lastSeen) post.lastSeen = toTs(rawPost.lastSeen) || rawPost.lastSeen;
+        if (Array.isArray(rawPost.cameo_usernames) && rawPost.cameo_usernames.length) {
+          post.cameo_usernames = rawPost.cameo_usernames.slice();
+        }
+        if (Number.isFinite(Number(rawPost.duration))) post.duration = Number(rawPost.duration);
+        if (Number.isFinite(Number(rawPost.width))) post.width = Number(rawPost.width);
+        if (Number.isFinite(Number(rawPost.height))) post.height = Number(rawPost.height);
+
+        const existingSnapTs = new Set((Array.isArray(post.snapshots) ? post.snapshots : []).map((snap) => toTs(snap?.t)).filter(Boolean));
+        for (const t of incomingSnapTs) {
+          if (existingSnapTs.has(t)) stats.snapshotsSkipped++;
+          else stats.snapshotsAdded++;
+        }
+        post.snapshots = mergeSnapshotsByTimestamp(post.snapshots, incomingSnaps);
+        stats.postsUpdated++;
+      }
+
+      collapseImportedIdentityBuckets(metrics, userKey, rawUser);
+    }
+
+    for (const user of Object.values(metrics.users)) {
+      if (Array.isArray(user.followers)) user.followers.sort((a, b) => (a.t || 0) - (b.t || 0));
+      if (Array.isArray(user.cameos)) user.cameos.sort((a, b) => (a.t || 0) - (b.t || 0));
+      for (const post of Object.values(user.posts || {})) {
+        if (Array.isArray(post.snapshots)) {
+          post.snapshots.sort((a, b) => (toTs(a?.t) || 0) - (toTs(b?.t) || 0));
+        }
+      }
+    }
+
+    return true;
+  }
+
+  async function importDataText(text, metrics, stats){
+    const trimmed = typeof text === 'string' ? text.trim() : '';
+    if (!trimmed) return false;
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+      return importRawBackupJSONText(trimmed, metrics, stats);
+    }
+    return importDataCSVText(trimmed, metrics, stats);
   }
 
   async function importDataCSVText(text, metrics, stats){
@@ -6529,7 +6911,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     return true;
   }
 
-  async function importDataCSVFiles(files) {
+  async function importDataFiles(files) {
     try {
       const list = Array.from(files || []).filter(Boolean);
       if (!list.length) return;
@@ -6555,12 +6937,12 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       let anyImported = false;
       for (const file of list){
         const text = await file.text();
-        const didImport = await importDataCSVText(text, metrics, stats);
+        const didImport = await importDataText(text, metrics, stats);
         if (didImport) anyImported = true;
       }
 
       if (!anyImported) {
-        alert('CSV file is empty.');
+        alert('Import file is empty or unsupported.');
         return;
       }
 
@@ -11419,6 +11801,12 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         await exportAllDataCSV();
       });
     }
+    const purgeExportRawBtn = $('#purgeExportRaw');
+    if (purgeExportRawBtn) {
+      purgeExportRawBtn.addEventListener('click', async ()=>{
+        await exportRawBackupJSON();
+      });
+    }
 
     $('#purgeConfirmNo').addEventListener('click', ()=>{
       purgeConfirmDialog.style.display = 'none';
@@ -11880,7 +12268,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       importFileInput.addEventListener('change', async (e)=>{
         const files = e.target.files;
         if (files && files.length) {
-          await importDataCSVFiles(files);
+          await importDataFiles(files);
           // Reset file input so same file(s) can be imported again if needed
           e.target.value = '';
         }
