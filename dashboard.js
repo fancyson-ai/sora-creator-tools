@@ -13,6 +13,7 @@
   const AUTO_REFRESH_MAX_NO_CHANGE_SKIPS = 2;
   const CAMEO_KEY_PREFIX = 'c:';
   const ULTRA_MODE_STORAGE_KEY = 'SCT_ULTRA_MODE_V1';
+  const DASHBOARD_DISCOVERY_PHRASE_STORAGE_KEY = 'SCT_DASHBOARD_DISCOVERY_PHRASE_V2';
   const ULTRA_MODE_TAP_COUNT = 5;
   const SITE_ORIGIN = 'https://sora.chatgpt.com';
   const COMPARE_TOTAL_VIEWS_TITLE = 'Total Views over time';
@@ -387,6 +388,7 @@
   let lastSessionCacheAt = 0;
   let currentUserKey = null;
   let lastSelectedUserKey = null;
+  let showDiscoveryPhrase = true;
   let nextAutoRefreshAt = 0;
   let autoRefreshCountdownTimer = null;
   let triggerMetricsAutoRefreshNow = null;
@@ -738,6 +740,9 @@
       if (typeof post.thumb === 'string') out.thumb = post.thumb;
       if (typeof post.caption === 'string') {
         out.caption = post.caption.length > 320 ? post.caption.slice(0, 320) : post.caption;
+      }
+      if (typeof post.discovery_phrase === 'string') {
+        out.discovery_phrase = post.discovery_phrase.length > 320 ? post.discovery_phrase.slice(0, 320) : post.discovery_phrase;
       }
       if (Array.isArray(post.cameos)) out.cameos = post.cameos.slice(0, 12);
       if (post.post_time != null) out.post_time = post.post_time;
@@ -1461,6 +1466,22 @@
   async function saveUltraModePreference(enabled){
     try {
       await chrome.storage.local.set({ [ULTRA_MODE_STORAGE_KEY]: !!enabled });
+    } catch {}
+  }
+
+  async function loadDiscoveryPhrasePreference(){
+    try {
+      const stored = await chrome.storage.local.get(DASHBOARD_DISCOVERY_PHRASE_STORAGE_KEY);
+      if (!Object.prototype.hasOwnProperty.call(stored, DASHBOARD_DISCOVERY_PHRASE_STORAGE_KEY)) return true;
+      return !!stored[DASHBOARD_DISCOVERY_PHRASE_STORAGE_KEY];
+    } catch {
+      return true;
+    }
+  }
+
+  async function saveDiscoveryPhrasePreference(enabled){
+    try {
+      await chrome.storage.local.set({ [DASHBOARD_DISCOVERY_PHRASE_STORAGE_KEY]: !!enabled });
     } catch {}
   }
 
@@ -3183,6 +3204,17 @@
     }
   }
 
+  function normalizeDiscoveryPhrase(value) {
+    if (typeof value !== 'string') return null;
+    const phrase = value.replace(/\s+/g, ' ').trim();
+    return phrase || null;
+  }
+
+  function buildDiscoveryPhraseLine(post) {
+    const phrase = normalizeDiscoveryPhrase(post?.discoveryPhrase ?? post?.discovery_phrase);
+    return phrase || '';
+  }
+
   function truncateForPurgeCaption(text){
     const clean = (typeof text === 'string' ? text.trim() : '') || 'this post';
     if (clean.length <= 100) return clean;
@@ -3480,6 +3512,7 @@
       const rr = rrRaw == null ? null : Number(rrRaw);
       const lastSeen = p?.lastSeen || 0;
       const cap = (typeof p?.caption === 'string' && p.caption) ? p.caption.trim() : null;
+      const discoveryPhrase = normalizeDiscoveryPhrase(p?.discovery_phrase);
       const cameos = Array.isArray(p?.cameo_usernames) ? p.cameo_usernames.filter(c => typeof c === 'string' && c.trim()) : [];
       const owner = isVirtual ? (p?.ownerHandle || '') : (user?.handle || '');
 
@@ -3514,6 +3547,7 @@
         cameos,
         owner,
         caption: cap,
+        discoveryPhrase,
         views,
         likes,
         lastSeen
@@ -3812,6 +3846,13 @@
       const nextStats = `${fmt(p.last?.likes)} Likes - ${fmt1(p.last?.uv)} Viewers - ${p.rate==null?'-':p.rate.toFixed(1)+'%'} IR`;
       if (statsDiv.textContent !== nextStats) statsDiv.textContent = nextStats;
     }
+    const discoveryDiv = cache.discoveryDiv || row.querySelector('.discovery');
+    if (discoveryDiv) {
+      const nextDiscovery = showDiscoveryPhrase ? buildDiscoveryPhraseLine(p) : '';
+      discoveryDiv.textContent = nextDiscovery;
+      discoveryDiv.title = nextDiscovery || '';
+      discoveryDiv.hidden = !nextDiscovery;
+    }
     const toggleDiv = cache.toggleDiv || row.querySelector('.toggle');
     const forceShowAll = !!opts?.forceShowAll;
     if (toggleDiv) {
@@ -3868,8 +3909,15 @@
     statsDiv.className = 'stats';
     statsDiv.textContent = `${fmt(p.last?.likes)} Likes - ${fmt1(p.last?.uv)} Viewers - ${p.rate==null?'-':p.rate.toFixed(1)+'%'} IR`;
 
+    const discoveryDiv = document.createElement('div');
+    discoveryDiv.className = 'discovery';
+    discoveryDiv.textContent = showDiscoveryPhrase ? buildDiscoveryPhraseLine(p) : '';
+    discoveryDiv.title = discoveryDiv.textContent || '';
+    discoveryDiv.hidden = !discoveryDiv.textContent;
+
     metaDiv.appendChild(idDiv);
     metaDiv.appendChild(statsDiv);
+    metaDiv.appendChild(discoveryDiv);
 
     const toggleDiv = document.createElement('div');
     toggleDiv.className = 'toggle';
@@ -3893,7 +3941,7 @@
     row.appendChild(metaDiv);
     row.appendChild(toggleDiv);
     row.appendChild(purgeBtn);
-    row._sctCache = { thumbDiv, thumbLink, dotDiv, link, statsDiv, toggleDiv };
+    row._sctCache = { thumbDiv, thumbLink, dotDiv, link, statsDiv, discoveryDiv, toggleDiv };
     row._sctLabelKey = buildPostLabelKey(p);
     row._sctThumbUrl = thumbChoice.displayUrl;
     row._sctThumbSourceUrl = thumbChoice.sourceUrl;
@@ -6096,16 +6144,68 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     }
   }
 
+  function triggerDownload(contents, mimeType, fileName) {
+    const blob = new Blob([contents], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fileName;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function warnIfSnapshotHydrationIncomplete(actionLabel) {
+    if (snapshotsHydrated) return false;
+    const message = `${actionLabel} could not include full snapshot history because hydration did not complete. Please wait a moment and try again.`;
+    if (SNAP_DEBUG_ENABLED) {
+      try {
+        console.warn('[SoraMetrics]', message, {
+          currentUserKey,
+          snapshotsHydrated,
+          snapshotsHydratedForKey,
+          snapshotsHydrationEpoch
+        });
+      } catch {}
+    }
+    alert(message);
+    return true;
+  }
+
+  async function exportRawBackupJSON(){
+    try {
+      metrics = await loadMetrics();
+      await ensureFullSnapshots();
+      if (warnIfSnapshotHydrationIncomplete('Full backup export')) return;
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
+      const payload = {
+        format: 'sora-creator-tools/raw-backup-v1',
+        exportedAt: new Date().toISOString(),
+        snapshotsHydrated: !!snapshotsHydrated,
+        metrics: metrics || { users: {} },
+      };
+      triggerDownload(
+        `${JSON.stringify(payload, null, 2)}\n`,
+        'application/json;charset=utf-8;',
+        `sora_full_backup_with_snapshots_${timestamp}.json`
+      );
+    } catch {
+      alert('Full backup export failed. Please try again.');
+    }
+  }
+
   async function exportAllDataCSV(){
     try {
-      const metrics = await loadMetrics();
+      metrics = await loadMetrics();
       await ensureFullSnapshots();
+      if (warnIfSnapshotHydrationIncomplete('CSV export')) return;
       const allLines = [];
       
       // === SHEET 1: Posts Summary (one row per post with latest snapshot) ===
       const postsHeader = [
         'User Key', 'User Handle', 'User ID', 
-        'Post ID', 'Post URL', 'Post Time', 'Post Time (ISO)', 'Caption',
+        'Post ID', 'Post URL', 'Post Time', 'Post Time (ISO)', 'Caption', 'Discovery Phrase',
         'Thumbnail URL', 'Parent Post ID', 'Root Post ID', 'Last Seen Timestamp',
         'Owner Key', 'Owner Handle', 'Owner ID',
         'Latest Snapshot Timestamp', 'Unique Views', 'Total Views', 'Likes', 'Comments', 'Remixes',
@@ -6137,6 +6237,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           const lr = likeRate(likes, uv);
           
           const caption = (typeof post.caption === 'string' && post.caption) ? post.caption.replace(/\n/g, ' ').replace(/\r/g, '') : '';
+          const discoveryPhrase = (typeof post.discovery_phrase === 'string' && post.discovery_phrase) ? post.discovery_phrase.replace(/\n/g, ' ').replace(/\r/g, '') : '';
           const thumb = post.thumb || '';
           const url = post.url || `${SITE_ORIGIN}/p/${pid}`;
           const ownerKey = post.ownerKey || userKey;
@@ -6153,7 +6254,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           
           allLines.push([
             userKey, handle, userId,
-            pid, url, postTime, postTimeISO, caption,
+            pid, url, postTime, postTimeISO, caption, discoveryPhrase,
             thumb, parentPostId, rootPostId, lastSeen,
             ownerKey, ownerHandle, ownerId,
             latestTime, uv, views, likes, comments, remixes,
@@ -6168,7 +6269,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       allLines.push('=== POST SNAPSHOTS (Complete Historical Timeline) ===');
       const snapshotsHeader = [
         'User Key', 'User Handle', 'User ID',
-        'Post ID', 'Post URL', 'Post Caption', 'Post Time',
+        'Post ID', 'Post URL', 'Post Caption', 'Post Discovery Phrase', 'Post Time',
         'Owner Key', 'Owner Handle', 'Owner ID',
         'Snapshot Timestamp', 'Snapshot Timestamp (ISO)', 'Snapshot Age (minutes)',
         'Unique Views', 'Total Views', 'Likes', 'Comments', 'Remixes',
@@ -6186,6 +6287,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           const postTimeRaw = getPostTimeStrict(post);
           const postTime = fmtTimestamp(postTimeRaw);
           const caption = (typeof post.caption === 'string' && post.caption) ? post.caption.replace(/\n/g, ' ').replace(/\r/g, '') : '';
+          const discoveryPhrase = (typeof post.discovery_phrase === 'string' && post.discovery_phrase) ? post.discovery_phrase.replace(/\n/g, ' ').replace(/\r/g, '') : '';
           const url = post.url || `${SITE_ORIGIN}/p/${pid}`;
           const ownerKey = post.ownerKey || userKey;
           const ownerHandle = post.ownerHandle || handle;
@@ -6216,7 +6318,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
             
             allLines.push([
               userKey, handle, userId,
-              pid, url, caption, postTime,
+              pid, url, caption, discoveryPhrase, postTime,
               ownerKey, ownerHandle, ownerId,
               tFormatted, tISO, ageMin,
               uv, views, likes, comments, remixes,
@@ -6384,16 +6486,8 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       
       // Create and download CSV
       const csvContent = allLines.join('\n');
-      const blob = new Blob([csvContent], {type:'text/csv;charset=utf-8;'});
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
-      a.download = `sora_all_data_export_${timestamp}.csv`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      triggerDownload(csvContent, 'text/csv;charset=utf-8;', `sora_all_data_export_${timestamp}.csv`);
     } catch {
       alert('Export failed. Please try again.');
     }
@@ -6433,6 +6527,344 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     const d = Date.parse(tsStr);
     if (!isNaN(d)) return d;
     return toTs(tsStr);
+  }
+
+  function normalizeImportIdentityHandle(value) {
+    if (value == null) return '';
+    return String(value).trim().replace(/^@+/, '').toLowerCase();
+  }
+
+  function getImportIdentityHandle(userKey, user) {
+    const fromUser = normalizeImportIdentityHandle(user?.handle || user?.userHandle || '');
+    if (fromUser) return fromUser;
+    if (typeof userKey === 'string' && userKey.startsWith('h:')) {
+      return normalizeImportIdentityHandle(userKey.slice(2));
+    }
+    return '';
+  }
+
+  function getImportIdentityId(userKey, user) {
+    const fromUser = user?.id != null ? String(user.id).trim() : '';
+    if (fromUser) return fromUser;
+    if (typeof userKey === 'string' && userKey.startsWith('id:')) {
+      return String(userKey.slice(3) || '').trim();
+    }
+    return '';
+  }
+
+  function getImportUserPostCount(user) {
+    return Object.keys(user?.posts || {}).length;
+  }
+
+  function findImportIdentityKeys(metrics, userKey, user) {
+    const users = metrics?.users || {};
+    const identityId = getImportIdentityId(userKey, user);
+    const identityHandle = getImportIdentityHandle(userKey, user);
+    if (!identityId && !identityHandle) {
+      return (users[userKey] ? [userKey] : []).filter(Boolean);
+    }
+    const matches = [];
+    for (const [candidateKey, candidateUser] of Object.entries(users)) {
+      if (candidateKey === 'unknown' || candidateKey.startsWith('c:')) continue;
+      const candidateId = getImportIdentityId(candidateKey, candidateUser);
+      const candidateHandle = getImportIdentityHandle(candidateKey, candidateUser);
+      if ((identityId && candidateId && identityId === candidateId) || (identityHandle && candidateHandle && identityHandle === candidateHandle)) {
+        matches.push(candidateKey);
+      }
+    }
+    if (users[userKey] && !matches.includes(userKey)) matches.push(userKey);
+    return matches;
+  }
+
+  function resolveImportTargetUserKey(metrics, userKey, user) {
+    const matches = findImportIdentityKeys(metrics, userKey, user);
+    if (!matches.length) return userKey;
+    const prefPrefix = userKey.startsWith('h:') ? 'h:' : (userKey.startsWith('id:') ? 'id:' : '');
+    matches.sort((a, b) => {
+      const aPref = prefPrefix && a.startsWith(prefPrefix) ? 1 : 0;
+      const bPref = prefPrefix && b.startsWith(prefPrefix) ? 1 : 0;
+      if (aPref !== bPref) return bPref - aPref;
+      const aPosts = getImportUserPostCount(metrics?.users?.[a]);
+      const bPosts = getImportUserPostCount(metrics?.users?.[b]);
+      if (aPosts !== bPosts) return bPosts - aPosts;
+      return a.localeCompare(b);
+    });
+    return matches[0] || userKey;
+  }
+
+  function mergeImportedPostMetadata(targetPost, sourcePost) {
+    const target = targetPost && typeof targetPost === 'object' ? targetPost : {};
+    const source = sourcePost && typeof sourcePost === 'object' ? sourcePost : {};
+    const out = { ...target };
+    const copyFields = [
+      'url', 'thumb', 'caption', 'discovery_phrase',
+      'ownerKey', 'ownerHandle', 'ownerId',
+      'parent_post_id', 'root_post_id'
+    ];
+    for (const field of copyFields) {
+      if (source[field]) out[field] = source[field];
+    }
+    const nextPostTime = toTs(source.post_time) || toTs(source.postTime);
+    if (nextPostTime) out.post_time = nextPostTime;
+    const nextLastSeen = toTs(source.lastSeen);
+    if (nextLastSeen) out.lastSeen = nextLastSeen;
+    if (Array.isArray(source.cameo_usernames) && source.cameo_usernames.length) {
+      const existing = Array.isArray(out.cameo_usernames) ? out.cameo_usernames : [];
+      out.cameo_usernames = Array.from(new Set(existing.concat(source.cameo_usernames).filter(Boolean)));
+    }
+    if (Number.isFinite(Number(source.duration))) out.duration = Number(source.duration);
+    if (Number.isFinite(Number(source.width))) out.width = Number(source.width);
+    if (Number.isFinite(Number(source.height))) out.height = Number(source.height);
+    out.snapshots = mergeSnapshotsByTimestamp(out.snapshots, source.snapshots);
+    return out;
+  }
+
+  function collapseImportedIdentityBuckets(metrics, userKey, user) {
+    const users = metrics?.users || {};
+    const aliasKeys = findImportIdentityKeys(metrics, userKey, users[userKey] || user);
+    if (aliasKeys.length <= 1) return userKey;
+    const canonicalKey = resolveImportTargetUserKey(metrics, userKey, users[userKey] || user);
+    const orderedKeys = [canonicalKey].concat(aliasKeys.filter((key) => key !== canonicalKey));
+    const mergedPosts = {};
+    const followerSeries = [];
+    const cameoSeries = [];
+    let canonicalUser = users[canonicalKey] || users[userKey] || user || {};
+
+    for (const aliasKey of orderedKeys) {
+      const bucket = users[aliasKey];
+      if (!bucket || typeof bucket !== 'object') continue;
+      if (Array.isArray(bucket.followers) && bucket.followers.length) followerSeries.push(bucket.followers);
+      if (Array.isArray(bucket.cameos) && bucket.cameos.length) cameoSeries.push(bucket.cameos);
+      for (const [postId, post] of Object.entries(bucket.posts || {})) {
+        mergedPosts[postId] = mergeImportedPostMetadata(mergedPosts[postId], post);
+      }
+      if (!canonicalUser.handle && bucket.handle) canonicalUser.handle = bucket.handle;
+      if (!canonicalUser.id && bucket.id) canonicalUser.id = bucket.id;
+    }
+
+    users[canonicalKey] = {
+      ...canonicalUser,
+      handle: canonicalUser.handle || user?.handle || null,
+      id: canonicalUser.id || user?.id || null,
+      posts: mergedPosts,
+      followers: followerSeries.reduce((acc, series) => mergeCountSeriesByTimestamp(acc, series), []),
+      cameos: cameoSeries.reduce((acc, series) => mergeCountSeriesByTimestamp(acc, series), []),
+    };
+
+    for (const aliasKey of aliasKeys) {
+      if (aliasKey !== canonicalKey) delete users[aliasKey];
+    }
+
+    if (SNAP_DEBUG_ENABLED) {
+      try {
+        console.warn('[SCT][import] consolidated identity buckets', {
+          importedUserKey: userKey,
+          canonicalKey,
+          aliasKeys
+        });
+      } catch {}
+    }
+
+    return canonicalKey;
+  }
+
+  function countUniqueImportTimestamps(entries, fieldName = 't') {
+    const seen = new Set();
+    for (const entry of (Array.isArray(entries) ? entries : [])) {
+      const t = toTs(entry?.[fieldName]);
+      if (t) seen.add(t);
+    }
+    return seen.size;
+  }
+
+  function mergeCountSeriesByTimestamp(existingEntries, incomingEntries){
+    const byTs = new Map();
+    const mergeIn = (list)=>{
+      for (const rawEntry of (Array.isArray(list) ? list : [])) {
+        if (!rawEntry || typeof rawEntry !== 'object') continue;
+        const t = toTs(rawEntry.t);
+        if (!t) continue;
+        const count = Number(rawEntry.count);
+        const prev = byTs.get(t) || { t };
+        if (Number.isFinite(count)) prev.count = count;
+        byTs.set(t, prev);
+      }
+    };
+    mergeIn(existingEntries);
+    mergeIn(incomingEntries);
+    const out = Array.from(byTs.values()).filter((entry) => entry && Number.isFinite(entry.t));
+    out.sort((a, b) => (a.t || 0) - (b.t || 0));
+    return out;
+  }
+
+  function extractImportMetricsPayload(parsed) {
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    if (parsed.format === 'sora-creator-tools/raw-backup-v1' && parsed.metrics?.users && typeof parsed.metrics.users === 'object') {
+      return parsed.metrics;
+    }
+    if (parsed.metrics?.users && typeof parsed.metrics.users === 'object') {
+      return parsed.metrics;
+    }
+    if (parsed.users && typeof parsed.users === 'object') {
+      return parsed;
+    }
+    return null;
+  }
+
+  async function importRawBackupJSONText(text, metrics, stats){
+    const parsed = JSON.parse(text);
+    const importedMetrics = extractImportMetricsPayload(parsed);
+    if (!importedMetrics) {
+      throw new Error('Unsupported JSON import format. Expected a Sora Creator Tools full backup JSON file.');
+    }
+
+    const importedUsers = importedMetrics.users && typeof importedMetrics.users === 'object' ? importedMetrics.users : {};
+    const importedEntries = Object.entries(importedUsers);
+    if (!importedEntries.length) return false;
+
+    for (const [importedUserKey, rawUser] of importedEntries) {
+      if (!rawUser || typeof rawUser !== 'object' || Array.isArray(rawUser)) continue;
+      const userKey = resolveImportTargetUserKey(metrics, importedUserKey, rawUser);
+
+      const incomingPosts = rawUser.posts && typeof rawUser.posts === 'object' && !Array.isArray(rawUser.posts)
+        ? rawUser.posts
+        : {};
+      const incomingFollowers = Array.isArray(rawUser.followers) ? rawUser.followers : [];
+      const incomingCameos = Array.isArray(rawUser.cameos) ? rawUser.cameos : [];
+
+      if (!metrics.users[userKey]) {
+        const nextUser = {
+          handle: rawUser.handle || null,
+          id: rawUser.id || null,
+          posts: {},
+          followers: mergeCountSeriesByTimestamp([], incomingFollowers),
+          cameos: mergeCountSeriesByTimestamp([], incomingCameos),
+        };
+
+        for (const [postId, rawPost] of Object.entries(incomingPosts)) {
+          if (!rawPost || typeof rawPost !== 'object' || Array.isArray(rawPost)) continue;
+          const nextPost = JSON.parse(JSON.stringify(rawPost));
+          nextPost.snapshots = mergeSnapshotsByTimestamp([], rawPost.snapshots);
+          if (nextPost.post_time) nextPost.post_time = toTs(nextPost.post_time) || nextPost.post_time;
+          if (nextPost.lastSeen) nextPost.lastSeen = toTs(nextPost.lastSeen) || nextPost.lastSeen;
+          nextUser.posts[postId] = nextPost;
+        }
+
+        metrics.users[userKey] = nextUser;
+        stats.usersAdded++;
+        stats.postsAdded += Object.keys(nextUser.posts).length;
+        for (const post of Object.values(nextUser.posts)) {
+          stats.snapshotsAdded += countUniqueImportTimestamps(post.snapshots);
+        }
+        stats.followersAdded += nextUser.followers.length;
+        stats.cameosAdded += nextUser.cameos.length;
+        collapseImportedIdentityBuckets(metrics, userKey, rawUser);
+        continue;
+      }
+
+      const user = metrics.users[userKey];
+      if (rawUser.handle) user.handle = rawUser.handle;
+      if (rawUser.id) user.id = rawUser.id;
+      if (!user.posts || typeof user.posts !== 'object' || Array.isArray(user.posts)) user.posts = {};
+      if (!Array.isArray(user.followers)) user.followers = [];
+      if (!Array.isArray(user.cameos)) user.cameos = [];
+      stats.usersUpdated++;
+
+      const existingFollowerTs = new Set((user.followers || []).map((entry) => toTs(entry?.t)).filter(Boolean));
+      for (const entry of incomingFollowers) {
+        const t = toTs(entry?.t);
+        if (!t) continue;
+        if (existingFollowerTs.has(t)) stats.followersSkipped++;
+        else {
+          stats.followersAdded++;
+          existingFollowerTs.add(t);
+        }
+      }
+      user.followers = mergeCountSeriesByTimestamp(user.followers, incomingFollowers);
+
+      const existingCameoTs = new Set((user.cameos || []).map((entry) => toTs(entry?.t)).filter(Boolean));
+      for (const entry of incomingCameos) {
+        const t = toTs(entry?.t);
+        if (!t) continue;
+        if (existingCameoTs.has(t)) stats.cameosSkipped++;
+        else {
+          stats.cameosAdded++;
+          existingCameoTs.add(t);
+        }
+      }
+      user.cameos = mergeCountSeriesByTimestamp(user.cameos, incomingCameos);
+
+      for (const [postId, rawPost] of Object.entries(incomingPosts)) {
+        if (!rawPost || typeof rawPost !== 'object' || Array.isArray(rawPost)) continue;
+        const incomingSnaps = Array.isArray(rawPost.snapshots) ? rawPost.snapshots : [];
+        const incomingSnapTs = new Set();
+        for (const snap of incomingSnaps) {
+          const t = toTs(snap?.t);
+          if (t) incomingSnapTs.add(t);
+        }
+
+        if (!user.posts[postId]) {
+          const nextPost = JSON.parse(JSON.stringify(rawPost));
+          nextPost.snapshots = mergeSnapshotsByTimestamp([], incomingSnaps);
+          if (nextPost.post_time) nextPost.post_time = toTs(nextPost.post_time) || nextPost.post_time;
+          if (nextPost.lastSeen) nextPost.lastSeen = toTs(nextPost.lastSeen) || nextPost.lastSeen;
+          user.posts[postId] = nextPost;
+          stats.postsAdded++;
+          stats.snapshotsAdded += incomingSnapTs.size;
+          continue;
+        }
+
+        const post = user.posts[postId];
+        if (rawPost.url) post.url = rawPost.url;
+        if (rawPost.thumb) post.thumb = rawPost.thumb;
+        if (rawPost.caption) post.caption = rawPost.caption;
+        if (rawPost.discovery_phrase) post.discovery_phrase = rawPost.discovery_phrase;
+        if (rawPost.ownerKey) post.ownerKey = rawPost.ownerKey;
+        if (rawPost.ownerHandle) post.ownerHandle = rawPost.ownerHandle;
+        if (rawPost.ownerId) post.ownerId = rawPost.ownerId;
+        if (rawPost.parent_post_id) post.parent_post_id = rawPost.parent_post_id;
+        if (rawPost.root_post_id) post.root_post_id = rawPost.root_post_id;
+        if (rawPost.post_time) post.post_time = toTs(rawPost.post_time) || rawPost.post_time;
+        if (rawPost.lastSeen) post.lastSeen = toTs(rawPost.lastSeen) || rawPost.lastSeen;
+        if (Array.isArray(rawPost.cameo_usernames) && rawPost.cameo_usernames.length) {
+          post.cameo_usernames = rawPost.cameo_usernames.slice();
+        }
+        if (Number.isFinite(Number(rawPost.duration))) post.duration = Number(rawPost.duration);
+        if (Number.isFinite(Number(rawPost.width))) post.width = Number(rawPost.width);
+        if (Number.isFinite(Number(rawPost.height))) post.height = Number(rawPost.height);
+
+        const existingSnapTs = new Set((Array.isArray(post.snapshots) ? post.snapshots : []).map((snap) => toTs(snap?.t)).filter(Boolean));
+        for (const t of incomingSnapTs) {
+          if (existingSnapTs.has(t)) stats.snapshotsSkipped++;
+          else stats.snapshotsAdded++;
+        }
+        post.snapshots = mergeSnapshotsByTimestamp(post.snapshots, incomingSnaps);
+        stats.postsUpdated++;
+      }
+
+      collapseImportedIdentityBuckets(metrics, userKey, rawUser);
+    }
+
+    for (const user of Object.values(metrics.users)) {
+      if (Array.isArray(user.followers)) user.followers.sort((a, b) => (a.t || 0) - (b.t || 0));
+      if (Array.isArray(user.cameos)) user.cameos.sort((a, b) => (a.t || 0) - (b.t || 0));
+      for (const post of Object.values(user.posts || {})) {
+        if (Array.isArray(post.snapshots)) {
+          post.snapshots.sort((a, b) => (toTs(a?.t) || 0) - (toTs(b?.t) || 0));
+        }
+      }
+    }
+
+    return true;
+  }
+
+  async function importDataText(text, metrics, stats){
+    const trimmed = typeof text === 'string' ? text.trim() : '';
+    if (!trimmed) return false;
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+      return importRawBackupJSONText(trimmed, metrics, stats);
+    }
+    return importDataCSVText(trimmed, metrics, stats);
   }
 
   async function importDataCSVText(text, metrics, stats){
@@ -6479,7 +6911,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     return true;
   }
 
-  async function importDataCSVFiles(files) {
+  async function importDataFiles(files) {
     try {
       const list = Array.from(files || []).filter(Boolean);
       if (!list.length) return;
@@ -6505,12 +6937,12 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       let anyImported = false;
       for (const file of list){
         const text = await file.text();
-        const didImport = await importDataCSVText(text, metrics, stats);
+        const didImport = await importDataText(text, metrics, stats);
         if (didImport) anyImported = true;
       }
 
       if (!anyImported) {
-        alert('CSV file is empty.');
+        alert('Import file is empty or unsupported.');
         return;
       }
 
@@ -6592,6 +7024,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         
         const url = getCol('Post URL') || `${SITE_ORIGIN}/p/${postId}`;
         const caption = getCol('Caption') || '';
+        const discoveryPhrase = getCol('Discovery Phrase') || '';
         const thumb = getCol('Thumbnail URL') || '';
         const postTimeISO = getCol('Post Time (ISO)') || getCol('Post Time');
         const postTime = parseTimestamp(postTimeISO);
@@ -6617,6 +7050,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
             url: url,
             thumb: thumb,
             caption: caption || null,
+            discovery_phrase: discoveryPhrase || null,
             snapshots: [],
             ownerKey: ownerKey,
             ownerHandle: ownerHandle,
@@ -6632,6 +7066,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           if (!post.url && url) post.url = url;
           if (!post.thumb && thumb) post.thumb = thumb;
           if (!post.caption && caption) post.caption = caption;
+          if (!post.discovery_phrase && discoveryPhrase) post.discovery_phrase = discoveryPhrase;
           if (!post.ownerKey && ownerKey) post.ownerKey = ownerKey;
           if (!post.ownerHandle && ownerHandle) post.ownerHandle = ownerHandle;
           if (!post.ownerId && ownerId) post.ownerId = ownerId;
@@ -6675,6 +7110,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         if (!user.posts[postId]) {
           const url = getCol('Post URL') || `${SITE_ORIGIN}/p/${postId}`;
           const caption = getCol('Post Caption') || '';
+          const discoveryPhrase = getCol('Post Discovery Phrase') || '';
           const postTimeISO = getCol('Post Time');
           const postTime = parseTimestamp(postTimeISO);
           const ownerKey = getCol('Owner Key') || userKey;
@@ -6685,6 +7121,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
             url: url,
             thumb: '',
             caption: caption || null,
+            discovery_phrase: discoveryPhrase || null,
             snapshots: [],
             ownerKey: ownerKey,
             ownerHandle: ownerHandle,
@@ -6802,6 +7239,13 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         ultraModeEnabled = val;
       })
       .catch(() => {});
+    const discoveryPhraseToggle = $('#discoveryPhraseToggle');
+    const discoveryPhrasePrefPromise = loadDiscoveryPhrasePreference()
+      .then((val)=>{
+        showDiscoveryPhrase = !!val;
+        if (discoveryPhraseToggle) discoveryPhraseToggle.checked = showDiscoveryPhrase;
+      })
+      .catch(() => {});
     perfEnd(perfUltra);
     const modeTapEl = $('#dashboardModeTap');
     if (modeTapEl) {
@@ -6873,6 +7317,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         'customFiltersByUser',
         'lastFilterAction',
         'lastFilterActionByUser',
+        DASHBOARD_DISCOVERY_PHRASE_STORAGE_KEY,
         VIEWS_TYPE_STORAGE_KEY,
         BEST_TIME_PREFS_KEY,
         CHART_MODE_STORAGE_KEY,
@@ -10927,7 +11372,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         // Convert to MB with 2 decimal places
         const mb = (bytes / (1024 * 1024)).toFixed(2);
         if (purgeStorageSize) {
-          purgeStorageSize.textContent = `Sora Creator Tools uses ${mb}MB of storage.\nExported data file will be larger because it's less overlapping.`;
+          purgeStorageSize.textContent = `Sora Creator Tools uses ${mb}MB of storage.\nExported data file will be larger because it's less overlapping.\nFiles are now exported as JSON, CSV import works for backwards compatibility.`;
         }
       } catch {
         if (purgeStorageSize) {
@@ -11077,6 +11522,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         'lastUserKey',
         'zoomStates',
         ULTRA_MODE_STORAGE_KEY,
+        DASHBOARD_DISCOVERY_PHRASE_STORAGE_KEY,
         COMB_MODE_STORAGE_KEY
       ]
         .concat(Object.values(STACKED_WINDOW_STORAGE_KEYS))
@@ -11349,10 +11795,10 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       setPurgeConfirmOpen(true);
       purgeConfirmDialog.style.display = 'flex';
     });
-    const purgeExportBtn = $('#purgeExport');
-    if (purgeExportBtn) {
-      purgeExportBtn.addEventListener('click', async ()=>{
-        await exportAllDataCSV();
+    const purgeExportRawBtn = $('#purgeExportRaw');
+    if (purgeExportRawBtn) {
+      purgeExportRawBtn.addEventListener('click', async ()=>{
+        await exportRawBackupJSON();
       });
     }
 
@@ -11816,7 +12262,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       importFileInput.addEventListener('change', async (e)=>{
         const files = e.target.files;
         if (files && files.length) {
-          await importDataCSVFiles(files);
+          await importDataFiles(files);
           // Reset file input so same file(s) can be imported again if needed
           e.target.value = '';
         }
@@ -12440,10 +12886,19 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         refreshUserUI({ preserveEmpty: true, skipRestoreZoom: true }); persistVisibility();
       });
 
+      if (discoveryPhraseToggle) {
+        discoveryPhraseToggle.addEventListener('change', async (e) => {
+          showDiscoveryPhrase = !!e.target.checked;
+          await saveDiscoveryPhrasePreference(showDiscoveryPhrase);
+          await refreshUserUI({ preserveEmpty: true, skipRestoreZoom: true, skipCharts: true });
+        });
+      }
+
     // If compare section is empty on initial load, add current user to show who we're looking at
     if (compareUsers.size === 0 && currentUserKey && resolveUserForKey(metrics, currentUserKey)){
       addCompareUser(currentUserKey);
     }
+    await discoveryPhrasePrefPromise;
     const initialUser = resolveUserForKey(metrics, currentUserKey);
     if (initialUser) {
       const initAction = normalizeFilterAction(getSessionFilterAction(currentUserKey))
@@ -12506,6 +12961,10 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       }
       zoomStates = st.zoomStates || {};
       zoomStatesLoaded = true;
+      if (Object.prototype.hasOwnProperty.call(st, DASHBOARD_DISCOVERY_PHRASE_STORAGE_KEY)) {
+        showDiscoveryPhrase = !!st[DASHBOARD_DISCOVERY_PHRASE_STORAGE_KEY];
+        if (discoveryPhraseToggle) discoveryPhraseToggle.checked = showDiscoveryPhrase;
+      }
       applyDefaultInteractionRateZoom(currentUserKey);
       if (st.lastFilterAction && (!lastFilterAction || lastFilterAction === 'showAll')) {
         lastFilterAction = st.lastFilterAction;

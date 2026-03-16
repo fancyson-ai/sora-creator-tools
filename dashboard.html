@@ -57,7 +57,7 @@
       <a class="action-link" href="https://chromewebstore.google.com/detail/sora-creator-tools-%E2%80%93-sora/nijonhldjpdanckbnkjgifghnkekmljk/reviews" target="_blank" rel="noopener noreferrer" title="Open Chrome Web Store reviews">Review</a>
       <a class="action-link" href="https://github.com/fancyson-ai/sora-creator-tools" target="_blank" rel="noopener noreferrer" title="Open GitHub repo">GitHub</a>
       <button id="purgeMenu" title="Open data menu">Data Menu</button>
-      <input type="file" id="importFile" accept=".csv" multiple style="display: none;" />
+      <input type="file" id="importFile" accept=".csv,.json" multiple style="display: none;" />
     </div>
   </header>
 
@@ -73,6 +73,10 @@
           <select id="userSelect" title="All users" class="user-select-dropdown" aria-hidden="true"></select>
         </div>
         <h3>Filter Posts</h3>
+        <label class="sidebar-toggle-row" for="discoveryPhraseToggle">
+          <input type="checkbox" id="discoveryPhraseToggle" />
+          <span>Show discovery phrases</span>
+        </label>
         <div class="list-actions">
           <button id="showAll">Show All</button>
           <button id="hideAll">Hide All</button>
@@ -528,7 +532,7 @@
         <div class="purge-section">
           <div class="purge-section-title">Manage Data</div>
           <div class="purge-actions purge-actions-manage">
-            <button id="purgeExport" class="purge-export-btn">Export Data</button>
+            <button id="purgeExportRaw" class="purge-export-btn" title="Exports the full hydrated backup, including snapshots">Export Data</button>
             <button id="purgeImport" class="purge-export-btn">Import Data</button>
           </div>
           <div class="purge-storage-size">
