@@ -414,3 +414,156 @@ test('buildMergedIdentityUser merges followers from multiple alias buckets by ti
   assert.equal(c.length, 3, 'should merge 3 unique cameo timestamps');
   assert.equal(c[2].count, 8, 'most recent cameo from new handle should be present');
 });
+
+test('buildMergedIdentityUser merges relationship graphs across alias buckets', () => {
+  const { buildMergedIdentityUser, setMetrics } = buildResolutionHarness();
+  const metrics = {
+    users: {
+      'id:user-1': {
+        id: 'user-1',
+        handle: 'alice',
+        posts: { p1: { snapshots: [{ t: 1700000000000, views: 1 }] } },
+        relationshipGraph: {
+          nodes: {
+            'h:bob': {
+              user_key: 'h:bob',
+              user_handle: 'bob',
+              follower_count: 12,
+              post_count: 4,
+              likes_received_count: 20,
+              updated_at: 1700000000,
+            },
+          },
+          edges: {
+            followers: {},
+            following: {
+              'h:bob': {
+                user_key: 'h:bob',
+                user_handle: 'bob',
+                follows_you: false,
+                is_following: true,
+                seenAt: 1700000000000,
+              },
+            },
+          },
+        },
+      },
+      'h:alice': {
+        id: 'user-1',
+        handle: 'alice',
+        posts: {},
+        relationshipGraph: {
+          nodes: {
+            'h:bob': {
+              user_key: 'h:bob',
+              user_handle: 'bob',
+              follower_count: 18,
+              post_count: 7,
+              likes_received_count: 35,
+              updated_at: 1700003600,
+            },
+            'h:carol': {
+              user_key: 'h:carol',
+              user_handle: 'carol',
+              follower_count: 90,
+              post_count: 44,
+              likes_received_count: 900,
+              updated_at: 1700010000,
+            },
+          },
+          edges: {
+            followers: {
+              'h:bob': {
+                user_key: 'h:bob',
+                user_handle: 'bob',
+                follows_you: true,
+                is_following: false,
+                seenAt: 1700005000000,
+              },
+            },
+            following: {},
+          },
+        },
+      },
+    },
+  };
+  setMetrics(metrics);
+  const merged = buildMergedIdentityUser(metrics, 'id:user-1', metrics.users['id:user-1']);
+  assert.ok(merged?.user?.relationshipGraph, 'merged user should include relationship graph');
+  assert.equal(Object.keys(merged.user.relationshipGraph.nodes || {}).length, 2);
+  assert.equal(Object.keys(merged.user.relationshipGraph.edges.following || {}).length, 1);
+  assert.equal(Object.keys(merged.user.relationshipGraph.edges.followers || {}).length, 1);
+  assert.equal(merged.user.relationshipGraph.nodes['h:bob'].follower_count, 18, 'latest node data should win');
+  assert.equal(merged.user.relationshipGraph.edges.followers['h:bob'].follows_you, true);
+  assert.equal(merged.user.relationshipGraph.edges.following['h:bob'].is_following, true);
+});
+
+test('buildMergedIdentityUser drops stale alias following edges after a newer full sync', () => {
+  const { buildMergedIdentityUser, setMetrics } = buildResolutionHarness();
+  const metrics = {
+    users: {
+      'id:user-1': {
+        id: 'user-1',
+        handle: 'alice',
+        posts: {},
+        relationshipGraph: {
+          nodes: {
+            'h:stale': {
+              user_key: 'h:stale',
+              user_handle: 'stale',
+              follower_count: 2,
+              updated_at: 1700000000,
+            },
+          },
+          edges: {
+            followers: {},
+            following: {
+              'h:stale': {
+                user_key: 'h:stale',
+                user_handle: 'stale',
+                follows_you: false,
+                is_following: true,
+                seenAt: 1700000000000,
+              },
+            },
+          },
+        },
+      },
+      'h:alice': {
+        id: 'user-1',
+        handle: 'alice',
+        posts: {},
+        relationshipGraph: {
+          nodes: {
+            'h:keep': {
+              user_key: 'h:keep',
+              user_handle: 'keep',
+              follower_count: 4,
+              updated_at: 1700003600,
+            },
+          },
+          edges: {
+            followers: {},
+            following: {
+              'h:keep': {
+                user_key: 'h:keep',
+                user_handle: 'keep',
+                follows_you: false,
+                is_following: true,
+                seenAt: 1700005000000,
+              },
+            },
+          },
+          fullSyncAt: {
+            following: 1700005000000,
+          },
+        },
+      },
+    },
+  };
+  setMetrics(metrics);
+  const merged = buildMergedIdentityUser(metrics, 'id:user-1', metrics.users['id:user-1']);
+  assert.ok(merged?.user?.relationshipGraph, 'merged user should include relationship graph');
+  assert.deepEqual(Object.keys(merged.user.relationshipGraph.edges.following || {}), ['h:keep']);
+  assert.equal(merged.user.relationshipGraph.fullSyncAt.following, 1700005000000);
+});

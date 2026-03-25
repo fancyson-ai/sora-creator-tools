@@ -130,3 +130,61 @@ test('sanitizers still reject payloads with no metrics signal', () => {
     null
   );
 });
+
+test('sanitizers accept social graph payloads as a standalone signal', () => {
+  const sanitizeMetricsItem = buildContentSanitizerHarness();
+  const sanitizeMetricsSnapshot = buildBackgroundSanitizerHarness();
+  const raw = {
+    userId: 'user-123',
+    social_graph: {
+      list_kind: 'following',
+      items: [
+        {
+          user_handle: 'bob',
+          user_id: 'user-456',
+          follower_count: 12,
+          post_count: 4,
+          follows_you: false,
+          is_following: true,
+        },
+      ],
+    },
+  };
+  const contentOut = sanitizeMetricsItem(raw);
+  const backgroundOut = sanitizeMetricsSnapshot(raw);
+  assert.ok(contentOut);
+  assert.ok(backgroundOut);
+  assert.equal(contentOut.userKey, 'id:user-123');
+  assert.equal(backgroundOut.userKey, 'id:user-123');
+  assert.equal(contentOut.social_graph.list_kind, 'following');
+  assert.equal(backgroundOut.social_graph.list_kind, 'following');
+  assert.equal(contentOut.social_graph.items[0].user_key, 'h:bob');
+  assert.equal(backgroundOut.social_graph.items[0].user_key, 'h:bob');
+  assert.equal(contentOut.social_graph.items[0].follows_you, false);
+  assert.equal(backgroundOut.social_graph.items[0].is_following, true);
+});
+
+test('sanitizers preserve social graph replace payloads even when the harvested list is empty', () => {
+  const sanitizeMetricsItem = buildContentSanitizerHarness();
+  const sanitizeMetricsSnapshot = buildBackgroundSanitizerHarness();
+  const raw = {
+    userId: 'user-123',
+    social_graph: {
+      list_kind: 'following',
+      replace: true,
+      items: [],
+    },
+  };
+  const contentOut = sanitizeMetricsItem(raw);
+  const backgroundOut = sanitizeMetricsSnapshot(raw);
+  assert.ok(contentOut);
+  assert.ok(backgroundOut);
+  assert.equal(contentOut.social_graph.list_kind, 'following');
+  assert.equal(backgroundOut.social_graph.list_kind, 'following');
+  assert.equal(contentOut.social_graph.replace, true);
+  assert.equal(backgroundOut.social_graph.replace, true);
+  assert.equal(Array.isArray(contentOut.social_graph.items), true);
+  assert.equal(Array.isArray(backgroundOut.social_graph.items), true);
+  assert.equal(contentOut.social_graph.items.length, 0);
+  assert.equal(backgroundOut.social_graph.items.length, 0);
+});

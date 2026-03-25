@@ -4,3 +4,6 @@
 .examples/
 .claude/
 /dist/
+/.playwright-cli/
+/output/
+/release.zip

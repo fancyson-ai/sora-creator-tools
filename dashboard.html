@@ -100,6 +100,51 @@
       </div>
     </aside>
     <section class="content">
+      <section class="dashboard-workspaces-shell" aria-label="Dashboard workspace switcher">
+        <div class="dashboard-workspaces-bar">
+          <div class="dashboard-workspaces-copy">
+            <div class="dashboard-workspaces-kicker">Workspace</div>
+            <h2 class="dashboard-workspaces-title">Choose the view that matches what you are doing right now.</h2>
+          </div>
+          <div class="dashboard-workspaces-toggle toggle-group toggle-group--lg" role="tablist" aria-label="Dashboard workspaces">
+            <button id="dashboardWorkspaceOverview" class="toggle-pill toggle-pill--lg" type="button" data-workspace-target="overview" aria-selected="true">Overview</button>
+            <button id="dashboardWorkspaceCleanup" class="toggle-pill toggle-pill--lg" type="button" data-workspace-target="cleanup" aria-selected="false">Followers &amp; Following</button>
+          </div>
+        </div>
+        <section id="dashboardOverviewWorkspace" class="dashboard-workspace-panel" data-workspace-panel="overview" aria-label="Overview workspace"></section>
+        <section id="dashboardCleanupWorkspace" class="dashboard-workspace-panel" data-workspace-panel="cleanup" aria-label="Followers and following workspace">
+          <div class="cleanup-workspace-hero">
+            <div class="cleanup-workspace-copy">
+              <div class="cleanup-workspace-kicker">Relationship Graph</div>
+              <h3 class="cleanup-workspace-title">Audit your network without getting buried in the rest of the dashboard.</h3>
+              <p class="cleanup-workspace-note">Harvest followers and following from Sora, isolate low-signal accounts quickly, then batch-review who still deserves your attention.</p>
+            </div>
+            <div class="cleanup-workspace-callouts" aria-label="Cleanup workflow">
+              <div class="cleanup-callout">
+                <span class="cleanup-callout-step">1</span>
+                <div>
+                  <strong>Harvest</strong>
+                  <span>Open the Sora relationship modal and capture both lists.</span>
+                </div>
+              </div>
+              <div class="cleanup-callout">
+                <span class="cleanup-callout-step">2</span>
+                <div>
+                  <strong>Filter</strong>
+                  <span>Use focus filters to surface non-mutual, stale, or zero-signal accounts.</span>
+                </div>
+              </div>
+              <div class="cleanup-callout">
+                <span class="cleanup-callout-step">3</span>
+                <div>
+                  <strong>Act</strong>
+                  <span>Select a page, the filtered set, or zero-signal accounts and bulk unfollow safely.</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </section>
       <div id="bestTimeToPostSection">
         <div class="best-time-header">
           <div>
@@ -226,6 +271,200 @@
           <span class="label">Followers</span>
         </div>
       </div>
+      <section id="cleanupPlannerSection" class="cleanup-planner">
+        <div class="cleanup-planner-head">
+          <div class="cleanup-planner-copy">
+            <h3 class="section-title section-title-first">Clean Following Planner</h3>
+            <p id="cleanupPlannerNote" class="section-note">Open a profile on Sora, then open the Followers or Following modal to collect relationship data for cleanup planning.</p>
+          </div>
+          <div class="cleanup-planner-controls" aria-label="Cleanup planner thresholds">
+            <label class="cleanup-input">
+              <span>Max followers</span>
+              <input id="cleanupMaxFollowers" type="number" min="0" step="10" value="200" />
+            </label>
+            <label class="cleanup-input">
+              <span>Min posts</span>
+              <input id="cleanupMinPosts" type="number" min="0" step="1" value="12" />
+            </label>
+            <label class="cleanup-input">
+              <span>Min likes received</span>
+              <input id="cleanupMinLikesReceived" type="number" min="0" step="5" value="120" />
+            </label>
+            <label class="cleanup-input">
+              <span>Inactive days</span>
+              <input id="cleanupStaleDays" type="number" min="1" step="1" value="45" />
+            </label>
+          </div>
+        </div>
+        <div class="metric-grid cleanup-metric-grid">
+          <div class="metric-card" title="Captured followers from the relationship graph">
+            <span id="cleanupFollowersCaptured" class="value">0</span>
+            <span class="label">Followers Captured</span>
+          </div>
+          <div class="metric-card" title="Captured following accounts from the relationship graph">
+            <span id="cleanupFollowingCaptured" class="value">0</span>
+            <span class="label">Following Captured</span>
+          </div>
+          <div class="metric-card" title="Accounts captured in both followers and following lists">
+            <span id="cleanupMutualCaptured" class="value">0</span>
+            <span class="label">Mutuals</span>
+          </div>
+          <div class="metric-card" title="High-confidence unfollow suggestions">
+            <span id="cleanupLikelyCount" class="value">0</span>
+            <span class="label">Unfollow Likely</span>
+          </div>
+          <div class="metric-card" title="Low-signal followers that may be worth a manual review">
+            <span id="cleanupFollowerReviewCount" class="value">0</span>
+            <span class="label">Follower Review</span>
+          </div>
+        </div>
+        <div class="cleanup-planner-columns">
+          <div class="cleanup-panel">
+            <div class="cleanup-panel-head-row">
+              <div>
+                <div class="cleanup-panel-title">Following cleanup</div>
+                <div id="cleanupFollowingPanelMeta" class="cleanup-panel-meta">0 matches</div>
+              </div>
+              <div class="cleanup-panel-actions">
+                <button id="cleanupSelectFollowingPage" type="button" class="cleanup-btn cleanup-btn--ghost">Select page</button>
+                <button id="cleanupSelectFollowingFiltered" type="button" class="cleanup-btn cleanup-btn--ghost">Select visible</button>
+                <button id="cleanupSelectFollowingZeroSignal" type="button" class="cleanup-btn cleanup-btn--ghost">Select zero-signal</button>
+                <button id="cleanupClearFollowingSelection" type="button" class="cleanup-btn cleanup-btn--ghost">Clear</button>
+                <button id="cleanupUnfollowSelected" type="button" class="cleanup-btn cleanup-btn--danger" disabled>Unfollow selected</button>
+              </div>
+            </div>
+            <div class="cleanup-quick-filters" aria-label="Suggested unfollow filters">
+              <div class="cleanup-quick-filters-copy">
+                <div class="cleanup-quick-filters-label">Suggested views</div>
+                <div class="cleanup-quick-filters-note">Start here when you want obvious unfollows instead of browsing the full list.</div>
+              </div>
+              <div class="cleanup-quick-filter-buttons" role="group" aria-label="Suggested following filters">
+                <button id="cleanupPresetFollowingSmart" type="button" class="cleanup-btn cleanup-btn--quick" data-cleanup-preset="smart_unfollow">Should unfollow</button>
+                <button id="cleanupPresetFollowingZeroSignal" type="button" class="cleanup-btn cleanup-btn--quick" data-cleanup-preset="zero_signal">Zero-signal</button>
+                <button id="cleanupPresetFollowingNonMutual" type="button" class="cleanup-btn cleanup-btn--quick" data-cleanup-preset="non_mutual">Not following back</button>
+                <button id="cleanupPresetFollowingInactive" type="button" class="cleanup-btn cleanup-btn--quick" data-cleanup-preset="inactive">Inactive</button>
+                <button id="cleanupPresetFollowingLowLikes" type="button" class="cleanup-btn cleanup-btn--quick" data-cleanup-preset="low_likes">Low likes</button>
+                <button id="cleanupPresetFollowingAll" type="button" class="cleanup-btn cleanup-btn--quick" data-cleanup-preset="all">Show all</button>
+              </div>
+            </div>
+            <div class="cleanup-filter-row" aria-label="Following filters">
+              <label class="cleanup-input cleanup-input--search">
+                <span>Search</span>
+                <input id="cleanupFollowingSearch" type="search" placeholder="Handle or display name" />
+              </label>
+              <label class="cleanup-input cleanup-input--select">
+                <span>Status</span>
+                <select id="cleanupFollowingStatus">
+                  <option value="all">All</option>
+                  <option value="actionable">Unfollow likely</option>
+                  <option value="review">Review soon</option>
+                  <option value="low_priority">Low priority</option>
+                </select>
+              </label>
+              <label class="cleanup-input cleanup-input--select">
+                <span>Focus</span>
+                <select id="cleanupFollowingReason">
+                  <option value="all">All reasons</option>
+                  <option value="smart_unfollow">Should unfollow</option>
+                  <option value="non_mutual">Not following back</option>
+                  <option value="inactive">Inactive</option>
+                  <option value="low_followers">Low followers</option>
+                  <option value="low_posts">Low posts</option>
+                  <option value="low_likes">Low likes received</option>
+                  <option value="zero_signal">0 followers • 0 posts • 0 likes • inactive</option>
+                  <option value="verified">Verified</option>
+                </select>
+              </label>
+              <label class="cleanup-input cleanup-input--select">
+                <span>Sort</span>
+                <select id="cleanupFollowingSort">
+                  <option value="score_desc">Highest score</option>
+                  <option value="stale_desc">Most inactive</option>
+                  <option value="followers_asc">Fewest followers</option>
+                  <option value="posts_asc">Fewest posts</option>
+                  <option value="likes_asc">Fewest likes received</option>
+                  <option value="handle_asc">A-Z</option>
+                </select>
+              </label>
+              <label class="cleanup-input cleanup-input--select cleanup-input--rows">
+                <span>Rows</span>
+                <select id="cleanupFollowingPageSize">
+                  <option value="10">10</option>
+                  <option value="25" selected>25</option>
+                  <option value="50">50</option>
+                </select>
+              </label>
+            </div>
+            <div id="cleanupFollowingActionNote" class="cleanup-panel-note">Select zero-signal grabs non-mutual follows with 0 followers, 0 posts, 0 likes, and stale activity. Bulk unfollow uses your live Sora tab and the native Following buttons.</div>
+            <div id="cleanupFollowingList" class="cleanup-list" aria-live="polite"></div>
+            <div class="cleanup-pagination" aria-label="Following pagination">
+              <button id="cleanupFollowingPrev" type="button" class="cleanup-btn cleanup-btn--ghost">Prev</button>
+              <div id="cleanupFollowingPagination" class="cleanup-pagination-label">Page 1 of 1</div>
+              <button id="cleanupFollowingNext" type="button" class="cleanup-btn cleanup-btn--ghost">Next</button>
+            </div>
+          </div>
+          <div class="cleanup-panel">
+            <div class="cleanup-panel-head-row">
+              <div>
+                <div class="cleanup-panel-title">Low-signal followers</div>
+                <div id="cleanupFollowersPanelMeta" class="cleanup-panel-meta">0 matches</div>
+              </div>
+            </div>
+            <div class="cleanup-filter-row" aria-label="Follower filters">
+              <label class="cleanup-input cleanup-input--search">
+                <span>Search</span>
+                <input id="cleanupFollowersSearch" type="search" placeholder="Handle or display name" />
+              </label>
+              <label class="cleanup-input cleanup-input--select">
+                <span>Status</span>
+                <select id="cleanupFollowersStatus">
+                  <option value="all">All</option>
+                  <option value="actionable">Low-signal follower</option>
+                  <option value="review">Manual review</option>
+                  <option value="low_priority">Low priority</option>
+                </select>
+              </label>
+              <label class="cleanup-input cleanup-input--select">
+                <span>Focus</span>
+                <select id="cleanupFollowersReason">
+                  <option value="all">All reasons</option>
+                  <option value="non_mutual">You do not follow back</option>
+                  <option value="inactive">Inactive</option>
+                  <option value="low_followers">Low followers</option>
+                  <option value="low_posts">Low posts</option>
+                  <option value="low_likes">Low engagement</option>
+                  <option value="verified">Verified</option>
+                </select>
+              </label>
+              <label class="cleanup-input cleanup-input--select">
+                <span>Sort</span>
+                <select id="cleanupFollowersSort">
+                  <option value="score_desc">Highest score</option>
+                  <option value="stale_desc">Most inactive</option>
+                  <option value="followers_asc">Fewest followers</option>
+                  <option value="posts_asc">Fewest posts</option>
+                  <option value="handle_asc">A-Z</option>
+                </select>
+              </label>
+              <label class="cleanup-input cleanup-input--select cleanup-input--rows">
+                <span>Rows</span>
+                <select id="cleanupFollowersPageSize">
+                  <option value="10">10</option>
+                  <option value="25" selected>25</option>
+                  <option value="50">50</option>
+                </select>
+              </label>
+            </div>
+            <div id="cleanupFollowersActionNote" class="cleanup-panel-note">Follower rows are review-only until Sora exposes a safe remove-follower path.</div>
+            <div id="cleanupFollowersList" class="cleanup-list" aria-live="polite"></div>
+            <div class="cleanup-pagination" aria-label="Follower pagination">
+              <button id="cleanupFollowersPrev" type="button" class="cleanup-btn cleanup-btn--ghost">Prev</button>
+              <div id="cleanupFollowersPagination" class="cleanup-pagination-label">Page 1 of 1</div>
+              <button id="cleanupFollowersNext" type="button" class="cleanup-btn cleanup-btn--ghost">Next</button>
+            </div>
+          </div>
+        </div>
+      </section>
       <div class="views-toggle">
         <div class="toggle-group toggle-group--lg" role="group" aria-label="View type">
           <button id="totalViewsPill" class="views-pill toggle-pill toggle-pill--lg active" data-type="total" aria-pressed="true">Total Views</button>

@@ -16,6 +16,7 @@ Unofficial community extension. Not affiliated with, endorsed by, or sponsored b
 - Adds feed controls including filtering, Gather mode, and Analyze mode on Top feed.
 - Captures metrics snapshots locally while you browse.
 - Provides a full dashboard (`dashboard.html`) with charts, compare mode, post filters, import/export, and data purge tools.
+- Adds a Followers & Following cleanup workspace in the dashboard that harvests relationship data, highlights non-mutual or low-signal accounts, and can bulk unfollow selected following accounts through Sora's native UI.
 - Adds a dedicated `/uv-drafts` page with:
   - Draft caching and progressive sync
   - Pending task polling
@@ -60,6 +61,7 @@ Unofficial community extension. Not affiliated with, endorsed by, or sponsored b
   - Compare-mode aggregate charts across selected creators
 - Linear + stacked chart modes with adjustable time windows.
 - Compare mode with multi-user pills and aggregate totals.
+- Followers & Following cleanup workspace that captures relationship graphs from Sora profile modals, surfaces non-mutual/zero-signal accounts for review, and can run guided bulk unfollow actions with the native Following buttons.
 - CSV import/export and data cleanup actions from the dashboard data menu.
 
 ### UV Drafts (`/uv-drafts`)
@@ -159,11 +161,11 @@ rm -f release.zip && zip -r release.zip manifest.json *.js *.html *.css icons im
 
 Current repository test suite (Node built-in test runner):
 
-- `87` tests
-- `87` passing
+- `159` tests
+- `159` passing
 - `0` failing
 
-Primary coverage currently targets dashboard regressions and shared UV drafts logic.
+Primary coverage currently targets dashboard regressions, relationship-graph cleanup flows, and shared UV drafts logic.
 
 ## Project Layout
 
