@@ -18,6 +18,8 @@ const {
   isLargeComposerSizeAllowed,
   normalizeComposerSizeForModel,
   parseComposerGensInputValue,
+  getComposerGensCountMaxForMode,
+  clampComposerGensCountForMode,
   extractPersistedGensCountValue,
   resolvePreferredComposerGensCountValue,
   parseStoredVideoGensBalanceValue,
@@ -249,6 +251,14 @@ test('gens input parser allows empty editing states without forcing a value', ()
   assert.equal(parseComposerGensInputValue('4'), 4);
   assert.equal(parseComposerGensInputValue(7), 7);
   assert.equal(parseComposerGensInputValue('abc'), null);
+});
+
+test('ultra mode removes the drafts gens cap for manual entry values', () => {
+  assert.equal(getComposerGensCountMaxForMode(false, 10), 10);
+  assert.equal(getComposerGensCountMaxForMode(true), Number.POSITIVE_INFINITY);
+  assert.equal(clampComposerGensCountForMode(57, false, 10, 10), 10);
+  assert.equal(clampComposerGensCountForMode(57, true, 40, 40), 57);
+  assert.equal(clampComposerGensCountForMode(0, true), 1);
 });
 
 test('stored gens value wins on load, but live composer edits still take effect', () => {

@@ -1,5 +1,9 @@
 # AGENTS.md
 
+## Requirement Preservation
+
+- Never change, narrow, reinterpret, or partially satisfy the user's explicit requirements without asking first. If the request is expensive, slow, risky, or ambiguous, preserve the requested scope and ask before changing counts, filters, copy modes, launch configs, defaults, reward weights, checkpoint sources, or other operational details.
+
 ## Purpose
 
 - Define repository-specific instructions for coding agents.

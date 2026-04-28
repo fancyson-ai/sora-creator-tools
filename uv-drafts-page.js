@@ -4,6 +4,37 @@
 (function initSoraUVDraftsPageModule(globalScope) {
   'use strict';
 
+  const COMPOSER_GENS_COUNT_MIN = 1;
+  const COMPOSER_GENS_COUNT_MAX_DEFAULT = 10;
+  const COMPOSER_GENS_COUNT_MAX_ULTRA = Number.POSITIVE_INFINITY;
+
+  function normalizeComposerGensCountLimit(value) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed < COMPOSER_GENS_COUNT_MIN) return null;
+    return Math.floor(parsed);
+  }
+
+  function getComposerGensCountMaxForMode(ultraModeEnabled, delegatedMax = null) {
+    if (ultraModeEnabled) return COMPOSER_GENS_COUNT_MAX_ULTRA;
+    return normalizeComposerGensCountLimit(delegatedMax) ?? COMPOSER_GENS_COUNT_MAX_DEFAULT;
+  }
+
+  function clampComposerGensCountForMode(
+    value,
+    ultraModeEnabled,
+    delegatedClampedValue = null,
+    delegatedMax = null
+  ) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return COMPOSER_GENS_COUNT_MIN;
+    const rounded = Math.max(COMPOSER_GENS_COUNT_MIN, Math.round(parsed));
+    if (ultraModeEnabled) return rounded;
+    const max = getComposerGensCountMaxForMode(false, delegatedMax);
+    const delegated = normalizeComposerGensCountLimit(delegatedClampedValue);
+    if (delegated != null) return Math.max(COMPOSER_GENS_COUNT_MIN, Math.min(max, delegated));
+    return Math.min(max, rounded);
+  }
+
   function getComposerModelFamily(value) {
     const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
     if (!normalized) return '';
@@ -1221,9 +1252,6 @@
     const UV_DRAFTS_GENS_COUNT_KEY = 'SORA_UV_DRAFTS_GENS_COUNT_V1';
     const UV_DRAFTS_COMPOSER_PROMPT_KEY = 'SORA_UV_DRAFTS_PROMPT_V1';
     const ULTRA_MODE_KEY = 'SCT_ULTRA_MODE_V1';
-    const GENS_COUNT_MIN = 1;
-    const GENS_COUNT_MAX_DEFAULT = 10;
-    const GENS_COUNT_MAX_ULTRA = 40;
     const UV_DRAFTS_DEBUG_KEY = 'SORA_UV_DRAFTS_DEBUG';
     const UV_DRAFTS_DEBUG_ENABLED = (() => {
       try {
@@ -1334,19 +1362,23 @@
     }
 
     function getGensCountMax() {
-      if (uvDraftsLogic && typeof uvDraftsLogic.getGensCountMax === 'function') {
-        return uvDraftsLogic.getGensCountMax(loadUltraModeEnabledFromStorage());
-      }
-      return loadUltraModeEnabledFromStorage() ? GENS_COUNT_MAX_ULTRA : GENS_COUNT_MAX_DEFAULT;
+      const ultraModeEnabled = loadUltraModeEnabledFromStorage();
+      if (ultraModeEnabled) return getComposerGensCountMaxForMode(true);
+      const delegatedMax = uvDraftsLogic && typeof uvDraftsLogic.getGensCountMax === 'function'
+        ? uvDraftsLogic.getGensCountMax(false)
+        : null;
+      return getComposerGensCountMaxForMode(false, delegatedMax);
     }
 
     function clampGensCount(value) {
-      if (uvDraftsLogic && typeof uvDraftsLogic.clampGensCount === 'function') {
-        return uvDraftsLogic.clampGensCount(value, loadUltraModeEnabledFromStorage());
-      }
-      const n = Number(value);
-      if (!Number.isFinite(n)) return GENS_COUNT_MIN;
-      return Math.min(getGensCountMax(), Math.max(GENS_COUNT_MIN, Math.round(n)));
+      const ultraModeEnabled = loadUltraModeEnabledFromStorage();
+      const delegatedClampedValue = !ultraModeEnabled && uvDraftsLogic && typeof uvDraftsLogic.clampGensCount === 'function'
+        ? uvDraftsLogic.clampGensCount(value, false)
+        : null;
+      const delegatedMax = !ultraModeEnabled && uvDraftsLogic && typeof uvDraftsLogic.getGensCountMax === 'function'
+        ? uvDraftsLogic.getGensCountMax(false)
+        : null;
+      return clampComposerGensCountForMode(value, ultraModeEnabled, delegatedClampedValue, delegatedMax);
     }
 
     function loadStoredGensCountValue() {
@@ -1361,7 +1393,7 @@
     }
 
     function loadStoredGensCount() {
-      return loadStoredGensCountValue() ?? GENS_COUNT_MIN;
+      return loadStoredGensCountValue() ?? COMPOSER_GENS_COUNT_MIN;
     }
 
     function persistComposerGensCount(count) {
@@ -4540,8 +4572,10 @@
 
     const syncGensFieldLimits = () => {
       if (!gensEl) return;
-      gensEl.min = String(GENS_COUNT_MIN);
-      gensEl.max = String(getGensCountMax());
+      const max = getGensCountMax();
+      gensEl.min = String(COMPOSER_GENS_COUNT_MIN);
+      if (Number.isFinite(max)) gensEl.max = String(max);
+      else gensEl.removeAttribute('max');
       gensEl.value = String(clampGensCount(gensEl.value || uvDraftsComposerState.gensCount));
     };
 
@@ -7504,6 +7538,8 @@
       isLargeComposerSizeAllowed,
       normalizeComposerSizeForModel,
       parseComposerGensInputValue,
+      getComposerGensCountMaxForMode,
+      clampComposerGensCountForMode,
       extractPersistedGensCountValue,
       resolvePreferredComposerGensCountValue,
       parseStoredVideoGensBalanceValue,
