@@ -15,6 +15,7 @@
   const MAX_HANDLE_LEN = 80;
   const MAX_REQUEST_ID_LEN = 80;
   const MAX_CAMEO_USERNAMES = 32;
+  const MAX_SOCIAL_GRAPH_ITEMS = 5000;
 
   function sanitizeString(value, maxLen = MAX_STR_LEN) {
     if (typeof value !== 'string') return null;
@@ -51,6 +52,125 @@
       if (!username) continue;
       out.push(username);
     }
+    return out;
+  }
+
+  function sanitizeBoolean(value) {
+    return typeof value === 'boolean' ? value : null;
+  }
+
+  function sanitizeRelationshipListKind(value) {
+    const s = sanitizeString(value, 16);
+    if (!s) return null;
+    const n = s.toLowerCase();
+    return n === 'followers' || n === 'following' ? n : null;
+  }
+
+  function sanitizeCleanupTarget(raw) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+    const userKey = sanitizeIdToken(raw.userKey ?? raw.user_key);
+    const userHandle = sanitizeString(raw.userHandle ?? raw.user_handle, MAX_HANDLE_LEN);
+    const permalink = sanitizeString(raw.permalink, MAX_URL_LEN);
+    if (!userKey && !userHandle) return null;
+    return {
+      userKey: userKey || (userHandle ? `h:${userHandle.toLowerCase()}` : null),
+      userHandle: userHandle || null,
+      permalink: permalink || null,
+    };
+  }
+
+  function sanitizeCleanupBulkUnfollowRequest(message) {
+    const profileHandle = sanitizeString(message?.profileHandle, MAX_HANDLE_LEN);
+    const userKey = sanitizeIdToken(message?.userKey);
+    if (!Array.isArray(message?.targets)) return null;
+    const targets = [];
+    for (const raw of message.targets) {
+      if (targets.length >= 150) break;
+      const item = sanitizeCleanupTarget(raw);
+      if (item) targets.push(item);
+    }
+    if (!targets.length) return null;
+    return {
+      profileHandle: profileHandle || null,
+      userKey: userKey || null,
+      targets,
+    };
+  }
+
+  function sanitizeCleanupRequestId(value) {
+    return sanitizeString(value, 160);
+  }
+
+  function sanitizeSocialGraphNode(raw) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+    const item = {};
+    const userKey = sanitizeIdToken(raw.user_key);
+    if (userKey) item.user_key = userKey;
+    const userHandle = sanitizeString(raw.user_handle, MAX_HANDLE_LEN);
+    if (userHandle) item.user_handle = userHandle;
+    const userId = sanitizeUserId(raw.user_id);
+    if (userId != null) item.user_id = userId;
+    if (!item.user_key && userHandle) item.user_key = `h:${userHandle.toLowerCase()}`;
+    if (!item.user_key && userId != null) item.user_key = `id:${String(userId)}`;
+    if (!item.user_key) return null;
+
+    const displayName = sanitizeString(raw.display_name, 120);
+    if (displayName) item.display_name = displayName;
+    const followerCount = sanitizeNumber(raw.follower_count, 0);
+    if (followerCount != null) item.follower_count = followerCount;
+    const followingCount = sanitizeNumber(raw.following_count, 0);
+    if (followingCount != null) item.following_count = followingCount;
+    const postCount = sanitizeNumber(raw.post_count, 0);
+    if (postCount != null) item.post_count = postCount;
+    const replyCount = sanitizeNumber(raw.reply_count, 0);
+    if (replyCount != null) item.reply_count = replyCount;
+    const likesReceivedCount = sanitizeNumber(raw.likes_received_count, 0);
+    if (likesReceivedCount != null) item.likes_received_count = likesReceivedCount;
+    const remixCount = sanitizeNumber(raw.remix_count, 0);
+    if (remixCount != null) item.remix_count = remixCount;
+    const cameoCount = sanitizeNumber(raw.cameo_count, 0);
+    if (cameoCount != null) item.cameo_count = cameoCount;
+    const verified = sanitizeBoolean(raw.verified);
+    if (verified != null) item.verified = verified;
+    const canCameo = sanitizeBoolean(raw.can_cameo);
+    if (canCameo != null) item.can_cameo = canCameo;
+    const followsYou = sanitizeBoolean(raw.follows_you);
+    if (followsYou != null) item.follows_you = followsYou;
+    const isFollowing = sanitizeBoolean(raw.is_following);
+    if (isFollowing != null) item.is_following = isFollowing;
+
+    const planType = sanitizeString(raw.plan_type, 64);
+    if (planType) item.plan_type = planType;
+    const permalink = sanitizeString(raw.permalink, MAX_URL_LEN);
+    if (permalink) item.permalink = permalink;
+    const description = sanitizeString(raw.description, 512);
+    if (description) item.description = description;
+    const location = sanitizeString(raw.location, 160);
+    if (location) item.location = location;
+    const createdAt = sanitizeNumber(raw.created_at, 0);
+    if (createdAt != null) item.created_at = createdAt;
+    const updatedAt = sanitizeNumber(raw.updated_at, 0);
+    if (updatedAt != null) item.updated_at = updatedAt;
+    return item;
+  }
+
+  function sanitizeSocialGraphPayload(raw) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+    const listKind = sanitizeRelationshipListKind(raw.list_kind);
+    if (!listKind) return null;
+    const items = Array.isArray(raw.items) ? raw.items : [];
+    const outItems = [];
+    const limit = Math.min(items.length, MAX_SOCIAL_GRAPH_ITEMS);
+    for (let i = 0; i < limit; i++) {
+      const item = sanitizeSocialGraphNode(items[i]);
+      if (item) outItems.push(item);
+    }
+    const replace = raw.replace === true;
+    if (!outItems.length && !replace) return null;
+    const out = { list_kind: listKind, items: outItems };
+    const cursor = sanitizeString(raw.cursor, MAX_URL_LEN);
+    if (cursor) out.cursor = cursor;
+    if (replace) out.replace = true;
     return out;
   }
 
@@ -115,6 +235,8 @@
     if (followers != null) item.followers = followers;
     const cameoCount = sanitizeNumber(raw.cameo_count, 0);
     if (cameoCount != null) item.cameo_count = cameoCount;
+    const socialGraph = sanitizeSocialGraphPayload(raw.social_graph);
+    if (socialGraph) item.social_graph = socialGraph;
     const duration = sanitizeNumber(raw.duration, 0, 60 * 60 * 10);
     if (duration != null) item.duration = duration;
     const width = sanitizeNumber(raw.width, 1, 20000);
@@ -122,7 +244,7 @@
     const height = sanitizeNumber(raw.height, 1, 20000);
     if (height != null) item.height = height;
 
-    const hasSignal = !!item.postId || item.followers != null || item.cameo_count != null;
+    const hasSignal = !!item.postId || item.followers != null || item.cameo_count != null || !!item.social_graph;
     return hasSignal ? item : null;
   }
 
@@ -186,8 +308,63 @@
   // Listen for ultra mode changes broadcast from background (avoids chrome.storage.onChanged
   // which would serialize the full metrics blob to every content script on every flush).
   try {
-    chrome.runtime.onMessage.addListener((message) => {
-      if (message?.action === 'ultra_mode_changed') syncUltraModePreference();
+    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+      if (message?.action === 'ultra_mode_changed') {
+        syncUltraModePreference();
+        return false;
+      }
+      if (message?.action === 'cleanup_bulk_unfollow') {
+        const request = sanitizeCleanupBulkUnfollowRequest(message);
+        const requestId = sanitizeCleanupRequestId(message?.requestId);
+        if (!request) {
+          sendResponse({ ok: false, error: 'Invalid cleanup unfollow payload.' });
+          return false;
+        }
+        if (!requestId) {
+          sendResponse({ ok: false, error: 'Missing cleanup request id.' });
+          return false;
+        }
+        const req = `cleanup:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+        let done = false;
+        const finish = (payload) => {
+          if (done) return;
+          done = true;
+          try { clearTimeout(timer); } catch {}
+          try { window.removeEventListener('message', onReply); } catch {}
+          try {
+            chrome.runtime.sendMessage({
+              action: 'cleanup_bulk_unfollow_result',
+              requestId,
+              payload: payload && typeof payload === 'object' ? payload : { ok: false, error: 'No response from the page action.' },
+            });
+          } catch {}
+        };
+        const onReply = (ev) => {
+          if (ev?.source !== window) return;
+          const data = ev?.data;
+          if (!data || data.__sora_uv__ !== true || data.type !== 'cleanup_action_response' || data.req !== req) return;
+          finish(data.payload || { ok: false, error: 'No cleanup response payload.' });
+        };
+        const timer = setTimeout(() => {
+          finish({ ok: false, error: 'Timed out waiting for the Sora page to process the cleanup action.' });
+        }, 180000);
+        try {
+          window.addEventListener('message', onReply);
+          window.postMessage({
+            __sora_uv__: true,
+            type: 'cleanup_action_request',
+            req,
+            command: 'bulk_unfollow',
+            payload: request,
+          }, PAGE_ORIGIN);
+          sendResponse({ ok: true, started: true, requestId });
+        } catch (err) {
+          finish({ ok: false, error: err?.message || 'Could not relay the cleanup action to the page.' });
+          sendResponse({ ok: false, error: err?.message || 'Could not relay the cleanup action to the page.' });
+        }
+        return false;
+      }
+      return false;
     });
   } catch {}
 

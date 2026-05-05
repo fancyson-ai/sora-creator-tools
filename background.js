@@ -82,6 +82,90 @@ function sanitizeCameoUsernames(value) {
   return out;
 }
 
+function sanitizeBoolean(value) {
+  return typeof value === 'boolean' ? value : null;
+}
+
+function sanitizeRelationshipListKind(value) {
+  const s = sanitizeString(value, 16);
+  if (!s) return null;
+  const normalized = s.toLowerCase();
+  return normalized === 'followers' || normalized === 'following' ? normalized : null;
+}
+
+function sanitizeSocialGraphNode(raw) {
+  if (!isPlainObject(raw)) return null;
+  const item = {};
+  const userKey = sanitizeIdToken(raw.user_key);
+  if (userKey) item.user_key = userKey;
+  const userHandle = sanitizeString(raw.user_handle, 80);
+  if (userHandle) item.user_handle = userHandle;
+  const userId = sanitizeUserId(raw.user_id);
+  if (userId != null) item.user_id = userId;
+  if (!item.user_key && userHandle) item.user_key = `h:${userHandle.toLowerCase()}`;
+  if (!item.user_key && userId != null) item.user_key = `id:${String(userId)}`;
+  if (!item.user_key) return null;
+
+  const displayName = sanitizeString(raw.display_name, 120);
+  if (displayName) item.display_name = displayName;
+  const followerCount = sanitizeNumber(raw.follower_count, 0);
+  if (followerCount != null) item.follower_count = followerCount;
+  const followingCount = sanitizeNumber(raw.following_count, 0);
+  if (followingCount != null) item.following_count = followingCount;
+  const postCount = sanitizeNumber(raw.post_count, 0);
+  if (postCount != null) item.post_count = postCount;
+  const replyCount = sanitizeNumber(raw.reply_count, 0);
+  if (replyCount != null) item.reply_count = replyCount;
+  const likesReceivedCount = sanitizeNumber(raw.likes_received_count, 0);
+  if (likesReceivedCount != null) item.likes_received_count = likesReceivedCount;
+  const remixCount = sanitizeNumber(raw.remix_count, 0);
+  if (remixCount != null) item.remix_count = remixCount;
+  const cameoCount = sanitizeNumber(raw.cameo_count, 0);
+  if (cameoCount != null) item.cameo_count = cameoCount;
+  const verified = sanitizeBoolean(raw.verified);
+  if (verified != null) item.verified = verified;
+  const canCameo = sanitizeBoolean(raw.can_cameo);
+  if (canCameo != null) item.can_cameo = canCameo;
+  const followsYou = sanitizeBoolean(raw.follows_you);
+  if (followsYou != null) item.follows_you = followsYou;
+  const isFollowing = sanitizeBoolean(raw.is_following);
+  if (isFollowing != null) item.is_following = isFollowing;
+
+  const planType = sanitizeString(raw.plan_type, 64);
+  if (planType) item.plan_type = planType;
+  const permalink = sanitizeString(raw.permalink, 2048);
+  if (permalink) item.permalink = permalink;
+  const description = sanitizeString(raw.description, 512);
+  if (description) item.description = description;
+  const location = sanitizeString(raw.location, 160);
+  if (location) item.location = location;
+  const createdAt = sanitizeNumber(raw.created_at, 0);
+  if (createdAt != null) item.created_at = createdAt;
+  const updatedAt = sanitizeNumber(raw.updated_at, 0);
+  if (updatedAt != null) item.updated_at = updatedAt;
+  return item;
+}
+
+function sanitizeSocialGraphPayload(raw) {
+  if (!isPlainObject(raw)) return null;
+  const listKind = sanitizeRelationshipListKind(raw.list_kind);
+  if (!listKind) return null;
+  const items = Array.isArray(raw.items) ? raw.items : [];
+  const outItems = [];
+  const limit = Math.min(items.length, 5000);
+  for (let i = 0; i < limit; i++) {
+    const item = sanitizeSocialGraphNode(items[i]);
+    if (item) outItems.push(item);
+  }
+  const replace = raw.replace === true;
+  if (!outItems.length && !replace) return null;
+  const out = { list_kind: listKind, items: outItems };
+  const cursor = sanitizeString(raw.cursor, 2048);
+  if (cursor) out.cursor = cursor;
+  if (replace) out.replace = true;
+  return out;
+}
+
 function sanitizeMetricsSnapshot(raw) {
   if (!isPlainObject(raw)) return null;
   const snap = {};
@@ -143,6 +227,8 @@ function sanitizeMetricsSnapshot(raw) {
   if (followers != null) snap.followers = followers;
   const cameoCount = sanitizeNumber(raw.cameo_count, 0);
   if (cameoCount != null) snap.cameo_count = cameoCount;
+  const socialGraph = sanitizeSocialGraphPayload(raw.social_graph);
+  if (socialGraph) snap.social_graph = socialGraph;
   const duration = sanitizeNumber(raw.duration, 0, 60 * 60 * 10);
   if (duration != null) snap.duration = duration;
   const width = sanitizeNumber(raw.width, 1, 20000);
@@ -150,7 +236,7 @@ function sanitizeMetricsSnapshot(raw) {
   const height = sanitizeNumber(raw.height, 1, 20000);
   if (height != null) snap.height = height;
 
-  const hasSignal = !!snap.postId || snap.followers != null || snap.cameo_count != null;
+  const hasSignal = !!snap.postId || snap.followers != null || snap.cameo_count != null || !!snap.social_graph;
   return hasSignal ? snap : null;
 }
 
@@ -199,6 +285,43 @@ function sanitizeMetricsRequest(message) {
   };
 }
 
+function sanitizeCleanupTarget(raw) {
+  if (!isPlainObject(raw)) return null;
+  const userKey = sanitizeIdToken(raw.userKey ?? raw.user_key);
+  const userHandle = sanitizeString(raw.userHandle ?? raw.user_handle, 80);
+  const permalink = sanitizeString(raw.permalink, 2048);
+  if (!userKey && !userHandle) return null;
+  return {
+    userKey: userKey || (userHandle ? `h:${userHandle.toLowerCase()}` : null),
+    userHandle: userHandle || null,
+    permalink: permalink || null,
+  };
+}
+
+function sanitizeCleanupRequestId(value) {
+  return sanitizeString(value, 160);
+}
+
+function sanitizeCleanupBulkUnfollowRequest(message) {
+  const requestId = sanitizeCleanupRequestId(message?.requestId);
+  const profileHandle = sanitizeString(message?.profileHandle, 80);
+  const userKey = sanitizeIdToken(message?.userKey);
+  if (!Array.isArray(message?.targets)) return null;
+  const targets = [];
+  for (const raw of message.targets) {
+    if (targets.length >= 150) break;
+    const item = sanitizeCleanupTarget(raw);
+    if (item) targets.push(item);
+  }
+  if (!targets.length) return null;
+  return {
+    requestId: requestId || `cleanup:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
+    profileHandle: profileHandle || null,
+    userKey: userKey || null,
+    targets,
+  };
+}
+
 function isTrustedSender(sender) {
   if (!sender) return false;
   const tabUrl = String(sender.tab?.url || '');
@@ -211,6 +334,124 @@ function isTrustedSender(sender) {
 function trimSeriesInPlace(arr, maxPoints = MAX_PROFILE_SERIES_POINTS) {
   if (!Array.isArray(arr) || arr.length <= maxPoints) return;
   arr.splice(0, arr.length - maxPoints);
+}
+
+function resolveMetricsUserKey(metrics, preferredKey, userHandle, userId) {
+  const users = metrics?.users || {};
+  if (preferredKey && users[preferredKey]) return preferredKey;
+  const handle = typeof userHandle === 'string' ? userHandle.trim().toLowerCase() : '';
+  const id = userId != null ? String(userId) : '';
+  if (handle) {
+    const byHandleKey = `h:${handle}`;
+    if (users[byHandleKey]) return byHandleKey;
+  }
+  if (id) {
+    for (const [key, user] of Object.entries(users)) {
+      if (user?.id != null && String(user.id) === id) return key;
+      if (typeof key === 'string' && key.startsWith('id:') && key.slice(3) === id) return key;
+    }
+  }
+  if (handle) {
+    for (const [key, user] of Object.entries(users)) {
+      const candidateHandle = String(user?.handle || user?.userHandle || (typeof key === 'string' && key.startsWith('h:') ? key.slice(2) : '') || '').trim().toLowerCase();
+      if (candidateHandle && candidateHandle === handle) return key;
+    }
+  }
+  if (preferredKey) return preferredKey;
+  if (handle) return `h:${handle}`;
+  if (id) return `id:${id}`;
+  return 'unknown';
+}
+
+function ensureRelationshipGraph(userEntry) {
+  if (!isPlainObject(userEntry.relationshipGraph)) userEntry.relationshipGraph = {};
+  const graph = userEntry.relationshipGraph;
+  if (!isPlainObject(graph.nodes)) graph.nodes = {};
+  if (!isPlainObject(graph.edges)) graph.edges = {};
+  if (!isPlainObject(graph.edges.followers)) graph.edges.followers = {};
+  if (!isPlainObject(graph.edges.following)) graph.edges.following = {};
+  if (!isPlainObject(graph.fullSyncAt)) graph.fullSyncAt = {};
+  return graph;
+}
+
+function upsertRelationshipGraph(userEntry, graphPayload, seenAt) {
+  if (!userEntry || !graphPayload) return false;
+  const listKind = graphPayload.list_kind === 'following' ? 'following' : (graphPayload.list_kind === 'followers' ? 'followers' : null);
+  if (!listKind) return false;
+  const graph = ensureRelationshipGraph(userEntry);
+  const replace = graphPayload.replace === true;
+  const edgeBucket = isPlainObject(graph.edges[listKind]) ? graph.edges[listKind] : {};
+  const nextEdgeBucket = replace ? {} : edgeBucket;
+  let changed = false;
+  for (const rawNode of Array.isArray(graphPayload.items) ? graphPayload.items : []) {
+    if (!rawNode || typeof rawNode !== 'object') continue;
+    const targetKey = rawNode.user_key || (rawNode.user_id != null ? `id:${String(rawNode.user_id)}` : null);
+    if (!targetKey) continue;
+    const prevNode = isPlainObject(graph.nodes[targetKey]) ? graph.nodes[targetKey] : null;
+    const nextNode = {
+      ...(prevNode || {}),
+      user_key: targetKey,
+      user_handle: rawNode.user_handle || prevNode?.user_handle || null,
+      user_id: rawNode.user_id != null ? String(rawNode.user_id) : (prevNode?.user_id != null ? String(prevNode.user_id) : null),
+      display_name: rawNode.display_name || prevNode?.display_name || null,
+      plan_type: rawNode.plan_type || prevNode?.plan_type || null,
+      permalink: rawNode.permalink || prevNode?.permalink || null,
+      description: rawNode.description || prevNode?.description || null,
+      location: rawNode.location || prevNode?.location || null,
+      firstSeenAt: prevNode?.firstSeenAt || seenAt,
+      lastSeenAt: seenAt,
+    };
+    const numericFields = ['follower_count', 'following_count', 'post_count', 'reply_count', 'likes_received_count', 'remix_count', 'cameo_count', 'created_at', 'updated_at'];
+    for (const field of numericFields) {
+      const value = Number(rawNode[field]);
+      if (Number.isFinite(value)) nextNode[field] = value;
+      else if (prevNode && prevNode[field] != null) nextNode[field] = prevNode[field];
+    }
+    const booleanFields = ['verified', 'can_cameo', 'follows_you', 'is_following'];
+    for (const field of booleanFields) {
+      if (typeof rawNode[field] === 'boolean') nextNode[field] = rawNode[field];
+      else if (prevNode && typeof prevNode[field] === 'boolean') nextNode[field] = prevNode[field];
+    }
+    if (JSON.stringify(prevNode || null) !== JSON.stringify(nextNode)) {
+      graph.nodes[targetKey] = nextNode;
+      changed = true;
+    }
+
+    const prevEdge = isPlainObject(edgeBucket[targetKey]) ? edgeBucket[targetKey] : null;
+    const nextEdge = {
+      ...(prevEdge || {}),
+      user_key: targetKey,
+      user_handle: nextNode.user_handle || prevEdge?.user_handle || null,
+      user_id: nextNode.user_id || prevEdge?.user_id || null,
+      seenAt,
+      follows_you: typeof rawNode.follows_you === 'boolean'
+        ? rawNode.follows_you
+        : (typeof prevEdge?.follows_you === 'boolean' ? prevEdge.follows_you : listKind === 'followers'),
+      is_following: typeof rawNode.is_following === 'boolean'
+        ? rawNode.is_following
+        : (typeof prevEdge?.is_following === 'boolean' ? prevEdge.is_following : listKind === 'following'),
+    };
+    if (JSON.stringify(prevEdge || null) !== JSON.stringify(nextEdge)) changed = true;
+    nextEdgeBucket[targetKey] = nextEdge;
+  }
+  if (replace) {
+    if (JSON.stringify(edgeBucket) !== JSON.stringify(nextEdgeBucket)) {
+      graph.edges[listKind] = nextEdgeBucket;
+      changed = true;
+    }
+    if (graph.fullSyncAt[listKind] !== seenAt) {
+      graph.fullSyncAt[listKind] = seenAt;
+      changed = true;
+    }
+  } else if (nextEdgeBucket !== edgeBucket) {
+    graph.edges[listKind] = nextEdgeBucket;
+    changed = true;
+  }
+  if (graph.updatedAt !== seenAt) {
+    graph.updatedAt = seenAt;
+    changed = true;
+  }
+  return changed;
 }
 
 function normalizeMetrics(raw) {
@@ -526,13 +767,27 @@ async function flush() {
       let dirty = false;
       const touchedPosts = new Set();
       for (const snap of items) {
-        const userKey = snap.userKey || snap.pageUserKey || 'unknown';
+        const preferredUserKey = snap.userKey || snap.pageUserKey || 'unknown';
+        const userKey = snap.social_graph
+          ? resolveMetricsUserKey(metrics, preferredUserKey, snap.userHandle || snap.pageUserHandle, snap.userId)
+          : preferredUserKey;
         if (!metrics.users[userKey]) {
           dirty = true;
         }
         const userEntry = metrics.users[userKey] || (metrics.users[userKey] = { handle: snap.userHandle || snap.pageUserHandle || null, id: snap.userId || null, posts: {}, followers: [], cameos: [] });
         if (!userEntry.posts || typeof userEntry.posts !== 'object' || Array.isArray(userEntry.posts)) userEntry.posts = {};
         if (!Array.isArray(userEntry.followers)) userEntry.followers = [];
+        if ((typeof userEntry.handle !== 'string' || !userEntry.handle) && (snap.userHandle || snap.pageUserHandle)) {
+          userEntry.handle = snap.userHandle || snap.pageUserHandle || null;
+          dirty = true;
+        }
+        if (userEntry.id == null && snap.userId != null) {
+          userEntry.id = snap.userId;
+          dirty = true;
+        }
+        if (snap.social_graph) {
+          if (upsertRelationshipGraph(userEntry, snap.social_graph, snap.ts || Date.now())) dirty = true;
+        }
         if (snap.postId) {
           postIdToUserKey.set(snap.postId, userKey);
           if (!userEntry.posts[snap.postId]) {
@@ -813,6 +1068,204 @@ function openOrFocusDashboard(sendResponse) {
   });
 }
 
+function queryTabs(queryInfo) {
+  return new Promise((resolve) => {
+    try {
+      chrome.tabs.query(queryInfo, (tabs) => resolve(Array.isArray(tabs) ? tabs : []));
+    } catch {
+      resolve([]);
+    }
+  });
+}
+
+function createTab(createProperties) {
+  return new Promise((resolve, reject) => {
+    try {
+      chrome.tabs.create(createProperties, (tab) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message || 'Could not open a Sora tab.'));
+          return;
+        }
+        resolve(tab || null);
+      });
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
+function updateTab(tabId, updateProperties) {
+  return new Promise((resolve, reject) => {
+    try {
+      chrome.tabs.update(tabId, updateProperties, (tab) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message || 'Could not focus the Sora tab.'));
+          return;
+        }
+        resolve(tab || null);
+      });
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
+const CLEANUP_SORA_ORIGIN = 'https://sora.chatgpt.com';
+const CLEANUP_TAB_MESSAGE_TIMEOUT_MS = 45000;
+
+function normalizeCleanupProfileHandle(value) {
+  const raw = String(value || '').trim().replace(/^@+/, '');
+  if (!raw) return '';
+  return raw
+    .replace(/^profile\//i, '')
+    .replace(/^\/+/, '')
+    .replace(/\/+$/, '')
+    .trim()
+    .toLowerCase();
+}
+
+function buildCleanupProfileUrl(profileHandle) {
+  const normalized = normalizeCleanupProfileHandle(profileHandle);
+  return normalized
+    ? `${CLEANUP_SORA_ORIGIN}/profile/${encodeURIComponent(normalized)}`
+    : `${CLEANUP_SORA_ORIGIN}/profile`;
+}
+
+function getCleanupProfileHandleFromUrl(url) {
+  try {
+    const parsed = new URL(url);
+    if (parsed.origin !== CLEANUP_SORA_ORIGIN) return null;
+    const segments = parsed.pathname.split('/').filter(Boolean);
+    if (segments[0] !== 'profile') return null;
+    if (!segments[1]) return '';
+    return normalizeCleanupProfileHandle(decodeURIComponent(segments[1]));
+  } catch {}
+  return null;
+}
+
+function isCleanupProfileTab(tab, profileHandle) {
+  if (!tab?.url) return false;
+  const targetHandle = normalizeCleanupProfileHandle(profileHandle);
+  const tabHandle = getCleanupProfileHandleFromUrl(tab.url);
+  if (tabHandle == null) return false;
+  return tabHandle === targetHandle;
+}
+
+async function ensureCleanupTabReady(tab, profileHandle) {
+  if (tab?.id == null) throw new Error('Could not focus the Sora cleanup tab.');
+  const targetUrl = buildCleanupProfileUrl(profileHandle);
+  const needsNavigation = !isCleanupProfileTab(tab, profileHandle);
+  const updated = await updateTab(tab.id, needsNavigation ? { active: true, url: targetUrl } : { active: true });
+  if (needsNavigation || (updated?.status !== 'complete' && tab?.status !== 'complete')) {
+    await waitForTabComplete(tab.id);
+  }
+  return updated || tab;
+}
+
+function sendTabMessage(tabId, message, timeoutMs = CLEANUP_TAB_MESSAGE_TIMEOUT_MS) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finishResolve = (value) => {
+      if (settled) return;
+      settled = true;
+      try { clearTimeout(timer); } catch {}
+      resolve(value);
+    };
+    const finishReject = (error) => {
+      if (settled) return;
+      settled = true;
+      try { clearTimeout(timer); } catch {}
+      reject(error);
+    };
+    const timer = setTimeout(() => {
+      finishReject(new Error('Timed out waiting for the Sora page to finish the cleanup action.'));
+    }, Math.max(1000, Number(timeoutMs) || 0));
+    try {
+      chrome.tabs.sendMessage(tabId, message, (response) => {
+        if (chrome.runtime.lastError) {
+          finishReject(new Error(chrome.runtime.lastError.message || 'Could not reach the Sora page.'));
+          return;
+        }
+        finishResolve(response);
+      });
+    } catch (err) {
+      finishReject(err);
+    }
+  });
+}
+
+function waitForTabComplete(tabId, timeoutMs = 20000) {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      try { chrome.tabs.onUpdated.removeListener(onUpdated); } catch {}
+      reject(new Error('Timed out waiting for the Sora tab to finish loading.'));
+    }, Math.max(1000, Number(timeoutMs) || 0));
+
+    const onUpdated = (updatedTabId, changeInfo) => {
+      if (updatedTabId !== tabId) return;
+      if (changeInfo?.status === 'complete') {
+        clearTimeout(timeout);
+        try { chrome.tabs.onUpdated.removeListener(onUpdated); } catch {}
+        resolve(true);
+      }
+    };
+    try {
+      chrome.tabs.onUpdated.addListener(onUpdated);
+      chrome.tabs.get(tabId, (tab) => {
+        if (chrome.runtime.lastError) return;
+        if (tab?.status === 'complete') {
+          clearTimeout(timeout);
+          try { chrome.tabs.onUpdated.removeListener(onUpdated); } catch {}
+          resolve(true);
+        }
+      });
+    } catch (err) {
+      clearTimeout(timeout);
+      try { chrome.tabs.onUpdated.removeListener(onUpdated); } catch {}
+      reject(err);
+    }
+  });
+}
+
+async function findOrOpenCleanupTab(profileHandle) {
+  const activeSoraTabs = await queryTabs({ active: true, lastFocusedWindow: true, url: `${CLEANUP_SORA_ORIGIN}/*` });
+  const exactActive = activeSoraTabs.find((tab) => isCleanupProfileTab(tab, profileHandle));
+  if (exactActive?.id != null) return ensureCleanupTabReady(exactActive, profileHandle);
+
+  const profileTabs = await queryTabs({ url: `${CLEANUP_SORA_ORIGIN}/profile*` });
+  const exactProfile = profileTabs.find((tab) => isCleanupProfileTab(tab, profileHandle));
+  if (exactProfile?.id != null) return ensureCleanupTabReady(exactProfile, profileHandle);
+
+  const soraTabs = await queryTabs({ url: `${CLEANUP_SORA_ORIGIN}/*` });
+  const exactSora = soraTabs.find((tab) => isCleanupProfileTab(tab, profileHandle));
+  if (exactSora?.id != null) return ensureCleanupTabReady(exactSora, profileHandle);
+
+  const fallbackTab = activeSoraTabs[0] || profileTabs[0] || soraTabs[0] || null;
+  if (fallbackTab?.id != null) return ensureCleanupTabReady(fallbackTab, profileHandle);
+
+  const url = buildCleanupProfileUrl(profileHandle);
+  const created = await createTab({ url, active: true });
+  if (created?.id == null) throw new Error('Could not create a Sora profile tab.');
+  await waitForTabComplete(created.id);
+  return created;
+}
+
+async function dispatchCleanupBulkUnfollow(request) {
+  const tab = await findOrOpenCleanupTab(request.profileHandle);
+  if (tab?.id == null) throw new Error('Could not find a Sora tab for bulk unfollow.');
+  const response = await sendTabMessage(tab.id, {
+    action: 'cleanup_bulk_unfollow',
+    requestId: request.requestId,
+    profileHandle: request.profileHandle,
+    userKey: request.userKey,
+    targets: request.targets,
+  });
+  if (!response || typeof response !== 'object') {
+    throw new Error('No response from the Sora page.');
+  }
+  return response;
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!isPlainObject(message) || typeof message.action !== 'string') return false;
   if (!isTrustedSender(sender)) {
@@ -825,6 +1278,40 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === 'open_dashboard') {
     openOrFocusDashboard(sendResponse);
     return true; // Keep message channel open for async response
+  }
+
+  if (message.action === 'cleanup_bulk_unfollow_result') {
+    const requestId = sanitizeCleanupRequestId(message?.requestId);
+    const payload = isPlainObject(message?.payload)
+      ? message.payload
+      : { ok: false, error: 'No bulk unfollow result payload.' };
+    if (!requestId) return false;
+    if (!sender?.tab?.id) return false;
+    try {
+      chrome.runtime.sendMessage({
+        action: 'cleanup_bulk_unfollow_result',
+        requestId,
+        payload,
+      });
+    } catch {}
+    return false;
+  }
+
+  if (message.action === 'cleanup_bulk_unfollow') {
+    const request = sanitizeCleanupBulkUnfollowRequest(message);
+    if (!request) {
+      sendResponse({ ok: false, error: 'Invalid cleanup unfollow request.' });
+      return false;
+    }
+    (async () => {
+      try {
+        const response = await dispatchCleanupBulkUnfollow(request);
+        sendResponse(response);
+      } catch (err) {
+        sendResponse({ ok: false, error: err?.message || 'Bulk unfollow failed.' });
+      }
+    })();
+    return true;
   }
 
   if (message.action === 'metrics_batch') {

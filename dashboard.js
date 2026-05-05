@@ -387,6 +387,38 @@
   let lastSessionCacheAt = 0;
   let currentUserKey = null;
   let lastSelectedUserKey = null;
+  const CLEANUP_PANEL_KINDS = ['following', 'followers'];
+  const CLEANUP_PANEL_FILTER_DEFAULTS = Object.freeze({
+    search: '',
+    status: 'all',
+    reason: 'all',
+    sort: 'score_desc',
+    page: 1,
+    pageSize: 25,
+  });
+  const CLEANUP_BULK_UNFOLLOW_LIMIT = 100;
+  const CLEANUP_ZERO_SIGNAL_HINT = 'Select zero-signal grabs non-mutual follows with 0 followers, 0 posts, 0 likes, and stale activity. Bulk unfollow uses your live Sora tab and the native Following buttons.';
+  const CLEANUP_FOLLOWING_PRESET_DEFS = Object.freeze([
+    { id: 'smart_unfollow', label: 'Should unfollow' },
+    { id: 'zero_signal', label: 'Zero-signal' },
+    { id: 'non_mutual', label: 'Not following back' },
+    { id: 'inactive', label: 'Inactive' },
+    { id: 'low_likes', label: 'Low likes' },
+    { id: 'all', label: 'Show all' },
+  ]);
+  const DASHBOARD_WORKSPACE_STORAGE_KEY = 'SCT_DASHBOARD_WORKSPACE_V1';
+  let cleanupPlannerContextKey = null;
+  let cleanupPlannerContextUser = null;
+  let cleanupPlannerContextPlan = null;
+  let cleanupBulkActionBusy = false;
+  let cleanupBulkActionTone = 'muted';
+  let cleanupBulkActionMessage = '';
+  const cleanupSelectedFollowingKeys = new Set();
+  let activeDashboardWorkspace = 'overview';
+  const cleanupPanelState = {
+    following: { ...CLEANUP_PANEL_FILTER_DEFAULTS, preset: 'all' },
+    followers: { ...CLEANUP_PANEL_FILTER_DEFAULTS },
+  };
   let nextAutoRefreshAt = 0;
   let autoRefreshCountdownTimer = null;
   let triggerMetricsAutoRefreshNow = null;
@@ -1941,6 +1973,77 @@
     }
     return merged;
   }
+  function cloneRelationshipGraphNode(node) {
+    if (!node || typeof node !== 'object') return null;
+    return { ...node };
+  }
+  function cloneRelationshipGraphEdge(edge) {
+    if (!edge || typeof edge !== 'object') return null;
+    return { ...edge };
+  }
+  function relationshipGraphHasData(graph) {
+    if (!graph || typeof graph !== 'object') return false;
+    const nodes = graph.nodes && typeof graph.nodes === 'object' ? Object.keys(graph.nodes).length : 0;
+    const followers = graph.edges?.followers && typeof graph.edges.followers === 'object' ? Object.keys(graph.edges.followers).length : 0;
+    const following = graph.edges?.following && typeof graph.edges.following === 'object' ? Object.keys(graph.edges.following).length : 0;
+    const fullSyncFollowers = toTs(graph.fullSyncAt?.followers) || 0;
+    const fullSyncFollowing = toTs(graph.fullSyncAt?.following) || 0;
+    return nodes > 0 || followers > 0 || following > 0 || fullSyncFollowers > 0 || fullSyncFollowing > 0;
+  }
+  function mergeRelationshipGraphs(graphs) {
+    const merged = {
+      nodes: {},
+      edges: { followers: {}, following: {} },
+      fullSyncAt: {},
+      updatedAt: 0
+    };
+    let hasData = false;
+    const latestFullSyncAt = { followers: 0, following: 0 };
+    for (const graph of graphs || []) {
+      if (!relationshipGraphHasData(graph)) continue;
+      for (const kind of ['followers', 'following']) {
+        const nextFullSyncAt = toTs(graph.fullSyncAt?.[kind]) || 0;
+        if (nextFullSyncAt > latestFullSyncAt[kind]) latestFullSyncAt[kind] = nextFullSyncAt;
+      }
+    }
+    for (const kind of ['followers', 'following']) {
+      if (latestFullSyncAt[kind] > 0) merged.fullSyncAt[kind] = latestFullSyncAt[kind];
+    }
+    for (const graph of graphs || []) {
+      if (!relationshipGraphHasData(graph)) continue;
+      hasData = true;
+      const nodes = graph.nodes && typeof graph.nodes === 'object' ? graph.nodes : {};
+      for (const [key, node] of Object.entries(nodes)) {
+        if (!key || !node || typeof node !== 'object') continue;
+        const prev = merged.nodes[key];
+        const prevSeen = toTs(prev?.lastSeenAt) || 0;
+        const nextSeen = toTs(node?.lastSeenAt) || 0;
+        const base = prev && prevSeen > nextSeen ? { ...node, ...prev } : { ...prev, ...node };
+        if (!base.user_key) base.user_key = key;
+        merged.nodes[key] = base;
+      }
+      for (const kind of ['followers', 'following']) {
+        const bucket = graph.edges?.[kind] && typeof graph.edges[kind] === 'object' ? graph.edges[kind] : {};
+        const graphFullSyncAt = toTs(graph.fullSyncAt?.[kind]) || 0;
+        for (const [key, edge] of Object.entries(bucket)) {
+          if (!key || !edge || typeof edge !== 'object') continue;
+          const edgeSeen = toTs(edge?.seenAt) || 0;
+          if (latestFullSyncAt[kind] > 0 && graphFullSyncAt < latestFullSyncAt[kind] && edgeSeen < latestFullSyncAt[kind]) {
+            continue;
+          }
+          const prev = merged.edges[kind][key];
+          const prevSeen = toTs(prev?.seenAt) || 0;
+          const nextSeen = edgeSeen;
+          const base = prev && prevSeen > nextSeen ? { ...edge, ...prev } : { ...prev, ...edge };
+          if (!base.user_key) base.user_key = key;
+          merged.edges[kind][key] = base;
+        }
+      }
+      const updatedAt = toTs(graph.updatedAt) || 0;
+      if (updatedAt > (toTs(merged.updatedAt) || 0)) merged.updatedAt = graph.updatedAt;
+    }
+    return hasData ? merged : null;
+  }
   function buildMergedIdentityUser(metrics, userKey, user = null){
     const resolvedUser = user || resolveUserForKey(metrics, userKey);
     if (!resolvedUser || isVirtualUserKey(userKey)) {
@@ -1963,6 +2066,7 @@
     const aliasKeys = Array.from(new Set([canonicalKey, userKey, ...findAliasKeysForUser(metrics, canonicalKey, canonicalUser)]));
     const allFollowerArrays = [];
     const allCameoArrays = [];
+    const relationshipGraphs = [];
     const postGroups = new Map();
     let sourcePostCount = 0;
     let sourceSnapshotCount = 0;
@@ -1975,6 +2079,9 @@
       if (Array.isArray(bucket.cameos) && bucket.cameos.length) {
         allCameoArrays.push(bucket.cameos);
       }
+      if (relationshipGraphHasData(bucket.relationshipGraph)) {
+        relationshipGraphs.push(bucket.relationshipGraph);
+      }
       for (const [pid, post] of Object.entries(bucket.posts || {})) {
         sourcePostCount++;
         sourceSnapshotCount += Array.isArray(post?.snapshots) ? post.snapshots.length : 0;
@@ -1984,6 +2091,7 @@
     }
     const mergedFollowers = mergeTimeSeriesArrays(allFollowerArrays);
     const mergedCameos = mergeTimeSeriesArrays(allCameoArrays);
+    const mergedRelationshipGraph = mergeRelationshipGraphs(relationshipGraphs);
     const mergedPosts = {};
     let mergedSnapshotCount = 0;
     let mergedPostsWithMultipleBuckets = 0;
@@ -2021,6 +2129,7 @@
       followers: mergedFollowers,
       cameos: mergedCameos
     };
+    if (mergedRelationshipGraph) mergedUser.relationshipGraph = mergedRelationshipGraph;
     return {
       user: mergedUser,
       meta: {
@@ -2033,6 +2142,143 @@
         mergedPostsWithMultipleBuckets,
         mergedDuplicateSnapshotTimestamps
       }
+    };
+  }
+  function buildCleanupPlannerModel(user, opts = {}, nowMs = Date.now()){
+    const graph = user?.relationshipGraph;
+    const empty = {
+      summary: {
+        followersCaptured: 0,
+        followingCaptured: 0,
+        mutualCount: 0,
+        nonMutualFollowingCount: 0,
+        zeroSignalFollowingCount: 0,
+        unfollowLikelyCount: 0,
+        lowSignalFollowersCount: 0
+      },
+      following: [],
+      followers: []
+    };
+    if (!relationshipGraphHasData(graph)) return empty;
+    const maxFollowers = Math.max(0, Number(opts.maxFollowers) || 200);
+    const minPosts = Math.max(0, Number(opts.minPosts) || 12);
+    const staleDays = Math.max(0, Number(opts.staleDays) || 45);
+    const minLikesReceived = Math.max(0, Number(opts.minLikesReceived) || Math.max(50, minPosts * 10));
+    const followingEdges = graph.edges?.following && typeof graph.edges.following === 'object' ? graph.edges.following : {};
+    const followerEdges = graph.edges?.followers && typeof graph.edges.followers === 'object' ? graph.edges.followers : {};
+    const nodes = graph.nodes && typeof graph.nodes === 'object' ? graph.nodes : {};
+    const followingKeys = Object.keys(followingEdges);
+    const followerKeys = Object.keys(followerEdges);
+    const mutualSet = new Set(followingKeys.filter((key)=> Object.prototype.hasOwnProperty.call(followerEdges, key)));
+    const scoreCandidate = (targetKey, primaryKind) => {
+      const node = nodes[targetKey] || {};
+      const followingEdge = followingEdges[targetKey] || null;
+      const followerEdge = followerEdges[targetKey] || null;
+      const mutual = !!(followingEdge && followerEdge);
+      const followerCount = Number.isFinite(Number(node?.follower_count)) ? Number(node.follower_count) : null;
+      const postCount = Number.isFinite(Number(node?.post_count)) ? Number(node.post_count) : null;
+      const likesReceivedCount = Number.isFinite(Number(node?.likes_received_count)) ? Number(node.likes_received_count) : null;
+      const replyCount = Number.isFinite(Number(node?.reply_count)) ? Number(node.reply_count) : 0;
+      const remixCount = Number.isFinite(Number(node?.remix_count)) ? Number(node.remix_count) : 0;
+      const cameoCount = Number.isFinite(Number(node?.cameo_count)) ? Number(node.cameo_count) : 0;
+      const updatedAtMs = toTs(node?.updated_at);
+      const inactiveDays = updatedAtMs > 0 ? Math.max(0, Math.floor((nowMs - updatedAtMs) / (24 * 60 * 60 * 1000))) : null;
+      const engagementSignal = Math.max(0, (likesReceivedCount || 0) + replyCount * 3 + remixCount * 5 + cameoCount * 2);
+      const followsYou = typeof followerEdge?.follows_you === 'boolean'
+        ? followerEdge.follows_you
+        : (typeof followingEdge?.follows_you === 'boolean' ? followingEdge.follows_you : mutual);
+      const isFollowing = typeof followingEdge?.is_following === 'boolean'
+        ? followingEdge.is_following
+        : (typeof followerEdge?.is_following === 'boolean' ? followerEdge.is_following : !!followingEdge);
+      const nonMutual = primaryKind === 'following' ? !followsYou : !isFollowing;
+      const lowFollowers = maxFollowers > 0 && followerCount != null && followerCount < maxFollowers;
+      const lowPosts = minPosts > 0 && postCount != null && postCount < minPosts;
+      const lowLikes = likesReceivedCount != null && likesReceivedCount < minLikesReceived;
+      const inactive = staleDays > 0 && inactiveDays != null && inactiveDays >= staleDays;
+      const zeroSignal = primaryKind === 'following'
+        && nonMutual
+        && inactive
+        && followerCount === 0
+        && postCount === 0
+        && likesReceivedCount === 0;
+      let score = 0;
+      const reasons = [];
+      if (nonMutual) {
+        score += 34;
+        reasons.push({ label: primaryKind === 'following' ? 'not following you back' : 'you do not follow back', tone: 'danger' });
+      }
+      if (lowFollowers) {
+        score += 18;
+        reasons.push({ label: `${followerCount} followers`, tone: 'warn' });
+      }
+      if (lowPosts) {
+        score += 16;
+        reasons.push({ label: `${postCount} posts`, tone: 'warn' });
+      }
+      if (lowLikes) {
+        score += 12;
+        reasons.push({ label: `${likesReceivedCount} likes received`, tone: 'soft' });
+      }
+      if (inactive) {
+        score += 18;
+        reasons.push({ label: `inactive ${inactiveDays}d`, tone: 'danger' });
+      }
+      if (mutual) score -= 12;
+      if (node?.verified) score -= 22;
+      if (maxFollowers > 0 && followerCount != null && followerCount >= maxFollowers * 4) score -= 12;
+      if (minPosts > 0 && postCount != null && postCount >= minPosts * 4) score -= 8;
+      if (engagementSignal >= minLikesReceived * 6) score -= 10;
+      score = Math.max(0, Math.min(99, score));
+      return {
+        userKey: targetKey,
+        userHandle: node?.user_handle || followingEdge?.user_handle || followerEdge?.user_handle || null,
+        userId: node?.user_id || followingEdge?.user_id || followerEdge?.user_id || null,
+        displayName: node?.display_name || null,
+        permalink: node?.permalink || null,
+        followerCount,
+        postCount,
+        likesReceivedCount,
+        engagementSignal,
+        updatedAtMs,
+        inactiveDays,
+        verified: !!node?.verified,
+        mutual,
+        followsYou,
+        isFollowing,
+        nonMutual,
+        lowFollowers,
+        lowPosts,
+        lowLikes,
+        inactive,
+        zeroSignal,
+        selectable: primaryKind === 'following' && !!isFollowing && !!(node?.user_handle || followingEdge?.user_handle || followerEdge?.user_handle),
+        score,
+        reasons,
+        recommendation: primaryKind === 'following'
+          ? (score >= 60 ? 'Unfollow likely' : score >= 40 ? 'Review soon' : 'Low priority')
+          : (score >= 55 ? 'Low-signal follower' : score >= 35 ? 'Manual review' : 'Low priority')
+      };
+    };
+    const following = followingKeys
+      .map((key)=>scoreCandidate(key, 'following'))
+      .filter((item)=>item.score >= 25 || item.reasons.length >= 2)
+      .sort((a, b)=> (b.score - a.score) || ((a.followerCount ?? Infinity) - (b.followerCount ?? Infinity)) || String(a.userHandle || a.userKey).localeCompare(String(b.userHandle || b.userKey)));
+    const followers = followerKeys
+      .map((key)=>scoreCandidate(key, 'followers'))
+      .filter((item)=>item.score >= 30 || item.reasons.length >= 3)
+      .sort((a, b)=> (b.score - a.score) || ((a.followerCount ?? Infinity) - (b.followerCount ?? Infinity)) || String(a.userHandle || a.userKey).localeCompare(String(b.userHandle || b.userKey)));
+    return {
+      summary: {
+        followersCaptured: followerKeys.length,
+        followingCaptured: followingKeys.length,
+        mutualCount: mutualSet.size,
+        nonMutualFollowingCount: followingKeys.length - mutualSet.size,
+        zeroSignalFollowingCount: following.filter((item)=>item.zeroSignal).length,
+        unfollowLikelyCount: following.filter((item)=>item.score >= 60).length,
+        lowSignalFollowersCount: followers.filter((item)=>item.score >= 55).length
+      },
+      following,
+      followers
     };
   }
   function resolveCanonicalUserKey(metrics, userKey, user = null){
@@ -2296,8 +2542,9 @@
       const hasPosts = posts && Object.keys(posts).length > 0;
       const hasFollowers = Array.isArray(user?.followers) && user.followers.length > 0;
       const hasCameos = Array.isArray(user?.cameos) && user.cameos.length > 0;
+      const hasRelationshipGraph = relationshipGraphHasData(user?.relationshipGraph);
       const keepForCharacter = isCharacterId(user?.id);
-      if (!hasPosts && !hasFollowers && !hasCameos && !keepForCharacter){
+      if (!hasPosts && !hasFollowers && !hasCameos && !hasRelationshipGraph && !keepForCharacter){
         delete users[key];
         removed++;
       }
@@ -2865,6 +3112,791 @@
     } else {
       link.setAttribute('aria-disabled', 'true');
     }
+  }
+
+  const CLEANUP_PLANNER_DEFAULTS = Object.freeze({
+    maxFollowers: 200,
+    minPosts: 12,
+    minLikesReceived: 120,
+    staleDays: 45,
+  });
+
+  function getCleanupPlannerOptions() {
+    const maxFollowers = Math.max(0, Number($('#cleanupMaxFollowers')?.value) || CLEANUP_PLANNER_DEFAULTS.maxFollowers);
+    const minPosts = Math.max(0, Number($('#cleanupMinPosts')?.value) || CLEANUP_PLANNER_DEFAULTS.minPosts);
+    const minLikesReceived = Math.max(0, Number($('#cleanupMinLikesReceived')?.value) || CLEANUP_PLANNER_DEFAULTS.minLikesReceived);
+    const staleDays = Math.max(0, Number($('#cleanupStaleDays')?.value) || CLEANUP_PLANNER_DEFAULTS.staleDays);
+    return {
+      maxFollowers,
+      minPosts,
+      minLikesReceived,
+      staleDays,
+    };
+  }
+
+  function getCleanupScoreThreshold(kind, bucket) {
+    if (kind === 'followers') {
+      return bucket === 'review' ? 35 : 55;
+    }
+    return bucket === 'review' ? 40 : 60;
+  }
+
+  function resetCleanupPanelState(kind = null) {
+    const apply = (panelKind) => {
+      if (!cleanupPanelState[panelKind]) return;
+      const pageSize = Number(cleanupPanelState[panelKind].pageSize) || CLEANUP_PANEL_FILTER_DEFAULTS.pageSize;
+      Object.assign(cleanupPanelState[panelKind], {
+        ...CLEANUP_PANEL_FILTER_DEFAULTS,
+        pageSize,
+        ...(panelKind === 'following' ? { preset: 'all' } : {}),
+      });
+    };
+    if (kind) {
+      apply(kind);
+      return;
+    }
+    CLEANUP_PANEL_KINDS.forEach(apply);
+  }
+
+  function getCleanupPanelElements(kind) {
+    const suffix = kind === 'followers' ? 'Followers' : 'Following';
+    return {
+      meta: $(`#cleanup${suffix}PanelMeta`),
+      list: $(`#cleanup${suffix}List`),
+      note: $(`#cleanup${suffix}ActionNote`),
+      prev: $(`#cleanup${suffix}Prev`),
+      next: $(`#cleanup${suffix}Next`),
+      pagination: $(`#cleanup${suffix}Pagination`),
+      search: $(`#cleanup${suffix}Search`),
+      status: $(`#cleanup${suffix}Status`),
+      reason: $(`#cleanup${suffix}Reason`),
+      sort: $(`#cleanup${suffix}Sort`),
+      pageSize: $(`#cleanup${suffix}PageSize`),
+    };
+  }
+
+  function normalizeCleanupSearch(value) {
+    return typeof value === 'string' ? value.trim().toLowerCase() : '';
+  }
+
+  function cleanupItemMatchesSearch(item, query) {
+    if (!query) return true;
+    const haystack = [
+      item?.userHandle,
+      item?.displayName,
+      item?.userKey,
+    ].filter(Boolean).join(' ').toLowerCase();
+    return haystack.includes(query);
+  }
+
+  function cleanupItemMatchesStatus(item, status, kind) {
+    if (!item) return false;
+    const normalized = String(status || 'all').toLowerCase();
+    if (normalized === 'all') return true;
+    const actionableThreshold = getCleanupScoreThreshold(kind, 'actionable');
+    const reviewThreshold = getCleanupScoreThreshold(kind, 'review');
+    if (normalized === 'actionable') return item.score >= actionableThreshold;
+    if (normalized === 'review') return item.score >= reviewThreshold && item.score < actionableThreshold;
+    if (normalized === 'low_priority') return item.score < reviewThreshold;
+    return true;
+  }
+
+  function cleanupItemMatchesReason(item, reason) {
+    if (!item) return false;
+    const normalized = String(reason || 'all').toLowerCase();
+    if (normalized === 'all') return true;
+    if (normalized === 'smart_unfollow') {
+      return !!item.nonMutual && (!!item.zeroSignal || (!!item.lowFollowers && (!!item.lowPosts || !!item.lowLikes || !!item.inactive)));
+    }
+    if (normalized === 'non_mutual') return !!item.nonMutual;
+    if (normalized === 'low_followers') return !!item.lowFollowers;
+    if (normalized === 'low_posts') return !!item.lowPosts;
+    if (normalized === 'low_likes') return !!item.lowLikes;
+    if (normalized === 'inactive') return !!item.inactive;
+    if (normalized === 'zero_signal') return !!item.zeroSignal;
+    if (normalized === 'verified') return !!item.verified;
+    return true;
+  }
+
+  function compareCleanupPlannerItems(a, b, sortKey) {
+    const normalized = String(sortKey || 'score_desc').toLowerCase();
+    if (normalized === 'followers_asc') {
+      return ((a?.followerCount ?? Infinity) - (b?.followerCount ?? Infinity))
+        || ((b?.score ?? 0) - (a?.score ?? 0))
+        || String(a?.userHandle || a?.userKey || '').localeCompare(String(b?.userHandle || b?.userKey || ''));
+    }
+    if (normalized === 'posts_asc') {
+      return ((a?.postCount ?? Infinity) - (b?.postCount ?? Infinity))
+        || ((b?.score ?? 0) - (a?.score ?? 0))
+        || String(a?.userHandle || a?.userKey || '').localeCompare(String(b?.userHandle || b?.userKey || ''));
+    }
+    if (normalized === 'likes_asc') {
+      return ((a?.likesReceivedCount ?? Infinity) - (b?.likesReceivedCount ?? Infinity))
+        || ((b?.score ?? 0) - (a?.score ?? 0))
+        || String(a?.userHandle || a?.userKey || '').localeCompare(String(b?.userHandle || b?.userKey || ''));
+    }
+    if (normalized === 'stale_desc') {
+      return ((b?.inactiveDays ?? -1) - (a?.inactiveDays ?? -1))
+        || ((b?.score ?? 0) - (a?.score ?? 0))
+        || String(a?.userHandle || a?.userKey || '').localeCompare(String(b?.userHandle || b?.userKey || ''));
+    }
+    if (normalized === 'handle_asc') {
+      return String(a?.userHandle || a?.userKey || '').localeCompare(String(b?.userHandle || b?.userKey || ''))
+        || ((b?.score ?? 0) - (a?.score ?? 0));
+    }
+    return ((b?.score ?? 0) - (a?.score ?? 0))
+      || ((a?.followerCount ?? Infinity) - (b?.followerCount ?? Infinity))
+      || String(a?.userHandle || a?.userKey || '').localeCompare(String(b?.userHandle || b?.userKey || ''));
+  }
+
+  function filterCleanupPlannerItems(items, panelState, kind) {
+    const list = Array.isArray(items) ? items.slice() : [];
+    const search = normalizeCleanupSearch(panelState?.search);
+    const status = panelState?.status || 'all';
+    const reason = panelState?.reason || 'all';
+    const sort = panelState?.sort || 'score_desc';
+    return list
+      .filter((item) => cleanupItemMatchesSearch(item, search))
+      .filter((item) => cleanupItemMatchesStatus(item, status, kind))
+      .filter((item) => cleanupItemMatchesReason(item, reason))
+      .sort((a, b) => compareCleanupPlannerItems(a, b, sort));
+  }
+
+  function paginateCleanupPlannerItems(items, page, pageSize) {
+    const totalItems = Array.isArray(items) ? items.length : 0;
+    const safePageSize = Math.max(1, Number(pageSize) || CLEANUP_PANEL_FILTER_DEFAULTS.pageSize);
+    const totalPages = Math.max(1, Math.ceil(totalItems / safePageSize));
+    const safePage = Math.min(totalPages, Math.max(1, Number(page) || 1));
+    const start = (safePage - 1) * safePageSize;
+    return {
+      totalItems,
+      totalPages,
+      page: safePage,
+      pageSize: safePageSize,
+      items: Array.isArray(items) ? items.slice(start, start + safePageSize) : [],
+    };
+  }
+
+  function clearCleanupPlannerList(el, emptyText) {
+    if (!el) return;
+    el.textContent = '';
+    const empty = document.createElement('div');
+    empty.className = 'cleanup-empty';
+    empty.textContent = emptyText;
+    el.appendChild(empty);
+  }
+
+  function getCleanupPlanSelectedFollowingItems() {
+    const following = Array.isArray(cleanupPlannerContextPlan?.following) ? cleanupPlannerContextPlan.following : [];
+    return following.filter((item) => cleanupSelectedFollowingKeys.has(item.userKey));
+  }
+
+  function getCleanupZeroSignalFollowingItems() {
+    const following = Array.isArray(cleanupPlannerContextPlan?.following) ? cleanupPlannerContextPlan.following : [];
+    return following.filter((item) => item?.selectable && item.zeroSignal);
+  }
+
+  function getCleanupFollowingPresetFilterState(presetId) {
+    const normalized = String(presetId || 'all').toLowerCase();
+    if (normalized === 'smart_unfollow') {
+      return { preset: 'smart_unfollow', search: '', status: 'actionable', reason: 'smart_unfollow', sort: 'score_desc' };
+    }
+    if (normalized === 'zero_signal') {
+      return { preset: 'zero_signal', search: '', status: 'actionable', reason: 'zero_signal', sort: 'score_desc' };
+    }
+    if (normalized === 'non_mutual') {
+      return { preset: 'non_mutual', search: '', status: 'actionable', reason: 'non_mutual', sort: 'score_desc' };
+    }
+    if (normalized === 'inactive') {
+      return { preset: 'inactive', search: '', status: 'actionable', reason: 'inactive', sort: 'stale_desc' };
+    }
+    if (normalized === 'low_likes') {
+      return { preset: 'low_likes', search: '', status: 'actionable', reason: 'low_likes', sort: 'likes_asc' };
+    }
+    return { preset: 'all', search: '', status: 'all', reason: 'all', sort: 'score_desc' };
+  }
+
+  function getCleanupFollowingPresetCount(presetId) {
+    const items = Array.isArray(cleanupPlannerContextPlan?.following) ? cleanupPlannerContextPlan.following : [];
+    const state = getCleanupFollowingPresetFilterState(presetId);
+    return filterCleanupPlannerItems(items, state, 'following').length;
+  }
+
+  function renderCleanupFollowingQuickFilters() {
+    const currentPreset = String(cleanupPanelState.following?.preset || 'custom').toLowerCase();
+    for (const preset of CLEANUP_FOLLOWING_PRESET_DEFS) {
+      const button = document.querySelector(`[data-cleanup-preset="${preset.id}"]`);
+      if (!button) continue;
+      const count = getCleanupFollowingPresetCount(preset.id);
+      button.textContent = `${preset.label}${count ? ` (${fmtK2OrInt(count)})` : ''}`;
+      button.classList.toggle('active', currentPreset === preset.id);
+      button.disabled = cleanupBulkActionBusy || (!count && preset.id !== 'all');
+    }
+  }
+
+  function applyCleanupFollowingPreset(presetId) {
+    const nextState = cleanupPanelState.following;
+    if (!nextState) return;
+    const presetState = getCleanupFollowingPresetFilterState(presetId);
+    Object.assign(nextState, presetState, {
+      page: 1,
+      pageSize: Number(nextState.pageSize) || CLEANUP_PANEL_FILTER_DEFAULTS.pageSize,
+    });
+    cleanupBulkActionMessage = '';
+    cleanupBulkActionTone = 'muted';
+    renderCleanupPlannerPanels();
+  }
+
+  function syncCleanupPanelControls(kind) {
+    const panel = getCleanupPanelElements(kind);
+    const state = cleanupPanelState[kind];
+    if (!panel || !state) return;
+    if (panel.search && panel.search.value !== state.search) panel.search.value = state.search;
+    if (panel.status && panel.status.value !== state.status) panel.status.value = state.status;
+    if (panel.reason && panel.reason.value !== state.reason) panel.reason.value = state.reason;
+    if (panel.sort && panel.sort.value !== state.sort) panel.sort.value = state.sort;
+    if (panel.pageSize && String(panel.pageSize.value) !== String(state.pageSize)) panel.pageSize.value = String(state.pageSize);
+  }
+
+  function setCleanupBulkActionMessage(message, tone = 'muted') {
+    cleanupBulkActionMessage = message || '';
+    cleanupBulkActionTone = tone || 'muted';
+    const note = getCleanupPanelElements('following').note;
+    if (!note) return;
+    note.textContent = cleanupBulkActionMessage || CLEANUP_ZERO_SIGNAL_HINT;
+    note.classList.remove('cleanup-panel-note--success', 'cleanup-panel-note--warn', 'cleanup-panel-note--danger');
+    if (cleanupBulkActionTone === 'success') note.classList.add('cleanup-panel-note--success');
+    else if (cleanupBulkActionTone === 'warn') note.classList.add('cleanup-panel-note--warn');
+    else if (cleanupBulkActionTone === 'danger') note.classList.add('cleanup-panel-note--danger');
+  }
+
+  function renderCleanupPlannerItems(kind, listEl, items, emptyText) {
+    if (!listEl) return;
+    listEl.textContent = '';
+    if (!Array.isArray(items) || !items.length) {
+      clearCleanupPlannerList(listEl, emptyText);
+      return;
+    }
+    const allowSelection = kind === 'following';
+    const frag = document.createDocumentFragment();
+    for (const item of items) {
+      const row = document.createElement('div');
+      row.className = `cleanup-item${allowSelection ? ' cleanup-item--selectable' : ''}`;
+
+      const head = document.createElement('div');
+      head.className = 'cleanup-item-head';
+
+      const headMain = document.createElement('div');
+      headMain.className = 'cleanup-item-head-main';
+
+      if (allowSelection) {
+        const selector = document.createElement('label');
+        selector.className = 'cleanup-item-select';
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.checked = cleanupSelectedFollowingKeys.has(item.userKey);
+        checkbox.disabled = cleanupBulkActionBusy || !item.selectable;
+        checkbox.setAttribute('aria-label', item.userHandle ? `Select @${item.userHandle}` : `Select ${item.userKey}`);
+        checkbox.addEventListener('change', () => {
+          if (checkbox.checked) cleanupSelectedFollowingKeys.add(item.userKey);
+          else cleanupSelectedFollowingKeys.delete(item.userKey);
+          renderCleanupPlannerPanels();
+        });
+        selector.appendChild(checkbox);
+        headMain.appendChild(selector);
+      }
+
+      const identity = document.createElement('div');
+      identity.className = 'cleanup-item-identity';
+
+      const link = document.createElement('a');
+      link.className = 'cleanup-item-link';
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.href = item.permalink || (item.userHandle ? `${SITE_ORIGIN}/profile/${encodeURIComponent(item.userHandle)}` : '#');
+      link.textContent = item.userHandle ? `@${item.userHandle}` : (item.displayName || item.userKey);
+      identity.appendChild(link);
+
+      if (item.displayName && item.displayName !== item.userHandle) {
+        const name = document.createElement('div');
+        name.className = 'cleanup-item-name';
+        name.textContent = item.displayName;
+        identity.appendChild(name);
+      }
+
+      headMain.appendChild(identity);
+
+      const score = document.createElement('div');
+      score.className = 'cleanup-item-score';
+      score.textContent = `Score ${item.score}`;
+
+      head.appendChild(headMain);
+      head.appendChild(score);
+
+      const meta = document.createElement('div');
+      meta.className = 'cleanup-item-meta';
+      const metaBits = [];
+      if (item.followerCount != null) metaBits.push(`${fmtK2OrInt(item.followerCount)} followers`);
+      if (item.postCount != null) metaBits.push(`${fmtK2OrInt(item.postCount)} posts`);
+      if (item.likesReceivedCount != null) metaBits.push(`${fmtK2OrInt(item.likesReceivedCount)} likes received`);
+      if (item.inactiveDays != null) metaBits.push(item.inactiveDays > 0 ? `${item.inactiveDays}d since update` : 'active recently');
+      meta.textContent = metaBits.join(' • ');
+
+      const badges = document.createElement('div');
+      badges.className = 'cleanup-item-badges';
+      for (const reason of item.reasons || []) {
+        const badge = document.createElement('span');
+        badge.className = `cleanup-badge cleanup-badge--${reason.tone || 'soft'}`;
+        badge.textContent = reason.label;
+        badges.appendChild(badge);
+      }
+
+      const recommendation = document.createElement('div');
+      recommendation.className = 'cleanup-item-recommendation';
+      recommendation.textContent = item.recommendation;
+
+      row.appendChild(head);
+      row.appendChild(meta);
+      if (badges.childNodes.length) row.appendChild(badges);
+      row.appendChild(recommendation);
+
+      if (allowSelection) {
+        const actions = document.createElement('div');
+        actions.className = 'cleanup-item-actions';
+        const note = document.createElement('div');
+        note.className = 'cleanup-item-action-note';
+        note.textContent = item.nonMutual ? 'Non-mutual following candidate' : 'Following account';
+        actions.appendChild(note);
+        row.appendChild(actions);
+      }
+
+      frag.appendChild(row);
+    }
+    listEl.appendChild(frag);
+  }
+
+  function renderCleanupPlannerPanel(kind, items, emptyText) {
+    const panel = getCleanupPanelElements(kind);
+    if (!panel.list) return;
+    syncCleanupPanelControls(kind);
+    const filtered = filterCleanupPlannerItems(items, cleanupPanelState[kind], kind);
+    const pagination = paginateCleanupPlannerItems(filtered, cleanupPanelState[kind].page, cleanupPanelState[kind].pageSize);
+    cleanupPanelState[kind].page = pagination.page;
+
+    if (panel.meta) {
+      const selectedText = kind === 'following'
+        ? ` • ${fmtK2OrInt(getCleanupPlanSelectedFollowingItems().length)} selected`
+        : '';
+      panel.meta.textContent = `${fmtK2OrInt(filtered.length)} matches of ${fmtK2OrInt(Array.isArray(items) ? items.length : 0)}${selectedText}`;
+    }
+    if (panel.pagination) {
+      panel.pagination.textContent = `Page ${pagination.page} of ${pagination.totalPages}`;
+    }
+    if (panel.prev) panel.prev.disabled = pagination.page <= 1;
+    if (panel.next) panel.next.disabled = pagination.page >= pagination.totalPages;
+
+    renderCleanupPlannerItems(kind, panel.list, pagination.items, emptyText);
+  }
+
+  function renderCleanupPlannerPanels() {
+    const followingItems = Array.isArray(cleanupPlannerContextPlan?.following) ? cleanupPlannerContextPlan.following : [];
+    const followerItems = Array.isArray(cleanupPlannerContextPlan?.followers) ? cleanupPlannerContextPlan.followers : [];
+    cleanupSelectedFollowingKeys.forEach((userKey) => {
+      if (!followingItems.some((item) => item.userKey === userKey)) cleanupSelectedFollowingKeys.delete(userKey);
+    });
+    renderCleanupPlannerPanel('following', followingItems, 'No strong unfollow candidates yet. Try tightening the thresholds or collecting more Following rows.');
+    renderCleanupPlannerPanel('followers', followerItems, 'No low-signal followers surfaced yet. This list is review-only until follower removal is wired safely.');
+    renderCleanupFollowingQuickFilters();
+    const followingPanel = getCleanupPanelElements('following');
+    const selectedCount = getCleanupPlanSelectedFollowingItems().length;
+    const zeroSignalCount = getCleanupZeroSignalFollowingItems().length;
+    if (followingPanel.note && !cleanupBulkActionMessage) {
+      followingPanel.note.textContent = selectedCount
+        ? `${fmtK2OrInt(selectedCount)} account${selectedCount === 1 ? '' : 's'} selected. Bulk unfollow uses your live Sora tab and the native Following buttons.`
+        : CLEANUP_ZERO_SIGNAL_HINT;
+      followingPanel.note.classList.remove('cleanup-panel-note--success', 'cleanup-panel-note--warn', 'cleanup-panel-note--danger');
+    }
+    const zeroSignalBtn = $('#cleanupSelectFollowingZeroSignal');
+    if (zeroSignalBtn) {
+      zeroSignalBtn.disabled = cleanupBulkActionBusy || zeroSignalCount === 0;
+      zeroSignalBtn.title = zeroSignalCount
+        ? `Select all ${fmtK2OrInt(zeroSignalCount)} non-mutual follows with 0 followers, 0 posts, 0 likes, and stale activity.`
+        : 'No zero-signal following accounts match the current graph.';
+    }
+    const unfollowBtn = $('#cleanupUnfollowSelected');
+    if (unfollowBtn) unfollowBtn.disabled = cleanupBulkActionBusy || selectedCount === 0;
+  }
+
+  function updateCleanupPlanner(userKey, user) {
+    const note = $('#cleanupPlannerNote');
+    const followersCaptured = $('#cleanupFollowersCaptured');
+    const followingCaptured = $('#cleanupFollowingCaptured');
+    const mutualCaptured = $('#cleanupMutualCaptured');
+    const likelyCount = $('#cleanupLikelyCount');
+    const followerReviewCount = $('#cleanupFollowerReviewCount');
+    const followingList = $('#cleanupFollowingList');
+    const followersList = $('#cleanupFollowersList');
+    if (!note || !followersCaptured || !followingCaptured || !mutualCaptured || !likelyCount || !followerReviewCount || !followingList || !followersList) return;
+
+    const contextChanged = cleanupPlannerContextKey !== userKey;
+    cleanupPlannerContextKey = userKey || null;
+    cleanupPlannerContextUser = user || null;
+    cleanupPlannerContextPlan = null;
+    if (contextChanged) {
+      cleanupSelectedFollowingKeys.clear();
+      resetCleanupPanelState();
+      cleanupBulkActionMessage = '';
+      cleanupBulkActionTone = 'muted';
+    }
+
+    if (!userKey || !user || isVirtualUserKey(userKey)) {
+      cleanupPlannerContextPlan = { summary: {}, following: [], followers: [] };
+      note.textContent = 'Open a profile on Sora, then open the Followers or Following modal to collect relationship data for cleanup planning.';
+      followersCaptured.textContent = '0';
+      followingCaptured.textContent = '0';
+      mutualCaptured.textContent = '0';
+      likelyCount.textContent = '0';
+      followerReviewCount.textContent = '0';
+      setCleanupBulkActionMessage('', 'muted');
+      renderCleanupPlannerPanels();
+      return;
+    }
+
+    const plan = buildCleanupPlannerModel(user, getCleanupPlannerOptions());
+    cleanupPlannerContextPlan = plan;
+    followersCaptured.textContent = fmtK2OrInt(plan.summary.followersCaptured);
+    followingCaptured.textContent = fmtK2OrInt(plan.summary.followingCaptured);
+    mutualCaptured.textContent = fmtK2OrInt(plan.summary.mutualCount);
+    likelyCount.textContent = fmtK2OrInt(plan.summary.unfollowLikelyCount);
+    followerReviewCount.textContent = fmtK2OrInt(plan.summary.lowSignalFollowersCount);
+
+    const label = getGatherDisplayName(userKey, user);
+    if (plan.summary.followersCaptured === 0 && plan.summary.followingCaptured === 0) {
+      note.textContent = `No cleanup graph captured for ${label} yet. Open the Followers or Following modal on Sora and scroll through accounts to collect it.`;
+    } else if (plan.summary.followingCaptured === 0) {
+      note.textContent = `Captured ${fmtK2OrInt(plan.summary.followersCaptured)} followers for ${label}. Open the Following tab too if you want unfollow recommendations.`;
+    } else if (plan.summary.followersCaptured === 0) {
+      note.textContent = `Captured ${fmtK2OrInt(plan.summary.followingCaptured)} following accounts for ${label}. Open the Followers tab too to improve mutual detection.`;
+    } else {
+      note.textContent = `Captured ${fmtK2OrInt(plan.summary.followersCaptured)} followers and ${fmtK2OrInt(plan.summary.followingCaptured)} following accounts for ${label}.`;
+    }
+    renderCleanupPlannerPanels();
+  }
+
+  function getCleanupPanelFilteredItems(kind) {
+    const items = Array.isArray(cleanupPlannerContextPlan?.[kind]) ? cleanupPlannerContextPlan[kind] : [];
+    return filterCleanupPlannerItems(items, cleanupPanelState[kind], kind);
+  }
+
+  function getCleanupPanelPageItems(kind) {
+    const filtered = getCleanupPanelFilteredItems(kind);
+    return paginateCleanupPlannerItems(filtered, cleanupPanelState[kind].page, cleanupPanelState[kind].pageSize).items;
+  }
+
+  function setCleanupPanelPage(kind, nextPage) {
+    if (!cleanupPanelState[kind]) return;
+    cleanupPanelState[kind].page = Math.max(1, Number(nextPage) || 1);
+    renderCleanupPlannerPanels();
+  }
+
+  function selectCleanupFollowingItems(mode = 'page') {
+    const items = mode === 'filtered' ? getCleanupPanelFilteredItems('following') : getCleanupPanelPageItems('following');
+    for (const item of items) {
+      if (item?.selectable) cleanupSelectedFollowingKeys.add(item.userKey);
+    }
+    cleanupBulkActionMessage = '';
+    cleanupBulkActionTone = 'muted';
+    renderCleanupPlannerPanels();
+  }
+
+  function selectCleanupZeroSignalFollowingItems() {
+    const items = getCleanupZeroSignalFollowingItems();
+    if (!items.length) {
+      setCleanupBulkActionMessage('No zero-signal following accounts are available to select yet.', 'warn');
+      renderCleanupPlannerPanels();
+      return;
+    }
+    for (const item of items) cleanupSelectedFollowingKeys.add(item.userKey);
+    setCleanupBulkActionMessage(
+      `Selected ${fmtK2OrInt(items.length)} zero-signal account${items.length === 1 ? '' : 's'} with 0 followers, 0 posts, 0 likes, and stale activity.`,
+      'warn'
+    );
+    renderCleanupPlannerPanels();
+  }
+
+  function clearCleanupFollowingSelection() {
+    cleanupSelectedFollowingKeys.clear();
+    cleanupBulkActionMessage = '';
+    cleanupBulkActionTone = 'muted';
+    renderCleanupPlannerPanels();
+  }
+
+  function sendCleanupTabAction(message) {
+    return new Promise((resolve) => {
+      try {
+        // Let the background worker choose the best Sora tab/profile target instead
+        // of guessing from the first matching tab in the dashboard page.
+        chrome.runtime.sendMessage(message, (response) => {
+          if (chrome.runtime.lastError) {
+            resolve({ ok: false, error: chrome.runtime.lastError.message || 'Could not start the cleanup request.' });
+            return;
+          }
+          resolve(response && typeof response === 'object' ? response : { ok: false, error: 'No response from the cleanup request.' });
+        });
+      } catch (err) {
+        resolve({ ok: false, error: err?.message || 'Could not send the cleanup request.' });
+      }
+    });
+  }
+
+  function createCleanupBulkResultWaiter(requestId, timeoutMs = 180000) {
+    let done = false;
+    let timer = null;
+    let onMessage = null;
+    let resolvePromise = null;
+    const finish = (payload) => {
+      if (done) return;
+      done = true;
+      try { clearTimeout(timer); } catch {}
+      if (onMessage) {
+        try { chrome.runtime.onMessage.removeListener(onMessage); } catch {}
+      }
+      if (typeof resolvePromise === 'function') {
+        resolvePromise(payload && typeof payload === 'object' ? payload : { ok: false, error: 'No bulk unfollow result payload.' });
+      }
+    };
+    const promise = new Promise((resolve) => {
+      resolvePromise = resolve;
+      onMessage = (message) => {
+        if (!message || message.action !== 'cleanup_bulk_unfollow_result' || message.requestId !== requestId) return false;
+        finish(message.payload);
+        return false;
+      };
+      try {
+        chrome.runtime.onMessage.addListener(onMessage);
+      } catch (err) {
+        finish({ ok: false, error: err?.message || 'Could not listen for the cleanup result.' });
+        return;
+      }
+      timer = setTimeout(() => {
+        finish({ ok: false, error: 'Timed out waiting for Sora to finish the bulk unfollow action.' });
+      }, Math.max(1000, Number(timeoutMs) || 0));
+    });
+    return {
+      promise,
+      cancel(payload) {
+        finish(payload || { ok: false, error: 'Bulk unfollow did not finish.' });
+      },
+    };
+  }
+
+  async function runCleanupBulkUnfollow() {
+    if (cleanupBulkActionBusy) return;
+    const selectedItems = getCleanupPlanSelectedFollowingItems().filter((item) => item?.selectable);
+    if (!selectedItems.length) {
+      showToast('Select at least one following account first.');
+      return;
+    }
+    if (selectedItems.length > CLEANUP_BULK_UNFOLLOW_LIMIT) {
+      setCleanupBulkActionMessage(`Select ${CLEANUP_BULK_UNFOLLOW_LIMIT} accounts or fewer per bulk unfollow run.`, 'warn');
+      renderCleanupPlannerPanels();
+      return;
+    }
+    const profileHandle = getProfileHandleFromKey(cleanupPlannerContextKey, cleanupPlannerContextUser);
+    const label = getGatherDisplayName(cleanupPlannerContextKey, cleanupPlannerContextUser);
+    const confirmText = `Unfollow ${selectedItems.length} selected account${selectedItems.length === 1 ? '' : 's'} for ${label}?\n\nThis uses your live Sora tab and the native Following buttons.`;
+    if (!confirm(confirmText)) return;
+
+    cleanupBulkActionBusy = true;
+    setCleanupBulkActionMessage(`Preparing to unfollow ${selectedItems.length} selected account${selectedItems.length === 1 ? '' : 's'}...`, 'warn');
+    renderCleanupPlannerPanels();
+
+    const requestId = `cleanup:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+    const waiter = createCleanupBulkResultWaiter(requestId);
+    const startResponse = await sendCleanupTabAction({
+      action: 'cleanup_bulk_unfollow',
+      requestId,
+      profileHandle,
+      userKey: cleanupPlannerContextKey,
+      targets: selectedItems.map((item) => ({
+        userKey: item.userKey,
+        userHandle: item.userHandle,
+        permalink: item.permalink || null,
+      })),
+    });
+
+    if (!startResponse?.ok) {
+      waiter.cancel({ ok: false, error: startResponse?.error || 'Bulk unfollow failed to start.' });
+      cleanupBulkActionBusy = false;
+      setCleanupBulkActionMessage(startResponse?.error || 'Bulk unfollow failed.', 'danger');
+      renderCleanupPlannerPanels();
+      return;
+    }
+
+    if (startResponse?.started !== true) {
+      waiter.cancel({ ok: false, error: 'Bulk unfollow did not start.' });
+      cleanupBulkActionBusy = false;
+      setCleanupBulkActionMessage('Bulk unfollow did not start.', 'danger');
+      renderCleanupPlannerPanels();
+      return;
+    }
+
+    const response = await waiter.promise;
+    cleanupBulkActionBusy = false;
+    if (!response?.ok) {
+      setCleanupBulkActionMessage(response?.error || 'Bulk unfollow failed.', 'danger');
+      renderCleanupPlannerPanels();
+      return;
+    }
+
+    const unfollowed = Math.max(0, Number(response?.unfollowed) || 0);
+    const skipped = Math.max(0, Number(response?.skipped) || 0);
+    const missing = Math.max(0, Number(response?.notFound) || 0);
+    cleanupSelectedFollowingKeys.clear();
+    const message = `Unfollowed ${fmtK2OrInt(unfollowed)} account${unfollowed === 1 ? '' : 's'}${skipped ? ` • ${fmtK2OrInt(skipped)} skipped` : ''}${missing ? ` • ${fmtK2OrInt(missing)} not found` : ''}. Harvest Following again to refresh the graph.`;
+    setCleanupBulkActionMessage(message, missing ? 'warn' : 'success');
+    renderCleanupPlannerPanels();
+    showToast(`Unfollowed ${fmtK2OrInt(unfollowed)} account${unfollowed === 1 ? '' : 's'}.`);
+  }
+
+  function bindCleanupPlannerControls() {
+    for (const kind of CLEANUP_PANEL_KINDS) {
+      const panel = getCleanupPanelElements(kind);
+      if (!panel || !cleanupPanelState[kind]) continue;
+      const bindValue = (el, key, parser = (value) => value) => {
+        if (!el || el.dataset.cleanupBound === '1') return;
+        el.dataset.cleanupBound = '1';
+        el.addEventListener('input', () => {
+          const nextState = cleanupPanelState[kind];
+          if (!nextState) return;
+          nextState[key] = parser(el.value);
+          if (kind === 'following' && key !== 'pageSize') nextState.preset = 'custom';
+          nextState.page = 1;
+          cleanupBulkActionMessage = '';
+          cleanupBulkActionTone = 'muted';
+          renderCleanupPlannerPanels();
+        });
+        el.addEventListener('change', () => {
+          const nextState = cleanupPanelState[kind];
+          if (!nextState) return;
+          nextState[key] = parser(el.value);
+          if (kind === 'following' && key !== 'pageSize') nextState.preset = 'custom';
+          nextState.page = 1;
+          cleanupBulkActionMessage = '';
+          cleanupBulkActionTone = 'muted';
+          renderCleanupPlannerPanels();
+        });
+      };
+      bindValue(panel.search, 'search', (value) => String(value || ''));
+      bindValue(panel.status, 'status', (value) => String(value || 'all'));
+      bindValue(panel.reason, 'reason', (value) => String(value || 'all'));
+      bindValue(panel.sort, 'sort', (value) => String(value || 'score_desc'));
+      bindValue(panel.pageSize, 'pageSize', (value) => Math.max(1, Number(value) || CLEANUP_PANEL_FILTER_DEFAULTS.pageSize));
+      if (panel.prev && panel.prev.dataset.cleanupBound !== '1') {
+        panel.prev.dataset.cleanupBound = '1';
+        panel.prev.addEventListener('click', () => setCleanupPanelPage(kind, cleanupPanelState[kind].page - 1));
+      }
+      if (panel.next && panel.next.dataset.cleanupBound !== '1') {
+        panel.next.dataset.cleanupBound = '1';
+        panel.next.addEventListener('click', () => setCleanupPanelPage(kind, cleanupPanelState[kind].page + 1));
+      }
+    }
+
+    const selectPageBtn = $('#cleanupSelectFollowingPage');
+    if (selectPageBtn && selectPageBtn.dataset.cleanupBound !== '1') {
+      selectPageBtn.dataset.cleanupBound = '1';
+      selectPageBtn.addEventListener('click', () => selectCleanupFollowingItems('page'));
+    }
+    const selectFilteredBtn = $('#cleanupSelectFollowingFiltered');
+    if (selectFilteredBtn && selectFilteredBtn.dataset.cleanupBound !== '1') {
+      selectFilteredBtn.dataset.cleanupBound = '1';
+      selectFilteredBtn.addEventListener('click', () => selectCleanupFollowingItems('filtered'));
+    }
+    for (const button of document.querySelectorAll('[data-cleanup-preset]')) {
+      if (button.dataset.cleanupBound === '1') continue;
+      button.dataset.cleanupBound = '1';
+      button.addEventListener('click', () => applyCleanupFollowingPreset(button.dataset.cleanupPreset || 'all'));
+    }
+    const selectZeroSignalBtn = $('#cleanupSelectFollowingZeroSignal');
+    if (selectZeroSignalBtn && selectZeroSignalBtn.dataset.cleanupBound !== '1') {
+      selectZeroSignalBtn.dataset.cleanupBound = '1';
+      selectZeroSignalBtn.addEventListener('click', selectCleanupZeroSignalFollowingItems);
+    }
+    const clearBtn = $('#cleanupClearFollowingSelection');
+    if (clearBtn && clearBtn.dataset.cleanupBound !== '1') {
+      clearBtn.dataset.cleanupBound = '1';
+      clearBtn.addEventListener('click', clearCleanupFollowingSelection);
+    }
+    const unfollowBtn = $('#cleanupUnfollowSelected');
+    if (unfollowBtn && unfollowBtn.dataset.cleanupBound !== '1') {
+      unfollowBtn.dataset.cleanupBound = '1';
+      unfollowBtn.addEventListener('click', () => {
+        runCleanupBulkUnfollow().catch((err) => {
+          cleanupBulkActionBusy = false;
+          setCleanupBulkActionMessage(err?.message || 'Bulk unfollow failed.', 'danger');
+          renderCleanupPlannerPanels();
+        });
+      });
+    }
+  }
+
+  function getStoredDashboardWorkspace() {
+    try {
+      const value = String(localStorage.getItem(DASHBOARD_WORKSPACE_STORAGE_KEY) || '').trim().toLowerCase();
+      return value === 'cleanup' ? 'cleanup' : 'overview';
+    } catch {
+      return 'overview';
+    }
+  }
+
+  function setDashboardWorkspace(workspace) {
+    const nextWorkspace = workspace === 'cleanup' ? 'cleanup' : 'overview';
+    activeDashboardWorkspace = nextWorkspace;
+    try {
+      localStorage.setItem(DASHBOARD_WORKSPACE_STORAGE_KEY, nextWorkspace);
+    } catch {}
+    document.body.dataset.dashboardWorkspace = nextWorkspace;
+    for (const button of document.querySelectorAll('[data-workspace-target]')) {
+      const isActive = button?.dataset?.workspaceTarget === nextWorkspace;
+      button.classList.toggle('active', !!isActive);
+      button.setAttribute('aria-selected', isActive ? 'true' : 'false');
+      button.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+      button.tabIndex = isActive ? 0 : -1;
+    }
+    for (const panel of document.querySelectorAll('[data-workspace-panel]')) {
+      const isActive = panel?.dataset?.workspacePanel === nextWorkspace;
+      panel.classList.toggle('is-active', !!isActive);
+      panel.hidden = !isActive;
+    }
+  }
+
+  function initDashboardWorkspaces() {
+    const content = document.querySelector('.content');
+    const shell = document.querySelector('.dashboard-workspaces-shell');
+    const overviewPanel = $('#dashboardOverviewWorkspace');
+    const cleanupPanel = $('#dashboardCleanupWorkspace');
+    const cleanupSection = $('#cleanupPlannerSection');
+    if (!content || !shell || !overviewPanel || !cleanupPanel || !cleanupSection) return;
+
+    const directChildren = Array.from(content.children);
+    for (const child of directChildren) {
+      if (child === shell) continue;
+      if (child === cleanupSection) {
+        cleanupPanel.appendChild(child);
+        continue;
+      }
+      overviewPanel.appendChild(child);
+    }
+
+    for (const button of document.querySelectorAll('[data-workspace-target]')) {
+      if (button.dataset.workspaceBound === '1') continue;
+      button.dataset.workspaceBound = '1';
+      button.addEventListener('click', () => {
+        setDashboardWorkspace(button.dataset.workspaceTarget || 'overview');
+      });
+    }
+
+    setDashboardWorkspace(getStoredDashboardWorkspace());
   }
 
   function collectCameoUsernamesFromMetrics(metrics){
@@ -6778,6 +7810,32 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     hoistChartTooltips();
     hoistToBody($('#purgeConfirmDialog'));
     hoistToBody($('#postPurgeConfirm'));
+    initDashboardWorkspaces();
+    bindCleanupPlannerControls();
+    const cleanupInputBindings = [
+      ['#cleanupMaxFollowers', CLEANUP_PLANNER_DEFAULTS.maxFollowers],
+      ['#cleanupMinPosts', CLEANUP_PLANNER_DEFAULTS.minPosts],
+      ['#cleanupMinLikesReceived', CLEANUP_PLANNER_DEFAULTS.minLikesReceived],
+      ['#cleanupStaleDays', CLEANUP_PLANNER_DEFAULTS.staleDays],
+    ];
+    for (const [selector, fallback] of cleanupInputBindings) {
+      const input = $(selector);
+      if (!input) continue;
+      if (!String(input.value || '').trim()) input.value = String(fallback);
+      input.addEventListener('input', () => {
+        CLEANUP_PANEL_KINDS.forEach((kind) => {
+          if (cleanupPanelState[kind]) cleanupPanelState[kind].page = 1;
+        });
+        cleanupBulkActionMessage = '';
+        cleanupBulkActionTone = 'muted';
+        let selectedUser = resolveUserForKey(metrics, currentUserKey);
+        if (!isMetricsPartial && selectedUser && !isVirtualUserKey(currentUserKey)) {
+          const mergedIdentity = buildMergedIdentityUser(metrics, currentUserKey, selectedUser);
+          selectedUser = mergedIdentity?.user || selectedUser;
+        }
+        updateCleanupPlanner(currentUserKey, selectedUser);
+      });
+    }
     const cached = prefetchedCache !== undefined ? prefetchedCache : loadInstantCache();
     const hasBootCache = !!cached;
     if (cached) {
@@ -9379,13 +10437,14 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
             }
           }
         }
-    if (!user){
-      snapLog('refreshUserUI:noUser', { currentUserKey, snapshotsHydrated, isMetricsPartial });
-      updateMetricsHeader(currentUserKey, null);
-      updateMetricsGatherNote(currentUserKey, null);
-      setListActionActive('showAll');
-      currentVisibilitySource = 'showAll';
-      buildPostsList(null, ()=>getPaletteColor(0), new Set());
+	    if (!user){
+	      snapLog('refreshUserUI:noUser', { currentUserKey, snapshotsHydrated, isMetricsPartial });
+	      updateMetricsHeader(currentUserKey, null);
+	      updateMetricsGatherNote(currentUserKey, null);
+	      updateCleanupPlanner(currentUserKey, null);
+	      setListActionActive('showAll');
+	      currentVisibilitySource = 'showAll';
+	      buildPostsList(null, ()=>getPaletteColor(0), new Set());
       chart.setData([]);
       interactionRateStackedChart.setData([]);
       viewsChart.setData([]);
@@ -9399,11 +10458,12 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       return;
     }
         // No precompute needed for IR; use latest available remix count only for cards
-        const colorFor = makeColorMap(user);
-        const isTopToday = isTopTodayKey(currentUserKey);
-        updateMetricsHeader(currentUserKey, user);
-        updateMetricsGatherNote(currentUserKey, user);
-        syncIdentityOptionCounts(currentUserKey, user);
+	        const colorFor = makeColorMap(user);
+	        const isTopToday = isTopTodayKey(currentUserKey);
+	        updateMetricsHeader(currentUserKey, user);
+	        updateMetricsGatherNote(currentUserKey, user);
+	        updateCleanupPlanner(currentUserKey, user);
+	        syncIdentityOptionCounts(currentUserKey, user);
         if (!normalizeFilterAction(currentVisibilitySource)) {
           const sessionAction = getSessionFilterAction();
           currentVisibilitySource = sessionAction;

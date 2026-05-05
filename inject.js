@@ -51,6 +51,7 @@
   const NF_CREATE_RE = /\/backend\/nf\/create/i;
   const NF_PENDING_V2_RE = /\/backend\/nf\/pending\/v2/i;
   const POST_DETAIL_RE = /\/(backend\/project_[a-z]+\/)?posts?\/[^/]+(\/(tree|children|ancestors|remix_posts|remixes))?(\?|$)/i;
+  const RELATIONSHIP_LIST_RE = /\/backend\/project_[a-z]+\/([^/?#]+)\/(followers|following)\/user_listing(?:\?|$)/i;
 
   // Includes <21h (1260 minutes) plus a final special filter
   const FILTER_STEPS_MIN = [null, 180, 360, 720, 900, 1080, 1260, 'no_remixes'];
@@ -90,6 +91,7 @@
   const lockedPostIds = new Set(); // Post IDs whose data should not be overwritten (currently viewed posts)
   const processedPostDetailIds = new Set(); // Post detail responses already applied (avoid late duplicate overwrites)
   const pendingPostDetailIds = new Set(); // Post IDs currently being detail-fetched
+  const profileHandleToUserId = new Map(); // Observed profile handle -> user_id mappings
   let lastPostDetailUrlTemplate = null; // Remember a detail URL pattern to reuse across posts
   const charToOriginalIndex = new Map(); // Store original order from API
   let charGlobalIndexCounter = 0; // Global counter for character order across all API calls
@@ -171,6 +173,38 @@
       ensureUVDraftsPage();
       startUVDraftsTitleGuard();
     }
+  });
+
+  window.addEventListener('message', (ev) => {
+    if (ev?.source !== window) return;
+    const d = ev?.data;
+    if (!d || d.__sora_uv__ !== true || d.type !== 'cleanup_action_request') return;
+    const req = typeof d.req === 'string' ? d.req : '';
+    if (!req) return;
+    if (d.command !== 'bulk_unfollow') {
+      window.postMessage({
+        __sora_uv__: true,
+        type: 'cleanup_action_response',
+        req,
+        payload: { ok: false, error: 'Unknown cleanup action.' },
+      }, '*');
+      return;
+    }
+    handleCleanupActionRequest(d).then((payload) => {
+      window.postMessage({
+        __sora_uv__: true,
+        type: 'cleanup_action_response',
+        req,
+        payload: payload && typeof payload === 'object' ? payload : { ok: false, error: 'No cleanup action payload.' },
+      }, '*');
+    }).catch((err) => {
+      window.postMessage({
+        __sora_uv__: true,
+        type: 'cleanup_action_response',
+        req,
+        payload: { ok: false, error: err?.message || 'Cleanup action failed.' },
+      }, '*');
+    });
   });
 
   function getFallbackUVDraftsDocumentTitle() {
@@ -271,6 +305,9 @@
   let characterSortBtn = null;
   let characterSortMode = 'date'; // 'date', 'likes', 'cameos', 'likesPerDay'
   let charAutoLoadLastAttemptMs = 0;
+  let currentProfilePageHandle = null;
+  let currentProfilePageUserId = null;
+  let cleanupBulkActionInFlight = false;
   let suppressDetailBadgeRender = false; // Flag to prevent renderDetailBadge during bulk processing
   let badgeDataGeneration = 0; // Incremented when new metric data arrives; badges skip re-render when unchanged
   let renderPassInFlight = false; // Suppresses observer-triggered renders while processFeedJson is rendering
@@ -304,6 +341,8 @@
   const ANALYZE_WINDOW_KEY = 'SORA_UV_ANALYZE_WINDOW_H';
   let analyzeWindowHours = Math.min(24, Math.max(1, Number(localStorage.getItem(ANALYZE_WINDOW_KEY) || 24)));
   const ANALYZE_RUN_MS = 6500; // 6.5 seconds
+  const RELATIONSHIP_HARVEST_PAGE_SIZE = 20;
+  const RELATIONSHIP_HARVEST_MAX_PAGES = 150;
 
   // Bookmarks (Drafts page only)
   // 0 = show all, 1 = show bookmarked only, 2 = show unbookmarked only, 3 = violations only
@@ -342,6 +381,11 @@
     if (!Number.isFinite(x)) return '';
     return x.toLocaleString('en-US');
   };
+
+  const waitMs = (ms) =>
+    new Promise((resolve) => {
+      setTimeout(resolve, Math.max(0, Number(ms) || 0));
+    });
 
   function truncateInline(str, max = 140) {
     if (typeof str !== 'string') return '';
@@ -469,6 +513,30 @@
   function currentProfileHandleFromURL() {
     const m = location.pathname.match(/^\/profile\/(?:username\/)?([^\/?#]+)/i);
     return m ? m[1] : null;
+  }
+
+  function rememberObservedProfileIdentity(userHandle, userId) {
+    try {
+      const handle = typeof userHandle === 'string' ? userHandle.trim() : '';
+      const id = userId != null && userId !== '' ? String(userId) : '';
+      if (handle) currentProfilePageHandle = handle;
+      if (id) currentProfilePageUserId = id;
+      if (handle && id) profileHandleToUserId.set(handle.toLowerCase(), id);
+    } catch {}
+  }
+
+  function getCurrentProfilePageHandle() {
+    return currentProfileHandleFromURL() || currentProfilePageHandle || null;
+  }
+
+  function getCurrentProfileSubjectUserId() {
+    try {
+      const routeHandle = currentProfileHandleFromURL();
+      if (routeHandle) {
+        return profileHandleToUserId.get(routeHandle.toLowerCase()) || (currentProfilePageHandle && routeHandle.toLowerCase() === String(currentProfilePageHandle).toLowerCase() ? currentProfilePageUserId : null) || null;
+      }
+    } catch {}
+    return currentProfilePageUserId || null;
   }
 
   // == Data extraction ==
@@ -5539,15 +5607,19 @@ async function renderAnalyzeTable(force = false) {
           res.clone().json().then(processCharactersJson).catch((err) => {
             console.error('[SoraUV] Error parsing characters fetch response:', err);
           });
-        } else if (DRAFTS_RE.test(url)) {
-          decorateDraftsResponse(res);
-          res.clone().json().then(processDraftsJson).catch((err) => {
-            console.error('[SoraUV] Error parsing drafts fetch response:', err);
-          });
-        } else if (FEED_RE.test(url)) {
-          dlog('feed', 'fetch matched', { url });
-          res
-            .clone()
+	        } else if (DRAFTS_RE.test(url)) {
+	          decorateDraftsResponse(res);
+	          res.clone().json().then(processDraftsJson).catch((err) => {
+	            console.error('[SoraUV] Error parsing drafts fetch response:', err);
+	          });
+	        } else if (RELATIONSHIP_LIST_RE.test(url)) {
+	          res.clone().json().then((j) => {
+	            processRelationshipListJson(url, j);
+	          }).catch(() => {});
+	        } else if (FEED_RE.test(url)) {
+	          dlog('feed', 'fetch matched', { url });
+	          res
+	            .clone()
             .json()
             .then((j) => {
               dlog('feed', 'fetch parsed', { url, items: (j?.items || j?.data?.items || []).length });
@@ -5627,16 +5699,20 @@ async function renderAnalyzeTable(force = false) {
               } catch (err) {
                 console.error('[SoraUV] Error parsing characters XHR:', err);
               }
-            } else if (DRAFTS_RE.test(url)) {
-              try {
-                processDraftsJson(JSON.parse(this.responseText));
-              } catch (err) {
-                console.error('[SoraUV] Error parsing drafts XHR:', err);
-              }
-            } else if (FEED_RE.test(url)) {
-              dlog('feed', 'xhr matched', { url });
-              try {
-                const j = JSON.parse(this.responseText);
+	            } else if (DRAFTS_RE.test(url)) {
+	              try {
+	                processDraftsJson(JSON.parse(this.responseText));
+	              } catch (err) {
+	                console.error('[SoraUV] Error parsing drafts XHR:', err);
+	              }
+	            } else if (RELATIONSHIP_LIST_RE.test(url)) {
+	              try {
+	                processRelationshipListJson(url, JSON.parse(this.responseText));
+	              } catch {}
+	            } else if (FEED_RE.test(url)) {
+	              dlog('feed', 'xhr matched', { url });
+	              try {
+	                const j = JSON.parse(this.responseText);
                 dlog('feed', 'xhr parsed', { url, items: (j?.items || j?.data?.items || []).length });
                 processFeedJson(j);
               } catch {}
@@ -5710,9 +5786,121 @@ async function renderAnalyzeTable(force = false) {
     return null;
   }
 
+  function parseRelationshipListMeta(url) {
+    try {
+      const match = String(url || '').match(RELATIONSHIP_LIST_RE);
+      if (!match) return null;
+      const subjectUserId = match[1] ? String(match[1]) : null;
+      const listKind = match[2] ? String(match[2]).toLowerCase() : '';
+      if (!subjectUserId || (listKind !== 'followers' && listKind !== 'following')) return null;
+      return { subjectUserId, listKind };
+    } catch {}
+    return null;
+  }
+
+  function normalizeRelationshipUserKey(userHandle, userId) {
+    try {
+      const handle = typeof userHandle === 'string' ? userHandle.trim() : '';
+      if (handle) return `h:${handle.toLowerCase()}`;
+      if (userId != null && userId !== '') return `id:${String(userId)}`;
+    } catch {}
+    return null;
+  }
+
+  function toFiniteNumberOrNull(value) {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function toBooleanOrNull(value) {
+    return typeof value === 'boolean' ? value : null;
+  }
+
+  function buildRelationshipGraphUser(raw) {
+    try {
+      if (!raw || typeof raw !== 'object') return null;
+      const userHandle = (typeof raw.username === 'string' ? raw.username.trim() : '') || null;
+      const userId = raw.user_id != null ? String(raw.user_id) : null;
+      const userKey = normalizeRelationshipUserKey(userHandle, userId);
+      if (!userKey) return null;
+      return {
+        user_key: userKey,
+        user_handle: userHandle,
+        user_id: userId,
+        display_name: (typeof raw.display_name === 'string' ? raw.display_name.trim() : '') || null,
+        follower_count: toFiniteNumberOrNull(raw.follower_count),
+        following_count: toFiniteNumberOrNull(raw.following_count),
+        post_count: toFiniteNumberOrNull(raw.post_count),
+        reply_count: toFiniteNumberOrNull(raw.reply_count),
+        likes_received_count: toFiniteNumberOrNull(raw.likes_received_count),
+        remix_count: toFiniteNumberOrNull(raw.remix_count),
+        cameo_count: toFiniteNumberOrNull(raw.cameo_count),
+        verified: toBooleanOrNull(raw.verified),
+        plan_type: (typeof raw.plan_type === 'string' ? raw.plan_type.trim() : '') || null,
+        permalink: (typeof raw.permalink === 'string' ? raw.permalink.trim() : '') || null,
+        can_cameo: toBooleanOrNull(raw.can_cameo),
+        created_at: toFiniteNumberOrNull(raw.created_at),
+        updated_at: toFiniteNumberOrNull(raw.updated_at),
+        description: (typeof raw.description === 'string' ? raw.description.trim() : '') || null,
+        location: (typeof raw.location === 'string' ? raw.location.trim() : '') || null,
+        follows_you: toBooleanOrNull(raw.follows_you),
+        is_following: toBooleanOrNull(raw.is_following),
+      };
+    } catch {}
+    return null;
+  }
+
+  function postRelationshipGraphSnapshot(meta, pageHandle, items, options = {}) {
+    try {
+      if (!meta) return;
+      const subjectUserKey = normalizeRelationshipUserKey(pageHandle, meta.subjectUserId);
+      if (!subjectUserKey) return;
+      const normalizedItems = Array.isArray(items) ? items.filter(Boolean) : [];
+      const replace = options?.replace === true;
+      if (!normalizedItems.length && !replace) return;
+      const payload = {
+        list_kind: meta.listKind,
+        items: normalizedItems,
+      };
+      const cursor = typeof options?.cursor === 'string' ? options.cursor : null;
+      if (cursor) payload.cursor = cursor;
+      if (replace) payload.replace = true;
+      window.postMessage({
+        __sora_uv__: true,
+        type: 'metrics_batch',
+        items: [{
+          ts: Date.now(),
+          userKey: subjectUserKey,
+          userHandle: pageHandle || null,
+          userId: meta.subjectUserId,
+          social_graph: payload,
+        }],
+      }, '*');
+    } catch {}
+  }
+
+  function processRelationshipListJson(url, json) {
+    try {
+      const meta = parseRelationshipListMeta(url);
+      if (!meta) return;
+      const pageHandle = isProfile() ? getCurrentProfilePageHandle() : null;
+      rememberObservedProfileIdentity(pageHandle, meta.subjectUserId);
+      const openDialog = findOpenRelationshipDialog();
+      if (openDialog) {
+        openDialog.dataset.soraUvRelationshipSubjectId = meta.subjectUserId;
+        openDialog.dataset.soraUvRelationshipLastListKind = meta.listKind;
+      }
+      const items = Array.isArray(json?.items) ? json.items.map(buildRelationshipGraphUser).filter(Boolean) : [];
+      postRelationshipGraphSnapshot(meta, pageHandle, items, {
+        cursor: typeof json?.cursor === 'string' ? json.cursor : null,
+      });
+    } catch {}
+  }
+
   function queueProfileSnapshot(batch, payload, pageUserHandle, pageUserKey){
     const snap = extractProfileSnapshot(payload, pageUserHandle, pageUserKey);
     if (!snap) return;
+    rememberObservedProfileIdentity(snap.userHandle, snap.userId);
     const base = {
       ts: Date.now(),
       userHandle: snap.userHandle,
@@ -5726,7 +5914,7 @@ async function renderAnalyzeTable(force = false) {
   }
 
   function processProfileJson(json){
-    const pageHandle = isProfile() ? currentProfileHandleFromURL() : null;
+    const pageHandle = isProfile() ? getCurrentProfilePageHandle() : null;
     const pageUserHandle = pageHandle || null;
     const pageUserKey = pageUserHandle ? `h:${pageUserHandle.toLowerCase()}` : 'unknown';
     const batch = [];
@@ -5740,7 +5928,7 @@ async function renderAnalyzeTable(force = false) {
 
   function processFeedJson(json) {
     const items = json?.items || json?.data?.items || [];
-    const pageHandle = isProfile() ? currentProfileHandleFromURL() : null;
+    const pageHandle = isProfile() ? getCurrentProfilePageHandle() : null;
     const pageUserHandle = pageHandle || null;
     const pageUserKey = pageUserHandle ? `h:${pageUserHandle.toLowerCase()}` : 'unknown';
     const batch = [];
@@ -6418,6 +6606,843 @@ async function renderAnalyzeTable(force = false) {
     renderCharacterStats();
   }
 
+  function normalizeRelationshipListKind(value) {
+    return value === 'followers' || value === 'following' ? value : null;
+  }
+
+  function normalizeDialogText(value) {
+    return typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '';
+  }
+
+  function isRelationshipTabSelected(el) {
+    try {
+      if (!el) return false;
+      if (el.getAttribute('aria-selected') === 'true') return true;
+      if (el.getAttribute('aria-pressed') === 'true') return true;
+      const dataState = String(el.getAttribute('data-state') || '').toLowerCase();
+      if (dataState === 'active' || dataState === 'open' || dataState === 'on') return true;
+      if ((el.getAttribute('role') === 'tab' || el.hasAttribute('aria-controls')) && el.getAttribute('tabindex') === '0') return true;
+    } catch {}
+    return false;
+  }
+
+  function getRelationshipTabEntries(dialog) {
+    try {
+      if (!dialog || !dialog.isConnected) return [];
+      const dialogRect = dialog.getBoundingClientRect();
+      const topLimit = dialogRect.top + Math.min(220, Math.max(140, dialogRect.height * 0.3));
+      const seen = new Set();
+      const entries = [];
+      const addEntry = (el, container = null) => {
+        try {
+          if (!(el instanceof HTMLElement) || seen.has(el)) return;
+          const rect = el.getBoundingClientRect();
+          if (rect.width <= 0 || rect.height <= 0 || rect.top > topLimit) return;
+          const text = normalizeDialogText(el.textContent).toLowerCase();
+          if (!text || (!text.includes('followers') && !text.includes('following'))) return;
+          const kind = text.includes('following') ? 'following' : (text.includes('followers') ? 'followers' : null);
+          if (!kind) return;
+          seen.add(el);
+          entries.push({
+            el,
+            kind,
+            top: rect.top,
+            container: container || el.parentElement || null,
+          });
+        } catch {}
+      };
+
+      const tablists = Array.from(dialog.querySelectorAll('[role="tablist"]'))
+        .filter((el) => {
+          try {
+            if (!(el instanceof HTMLElement)) return false;
+            const rect = el.getBoundingClientRect();
+            return rect.width > 0 && rect.height > 0 && rect.top <= topLimit;
+          } catch {}
+          return false;
+        })
+        .sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
+
+      for (const tablist of tablists) {
+        Array.from(tablist.querySelectorAll('[role="tab"], button')).forEach((el) => addEntry(el, tablist));
+      }
+      if (entries.length) {
+        return entries.sort((a, b) => a.top - b.top);
+      }
+
+      Array.from(dialog.querySelectorAll('button, [role="tab"], [aria-selected], [aria-pressed]')).forEach((el) => addEntry(el));
+      return entries.sort((a, b) => a.top - b.top);
+    } catch {}
+    return [];
+  }
+
+  function getRelationshipDialogInfo(dialog) {
+    try {
+      if (!dialog || !dialog.isConnected) return null;
+      const entries = getRelationshipTabEntries(dialog);
+      if (!entries.length) return null;
+
+      const followersEntry = entries
+        .filter((entry) => entry.kind === 'followers')
+        .sort((a, b) => a.top - b.top)[0] || null;
+      const followingEntry = entries
+        .filter((entry) => entry.kind === 'following')
+        .sort((a, b) => a.top - b.top)[0] || null;
+
+      const tabs = {
+        followers: followersEntry?.el || null,
+        following: followingEntry?.el || null,
+      };
+      let selectedKind = entries.find((entry) => isRelationshipTabSelected(entry.el))?.kind || null;
+      if (!selectedKind) {
+        selectedKind = normalizeRelationshipListKind(String(dialog.dataset.soraUvRelationshipLastListKind || '').toLowerCase());
+      }
+      if (!selectedKind) {
+        if (tabs.following && !tabs.followers) selectedKind = 'following';
+        else if (tabs.followers && !tabs.following) selectedKind = 'followers';
+      }
+
+      const anchorEntry = entries.find((entry) => entry.kind === selectedKind) || followersEntry || followingEntry || null;
+      const anchor = anchorEntry?.el || tabs[selectedKind] || tabs.followers || tabs.following;
+      return {
+        selectedKind,
+        tabs,
+        headerContainer: anchorEntry?.container || anchor?.parentElement || dialog,
+      };
+    } catch {}
+    return null;
+  }
+
+  function findOpenRelationshipDialog() {
+    const dialogs = Array.from(document.querySelectorAll('div[role="dialog"][data-state="open"], div[role="dialog"]'));
+    for (const dialog of dialogs) {
+      if (getRelationshipDialogInfo(dialog)) return dialog;
+    }
+    return null;
+  }
+
+  function resolveRelationshipDialog(dialog) {
+    try {
+      const info = getRelationshipDialogInfo(dialog);
+      if (info) return { dialog, info };
+    } catch {}
+    try {
+      const liveDialog = findOpenRelationshipDialog();
+      if (liveDialog) {
+        const info = getRelationshipDialogInfo(liveDialog);
+        if (info) return { dialog: liveDialog, info };
+      }
+    } catch {}
+    return { dialog, info: null };
+  }
+
+  function countRelationshipRows(dialog) {
+    try {
+      const hrefs = new Set();
+      dialog.querySelectorAll('a[href^="/profile/"]').forEach((link) => {
+        const href = typeof link.getAttribute === 'function' ? link.getAttribute('href') || '' : '';
+        if (href) hrefs.add(href);
+      });
+      return hrefs.size;
+    } catch {}
+    return 0;
+  }
+
+  function findRelationshipListScroller(dialog) {
+    try {
+      const firstLink = dialog.querySelector('a[href^="/profile/"]');
+      let node = firstLink?.parentElement || null;
+      while (node && node !== dialog) {
+        try {
+          const style = getComputedStyle(node);
+          if (node.scrollHeight > node.clientHeight + 4 && (style.overflowY === 'auto' || style.overflowY === 'scroll')) {
+            return node;
+          }
+        } catch {}
+        node = node.parentElement;
+      }
+
+      const explicitScroller = dialog.querySelector('.overflow-y-auto');
+      if (explicitScroller && explicitScroller.scrollHeight > explicitScroller.clientHeight + 4) return explicitScroller;
+
+      const descendants = Array.from(dialog.querySelectorAll('*'));
+      for (const el of descendants) {
+        try {
+          if (!(el instanceof HTMLElement)) continue;
+          const style = getComputedStyle(el);
+          if (el.scrollHeight > el.clientHeight + 4 && (style.overflowY === 'auto' || style.overflowY === 'scroll')) {
+            return el;
+          }
+        } catch {}
+      }
+    } catch {}
+    return null;
+  }
+
+  function waitForRelationshipRowCountChange(dialog, prevCount, timeoutMs) {
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (count) => {
+        if (done) return;
+        done = true;
+        try {
+          obs.disconnect();
+        } catch {}
+        try {
+          clearTimeout(timer);
+        } catch {}
+        resolve(count);
+      };
+      const obs = new MutationObserver(() => {
+        try {
+          const next = countRelationshipRows(dialog);
+          if (next !== prevCount) finish(next);
+        } catch {}
+      });
+      try {
+        obs.observe(dialog, { childList: true, subtree: true });
+      } catch {}
+      const timer = setTimeout(() => finish(countRelationshipRows(dialog)), timeoutMs);
+    });
+  }
+
+  async function waitForRelationshipListScroller(dialog, timeoutMs = 12000) {
+    const deadline = Date.now() + Math.max(1000, Number(timeoutMs) || 0);
+    while (Date.now() < deadline) {
+      const scroller = findRelationshipListScroller(dialog);
+      if (scroller) return scroller;
+      await waitMs(150);
+    }
+    return findRelationshipListScroller(dialog);
+  }
+
+  function setRelationshipHarvestStatus(dialog, text, tone = 'muted') {
+    try {
+      const liveDialog = resolveRelationshipDialog(dialog)?.dialog || dialog;
+      const statusEl = liveDialog?.querySelector('.sora-uv-relationship-harvest-status');
+      if (!statusEl) return;
+      statusEl.textContent = text || '';
+      const colors = {
+        muted: 'rgba(255,255,255,0.68)',
+        busy: '#facc15',
+        success: '#86efac',
+        warn: '#fde68a',
+        danger: '#fca5a5',
+      };
+      statusEl.style.color = colors[tone] || colors.muted;
+    } catch {}
+  }
+
+  function setRelationshipHarvestButtonsBusy(dialog, busy) {
+    try {
+      const liveDialog = resolveRelationshipDialog(dialog)?.dialog || dialog;
+      liveDialog?.querySelectorAll('.sora-uv-relationship-harvest-btn').forEach((btn) => {
+        btn.disabled = !!busy;
+        btn.style.opacity = busy ? '0.6' : '1';
+        btn.style.cursor = busy ? 'wait' : 'pointer';
+      });
+    } catch {}
+  }
+
+  function buildRelationshipListUrl(subjectUserId, listKind, cursor) {
+    const url = new URL(`${location.origin}/backend/project_y/${encodeURIComponent(String(subjectUserId || ''))}/${listKind}/user_listing`);
+    url.searchParams.set('limit', String(RELATIONSHIP_HARVEST_PAGE_SIZE));
+    if (cursor) url.searchParams.set('cursor', cursor);
+    return url.toString();
+  }
+
+  function resolveRelationshipSubjectUserId(dialog) {
+    const dialogValue = dialog?.dataset?.soraUvRelationshipSubjectId;
+    if (dialogValue) return dialogValue;
+    return getCurrentProfileSubjectUserId();
+  }
+
+  async function waitForRelationshipSubjectUserId(dialog, timeoutMs = 1600) {
+    const deadline = Date.now() + Math.max(250, Number(timeoutMs) || 0);
+    while (Date.now() < deadline) {
+      const subjectUserId = resolveRelationshipSubjectUserId(dialog);
+      if (subjectUserId) return subjectUserId;
+      await waitMs(120);
+    }
+    return resolveRelationshipSubjectUserId(dialog);
+  }
+
+  async function fetchRelationshipListPage(subjectUserId, listKind, cursor) {
+    const headers = { Accept: 'application/json' };
+    if (capturedAuthToken) headers.Authorization = capturedAuthToken;
+    return fetch(buildRelationshipListUrl(subjectUserId, listKind, cursor), {
+      method: 'GET',
+      credentials: 'include',
+      cache: 'no-store',
+      headers,
+    });
+  }
+
+  async function harvestRelationshipListViaApi(dialog, listKind) {
+    const subjectUserId = await waitForRelationshipSubjectUserId(dialog, 1800);
+    if (!subjectUserId) throw new Error('Profile id not ready for API harvesting yet.');
+    const pageHandle = isProfile() ? getCurrentProfilePageHandle() : null;
+    const harvestMeta = { subjectUserId, listKind };
+
+    let cursor = null;
+    let pageCount = 0;
+    let totalItems = 0;
+    const seenCursors = new Set();
+    const harvestedItems = new Map();
+
+    while (pageCount < RELATIONSHIP_HARVEST_MAX_PAGES) {
+      setRelationshipHarvestStatus(dialog, `Harvesting ${listKind} via API… page ${pageCount + 1}`, 'busy');
+      const res = await fetchRelationshipListPage(subjectUserId, listKind, cursor);
+      if (!res.ok) throw new Error(`API returned ${res.status} for ${listKind}.`);
+      const json = await res.json();
+      const rawItems = Array.isArray(json?.items) ? json.items : [];
+      const items = rawItems.map(buildRelationshipGraphUser).filter(Boolean);
+      totalItems += items.length;
+      for (const item of items) {
+        if (item?.user_key) harvestedItems.set(item.user_key, item);
+      }
+      pageCount += 1;
+      dialog.dataset.soraUvRelationshipSubjectId = subjectUserId;
+      dialog.dataset.soraUvRelationshipLastListKind = listKind;
+
+      const nextCursor = typeof json?.cursor === 'string' && json.cursor ? json.cursor : null;
+      if (!nextCursor || rawItems.length === 0 || seenCursors.has(nextCursor)) break;
+      seenCursors.add(nextCursor);
+      cursor = nextCursor;
+      await waitMs(140);
+    }
+
+    postRelationshipGraphSnapshot(harvestMeta, pageHandle, Array.from(harvestedItems.values()), {
+      replace: true,
+    });
+
+    return { mode: 'api', listKind, totalItems, pageCount };
+  }
+
+  async function harvestRelationshipListViaScroll(dialog, listKind) {
+    const scroller = findRelationshipListScroller(dialog);
+    if (!scroller) throw new Error('Could not find a scrollable follower list.');
+
+    const startTop = scroller.scrollTop;
+    let prevCount = countRelationshipRows(dialog);
+    let stableRounds = 0;
+
+    for (let i = 0; i < 36; i++) {
+      if (!dialog.isConnected) break;
+      setRelationshipHarvestStatus(dialog, `Harvesting ${listKind} by scrolling… ${fmtInt(prevCount)} rows`, 'busy');
+      const prevTop = scroller.scrollTop;
+      scroller.scrollTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight - 1);
+      scroller.scrollTop = scroller.scrollHeight;
+      if (scroller.scrollTop === prevTop) {
+        scroller.scrollTop = Math.max(0, prevTop - 1);
+        scroller.scrollTop = scroller.scrollHeight;
+      }
+      try {
+        scroller.dispatchEvent(new Event('scroll'));
+      } catch {}
+
+      const nextCount = await waitForRelationshipRowCountChange(dialog, prevCount, 1400);
+      if (nextCount > prevCount) {
+        prevCount = nextCount;
+        stableRounds = 0;
+        continue;
+      }
+      stableRounds += 1;
+      if (stableRounds >= 3) break;
+    }
+
+    scroller.scrollTop = startTop;
+    return { mode: 'scroll', listKind, totalItems: prevCount, pageCount: null };
+  }
+
+  function clickRelationshipTab(tab) {
+    try {
+      if (!(tab instanceof HTMLElement)) return false;
+      try {
+        tab.focus({ preventScroll: true });
+      } catch {}
+      try {
+        tab.click();
+        return true;
+      } catch {}
+      try {
+        tab.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, composed: true, view: window }));
+        return true;
+      } catch {}
+    } catch {}
+    return false;
+  }
+
+  async function switchRelationshipDialogTab(dialog, listKind) {
+    let resolved = resolveRelationshipDialog(dialog);
+    let liveDialog = resolved.dialog || dialog;
+    let info = resolved.info || getRelationshipDialogInfo(liveDialog);
+    if (!info) return false;
+    if (info.selectedKind === listKind) {
+      try {
+        liveDialog.dataset.soraUvRelationshipLastListKind = listKind;
+      } catch {}
+      try {
+        dialog.dataset.soraUvRelationshipLastListKind = listKind;
+      } catch {}
+      return true;
+    }
+
+    const target = info.tabs[listKind];
+    if (!target) return false;
+
+    const prevCount = countRelationshipRows(liveDialog);
+    if (!clickRelationshipTab(target)) return false;
+
+    for (let i = 0; i < 48; i++) {
+      await waitMs(160);
+      resolved = resolveRelationshipDialog(liveDialog);
+      liveDialog = resolved.dialog || liveDialog || dialog;
+      const nextInfo = resolved.info || getRelationshipDialogInfo(liveDialog);
+      const nextTarget = nextInfo?.tabs?.[listKind] || null;
+      if (nextInfo?.selectedKind === listKind || isRelationshipTabSelected(nextTarget)) {
+        try {
+          liveDialog.dataset.soraUvRelationshipLastListKind = listKind;
+        } catch {}
+        try {
+          dialog.dataset.soraUvRelationshipLastListKind = listKind;
+        } catch {}
+        return true;
+      }
+      const rememberedKind = normalizeRelationshipListKind(String(
+        liveDialog?.dataset?.soraUvRelationshipLastListKind || dialog?.dataset?.soraUvRelationshipLastListKind || ''
+      ).toLowerCase());
+      if (rememberedKind === listKind) return true;
+      if (i >= 4 && countRelationshipRows(liveDialog) !== prevCount) return true;
+      if (i === 8 && nextTarget) {
+        clickRelationshipTab(nextTarget);
+      }
+    }
+    return false;
+  }
+
+  async function harvestRelationshipListHybrid(dialog, listKind) {
+    try {
+      return await harvestRelationshipListViaApi(dialog, listKind);
+    } catch (apiErr) {
+      setRelationshipHarvestStatus(dialog, `API harvest for ${listKind} failed, falling back to scroll…`, 'warn');
+      const scrollResult = await harvestRelationshipListViaScroll(dialog, listKind);
+      scrollResult.apiError = apiErr?.message || String(apiErr || '');
+      return scrollResult;
+    }
+  }
+
+  async function harvestRelationshipDialog(dialog, scope) {
+    try {
+      if (!dialog || !dialog.isConnected) return;
+      if (dialog.dataset.soraUvRelationshipHarvestRunning === '1') return;
+      dialog.dataset.soraUvRelationshipHarvestRunning = '1';
+      setRelationshipHarvestButtonsBusy(dialog, true);
+
+      const info = getRelationshipDialogInfo(dialog);
+      if (!info) {
+        setRelationshipHarvestStatus(dialog, 'Open a Followers or Following modal first.', 'danger');
+        return;
+      }
+
+      const lastKind = normalizeRelationshipListKind(String(dialog.dataset.soraUvRelationshipLastListKind || '').toLowerCase());
+      const currentKind = info.selectedKind || lastKind || (info.tabs.following ? 'following' : (info.tabs.followers ? 'followers' : null));
+      const kinds = scope === 'both'
+        ? Array.from(new Set([currentKind, 'following', 'followers'].filter(Boolean)))
+        : [currentKind].filter(Boolean);
+
+      if (!kinds.length) {
+        setRelationshipHarvestStatus(dialog, 'Could not tell which relationship list is open.', 'danger');
+        return;
+      }
+
+      const originalKind = currentKind;
+      const results = [];
+
+      for (const kind of kinds) {
+        if (!dialog.isConnected) break;
+        const ready = await switchRelationshipDialogTab(dialog, kind);
+        if (!ready) {
+          results.push({ listKind: kind, error: `Could not switch to ${kind}.` });
+          continue;
+        }
+        try {
+          results.push(await harvestRelationshipListHybrid(dialog, kind));
+        } catch (err) {
+          results.push({ listKind: kind, error: err?.message || String(err || '') });
+        }
+      }
+
+      if (scope === 'both' && originalKind && kinds[kinds.length - 1] !== originalKind) {
+        try {
+          await switchRelationshipDialogTab(dialog, originalKind);
+        } catch {}
+      }
+
+      const okResults = results.filter((result) => !result.error);
+      const failedResults = results.filter((result) => !!result.error);
+      if (!okResults.length) {
+        setRelationshipHarvestStatus(dialog, failedResults[0]?.error || 'Relationship harvest failed.', 'danger');
+        return;
+      }
+
+      const summary = okResults
+        .map((result) => `${fmtInt(result.totalItems)} ${result.listKind} (${result.mode})`)
+        .join(' • ');
+      const tone = failedResults.length ? 'warn' : 'success';
+      const suffix = failedResults.length ? ` • ${failedResults[0].error}` : '';
+      setRelationshipHarvestStatus(dialog, `Captured ${summary}${suffix}`, tone);
+    } catch (err) {
+      setRelationshipHarvestStatus(dialog, err?.message || 'Relationship harvest failed.', 'danger');
+    } finally {
+      try {
+        delete dialog.dataset.soraUvRelationshipHarvestRunning;
+      } catch {}
+      setRelationshipHarvestButtonsBusy(dialog, false);
+    }
+  }
+
+  function renderRelationshipHarvestControls() {
+    const dialog = findOpenRelationshipDialog();
+    if (!dialog) return;
+    if (dialog.querySelector('.sora-uv-relationship-harvest-controls')) return;
+
+    const info = getRelationshipDialogInfo(dialog);
+    if (!info) return;
+
+    const controls = document.createElement('div');
+    controls.className = 'sora-uv-relationship-harvest-controls';
+    Object.assign(controls.style, {
+      display: 'flex',
+      flexWrap: 'wrap',
+      alignItems: 'center',
+      gap: '8px',
+      marginTop: '8px',
+    });
+
+    const makeActionButton = (label, scope) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'sora-uv-relationship-harvest-btn';
+      btn.textContent = label;
+      Object.assign(btn.style, {
+        background: 'rgba(29,29,29,0.82)',
+        color: '#fff',
+        border: '1px solid rgba(255,255,255,0.14)',
+        borderRadius: '999px',
+        padding: '6px 12px',
+        fontSize: '12px',
+        fontWeight: '600',
+        cursor: 'pointer',
+        whiteSpace: 'nowrap',
+      });
+      btn.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        harvestRelationshipDialog(dialog, scope);
+      });
+      return btn;
+    };
+
+    const status = document.createElement('div');
+    status.className = 'sora-uv-relationship-harvest-status';
+    status.setAttribute('role', 'status');
+    Object.assign(status.style, {
+      fontSize: '12px',
+      color: 'rgba(255,255,255,0.68)',
+      minHeight: '18px',
+    });
+    status.textContent = 'Uses the Sora API when available, otherwise scrolls the list for you.';
+
+    controls.appendChild(makeActionButton('Harvest current', 'current'));
+    controls.appendChild(makeActionButton('Harvest both', 'both'));
+    controls.appendChild(status);
+
+    const anchor = info.headerContainer || dialog.firstElementChild || dialog;
+    if (anchor.parentElement) {
+      anchor.insertAdjacentElement('afterend', controls);
+    } else {
+      dialog.prepend(controls);
+    }
+  }
+
+  function normalizeCleanupHandle(value) {
+    return typeof value === 'string' ? value.trim().replace(/^@/, '').toLowerCase() : '';
+  }
+
+  function extractCleanupHandleFromHref(href) {
+    try {
+      const match = String(href || '').match(/^\/profile\/([^/?#]+)/i);
+      if (!match || !match[1]) return '';
+      return normalizeCleanupHandle(decodeURIComponent(match[1]));
+    } catch {}
+    return '';
+  }
+
+  function findRelationshipActionRow(link, dialog) {
+    try {
+      if (!(link instanceof HTMLElement)) return null;
+      let node = link.parentElement || null;
+      while (node && node !== dialog) {
+        const buttons = Array.from(node.querySelectorAll('button'))
+          .filter((btn) => {
+            const text = normalizeDialogText(btn.textContent).toLowerCase();
+            return text === 'following' || text === 'follow back' || text === 'follow';
+          });
+        if (buttons.length) {
+          return { row: node, button: buttons[0] };
+        }
+        node = node.parentElement;
+      }
+    } catch {}
+    return null;
+  }
+
+  function collectRelationshipActionRows(dialog) {
+    const seen = new Set();
+    const rows = [];
+    try {
+      dialog.querySelectorAll('a[href^="/profile/"]').forEach((link) => {
+        const href = typeof link.getAttribute === 'function' ? link.getAttribute('href') || '' : '';
+        const handle = extractCleanupHandleFromHref(href);
+        if (!handle || seen.has(handle)) return;
+        const rowInfo = findRelationshipActionRow(link, dialog);
+        if (!rowInfo?.button) return;
+        seen.add(handle);
+        rows.push({
+          handle,
+          link,
+          row: rowInfo.row,
+          button: rowInfo.button,
+          buttonText: normalizeDialogText(rowInfo.button.textContent).toLowerCase(),
+        });
+      });
+    } catch {}
+    return rows;
+  }
+
+  function findProfileRelationshipTrigger(listKind) {
+    try {
+      const dialogs = new Set(Array.from(document.querySelectorAll('div[role="dialog"]')));
+      const candidates = Array.from(document.querySelectorAll('button, [role="button"], [role="tab"]'))
+        .filter((el) => {
+          if (!(el instanceof HTMLElement)) return false;
+          for (const dialog of dialogs) {
+            if (dialog.contains(el)) return false;
+          }
+          const text = normalizeDialogText(el.textContent).toLowerCase();
+          if (!text || !text.includes(listKind)) return false;
+          const rect = el.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0 && rect.top < Math.max(360, window.innerHeight * 0.5);
+        })
+        .sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
+      return candidates[0] || null;
+    } catch {}
+    return null;
+  }
+
+  async function waitForProfileRelationshipTrigger(listKind, timeoutMs = 12000) {
+    const deadline = Date.now() + Math.max(1000, Number(timeoutMs) || 0);
+    while (Date.now() < deadline) {
+      const trigger = findProfileRelationshipTrigger(listKind);
+      if (trigger) return trigger;
+      await waitMs(150);
+    }
+    return findProfileRelationshipTrigger(listKind);
+  }
+
+  async function waitForRelationshipDialogTrigger(listKind, timeoutMs = 12000) {
+    const normalizedKind = normalizeRelationshipListKind(listKind);
+    if (!normalizedKind) return null;
+    const fallbackKind = normalizedKind === 'following' ? 'followers' : 'following';
+    const deadline = Date.now() + Math.max(1000, Number(timeoutMs) || 0);
+    while (Date.now() < deadline) {
+      const direct = findProfileRelationshipTrigger(normalizedKind);
+      if (direct) return direct;
+      const fallback = findProfileRelationshipTrigger(fallbackKind);
+      if (fallback) return fallback;
+      await waitMs(150);
+    }
+    return findProfileRelationshipTrigger(normalizedKind) || findProfileRelationshipTrigger(fallbackKind);
+  }
+
+  async function waitForRelationshipDialogOpen(timeoutMs = 12000) {
+    const deadline = Date.now() + Math.max(1000, Number(timeoutMs) || 0);
+    while (Date.now() < deadline) {
+      const dialog = findOpenRelationshipDialog();
+      if (dialog) return dialog;
+      await waitMs(120);
+    }
+    return findOpenRelationshipDialog();
+  }
+
+  async function ensureCleanupProfileRoute(profileHandle) {
+    try {
+      const normalizedTarget = normalizeCleanupHandle(profileHandle);
+      const currentHandle = normalizeCleanupHandle(getCurrentProfilePageHandle() || currentProfileHandleFromURL() || '');
+      if (isProfile() && (!normalizedTarget || currentHandle === normalizedTarget)) return true;
+      const nextPath = normalizedTarget ? `/profile/${encodeURIComponent(normalizedTarget)}` : '/profile';
+      try {
+        history.pushState({}, '', nextPath);
+        onRouteChange();
+      } catch {
+        location.href = nextPath;
+      }
+      const deadline = Date.now() + 18000;
+      while (Date.now() < deadline) {
+        const handle = normalizeCleanupHandle(getCurrentProfilePageHandle() || currentProfileHandleFromURL() || '');
+        if (isProfile() && (!normalizedTarget || handle === normalizedTarget)) return true;
+        await waitMs(150);
+      }
+    } catch {}
+    return false;
+  }
+
+  async function openRelationshipDialogForKind(listKind) {
+    const normalizedKind = normalizeRelationshipListKind(listKind);
+    if (!normalizedKind) throw new Error('Unknown relationship list type.');
+    let resolved = resolveRelationshipDialog(findOpenRelationshipDialog());
+    let dialog = resolved?.dialog || null;
+    if (dialog && resolved?.info) {
+      if (await switchRelationshipDialogTab(dialog, normalizedKind)) {
+        renderRelationshipHarvestControls();
+        return resolveRelationshipDialog(dialog).dialog || dialog;
+      }
+    }
+    const trigger = await waitForRelationshipDialogTrigger(normalizedKind, 12000);
+    if (!trigger) throw new Error(`Could not find the ${normalizedKind} button on the profile page.`);
+    try {
+      trigger.click();
+    } catch {
+      throw new Error(`Could not open the ${normalizedKind} dialog.`);
+    }
+    dialog = await waitForRelationshipDialogOpen(12000);
+    if (!dialog) throw new Error(`Timed out waiting for the ${normalizedKind} dialog.`);
+    renderRelationshipHarvestControls();
+    if (!(await switchRelationshipDialogTab(dialog, normalizedKind))) {
+      throw new Error(`Could not switch to the ${normalizedKind} tab.`);
+    }
+    return resolveRelationshipDialog(dialog).dialog || dialog;
+  }
+
+  async function clickRelationshipFollowToggle(button, timeoutMs = 5000) {
+    const before = normalizeDialogText(button?.textContent).toLowerCase();
+    if (!button || before !== 'following') return false;
+    try {
+      button.click();
+    } catch {
+      return false;
+    }
+    const deadline = Date.now() + Math.max(1000, Number(timeoutMs) || 0);
+    while (Date.now() < deadline) {
+      if (!(button instanceof HTMLElement) || !button.isConnected) return true;
+      const next = normalizeDialogText(button.textContent).toLowerCase();
+      if (next && next !== 'following') return true;
+      await waitMs(120);
+    }
+    return false;
+  }
+
+  async function executeBulkUnfollowInDialog(dialog, targets) {
+    const targetHandles = new Set((Array.isArray(targets) ? targets : []).map((item) => normalizeCleanupHandle(item?.userHandle)).filter(Boolean));
+    if (!targetHandles.size) return { ok: false, error: 'No valid following handles were selected.' };
+    const scroller = await waitForRelationshipListScroller(dialog, 12000);
+    if (!scroller) throw new Error('Could not find the Following list scroller.');
+
+    const unfollowed = [];
+    const skipped = [];
+    const pending = new Set(targetHandles);
+    let stableRounds = 0;
+
+    try {
+      scroller.scrollTop = 0;
+    } catch {}
+    await waitMs(180);
+
+    for (let round = 0; round < 320 && pending.size; round++) {
+      const visibleRows = collectRelationshipActionRows(dialog);
+      let matchedThisRound = false;
+      for (const row of visibleRows) {
+        if (!pending.has(row.handle)) continue;
+        matchedThisRound = true;
+        pending.delete(row.handle);
+        if (row.buttonText === 'following') {
+          setRelationshipHarvestStatus(dialog, `Unfollowing @${row.handle}...`, 'busy');
+          const ok = await clickRelationshipFollowToggle(row.button, 6500);
+          if (ok) unfollowed.push(row.handle);
+          else skipped.push(row.handle);
+          await waitMs(220);
+        } else {
+          skipped.push(row.handle);
+        }
+      }
+      if (!pending.size) break;
+
+      const beforeTop = scroller.scrollTop;
+      const beforeCount = countRelationshipRows(dialog);
+      scroller.scrollTop = Math.min(scroller.scrollHeight, scroller.scrollTop + Math.max(240, scroller.clientHeight - 72));
+      try {
+        scroller.dispatchEvent(new Event('scroll'));
+      } catch {}
+      const nextCount = await waitForRelationshipRowCountChange(dialog, beforeCount, 900);
+      const afterTop = scroller.scrollTop;
+      if (!matchedThisRound && nextCount === beforeCount && Math.abs(afterTop - beforeTop) < 4) {
+        stableRounds += 1;
+      } else {
+        stableRounds = 0;
+      }
+      if (stableRounds >= 3) break;
+    }
+
+    const notFound = Array.from(pending);
+    const tone = notFound.length ? 'warn' : 'success';
+    setRelationshipHarvestStatus(
+      dialog,
+      `Unfollowed ${fmtInt(unfollowed.length)} selected${skipped.length ? ` • ${fmtInt(skipped.length)} skipped` : ''}${notFound.length ? ` • ${fmtInt(notFound.length)} not found` : ''}`,
+      tone
+    );
+    return {
+      ok: true,
+      unfollowed: unfollowed.length,
+      skipped: skipped.length,
+      notFound: notFound.length,
+      unfollowedHandles: unfollowed,
+      skippedHandles: skipped,
+      notFoundHandles: notFound,
+    };
+  }
+
+  async function handleCleanupActionRequest(request) {
+    if (cleanupBulkActionInFlight) {
+      return { ok: false, error: 'A cleanup action is already running in this tab.' };
+    }
+    cleanupBulkActionInFlight = true;
+    try {
+      const payload = request?.payload || {};
+      const targets = Array.isArray(payload?.targets) ? payload.targets : [];
+      if (!(await ensureCleanupProfileRoute(payload?.profileHandle || ''))) {
+        throw new Error('Could not open the requested Sora profile before unfollowing.');
+      }
+      const dialog = await openRelationshipDialogForKind('following');
+      if (!dialog) throw new Error('Could not open the Following dialog.');
+      if (dialog.dataset.soraUvRelationshipHarvestRunning === '1') {
+        throw new Error('Wait for the current relationship harvest to finish before bulk unfollowing.');
+      }
+      setRelationshipHarvestButtonsBusy(dialog, true);
+      dialog.dataset.soraUvRelationshipBulkActionRunning = '1';
+      return await executeBulkUnfollowInDialog(dialog, targets);
+    } finally {
+      cleanupBulkActionInFlight = false;
+      try {
+        const dialog = findOpenRelationshipDialog();
+        if (dialog) {
+          delete dialog.dataset.soraUvRelationshipBulkActionRunning;
+          setRelationshipHarvestButtonsBusy(dialog, false);
+        }
+      } catch {}
+    }
+  }
+
   function scheduleEnsureAllCharactersLoadedInDialog(dialog) {
     try {
       if (!dialog || !dialog.isConnected) return;
@@ -6990,7 +8015,10 @@ async function renderAnalyzeTable(force = false) {
       renderDraftButtons();
     }
     // Character stats only matters on profile/characters views; it does its own internal gating.
-    if (location.pathname.includes('/profile')) renderCharacterStats();
+    if (location.pathname.includes('/profile')) {
+      renderCharacterStats();
+      renderRelationshipHarvestControls();
+    }
     updateControlsVisibility();
     scheduleInjectDashboardButton();
   }
@@ -7320,6 +8348,20 @@ async function renderAnalyzeTable(force = false) {
     }
 
     if (navigated) {
+      if (isProfile()) {
+        const routeHandle = currentProfileHandleFromURL();
+        if (routeHandle) {
+          currentProfilePageHandle = routeHandle;
+          currentProfilePageUserId = profileHandleToUserId.get(routeHandle.toLowerCase()) || null;
+        } else {
+          currentProfilePageHandle = null;
+          currentProfilePageUserId = null;
+        }
+      } else {
+        currentProfilePageHandle = null;
+        currentProfilePageUserId = null;
+      }
+
       forceStopGatherOnNavigation();
       if (!shouldPreserveFilterAcrossNavigation(prev, rk)) resetFilterOnNavigation();
       // Reset bookmarks filter on navigation
