@@ -38,6 +38,7 @@
 
   // == Configuration & Constants ==
   const PREF_KEY = 'SORA_UV_PREFS_V1';
+  const LEGACY_DISCOVERY_PHRASE_PREF_KEY = 'SCT_SHOW_DISCOVERY_PHRASE_V1';
   const SESS_KEY = 'SORA_UV_GATHER_STATE_V1';
   const ANALYZE_VISITED_KEY = 'SORA_UV_ANALYZE_VISITED';
   const ANALYZE_VISITED_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
@@ -76,6 +77,7 @@
   const idToDuration = new Map(); // Draft duration in seconds
   const idToDimensions = new Map(); // Video dimensions { width, height }
   const idToPrompt = new Map(); // Draft prompt text
+  const idToDiscoveryPhrase = new Map(); // Post discovery phrase
   const idToDownloadUrl = new Map(); // Draft downloadable URL
   const idToViolation = new Map(); // Draft content violation status
   const idToRemixTarget = new Map(); // Draft remix target post ID (if it's a remix of a post)
@@ -347,6 +349,64 @@
     if (typeof str !== 'string') return '';
     const s = str.replace(/\s+/g, ' ').trim();
     return s.length > max ? s.slice(0, max).trim() + '…' : s;
+  }
+
+  function normalizeDiscoveryPhrase(value) {
+    if (typeof value !== 'string') return null;
+    const phrase = value.replace(/\s+/g, ' ').trim();
+    return phrase || null;
+  }
+
+  function defaultDiscoveryPhrasePreference() {
+    return true;
+  }
+
+  function readDiscoveryPhrasePreferenceFromPrefs(prefs) {
+    if (prefs && typeof prefs.showDiscoveryPhrase === 'boolean') {
+      return prefs.showDiscoveryPhrase;
+    }
+    return defaultDiscoveryPhrasePreference();
+  }
+
+  function readLegacyDiscoveryPhrasePreference() {
+    try {
+      const legacy = localStorage.getItem(LEGACY_DISCOVERY_PHRASE_PREF_KEY);
+      if (legacy === '1') return true;
+      if (legacy === '0') return false;
+    } catch {}
+    return null;
+  }
+
+  function writeDiscoveryPhrasePreference(enabled) {
+    const prefs = getPrefs();
+    prefs.showDiscoveryPhrase = !!enabled;
+    setPrefs(prefs);
+    try {
+      localStorage.removeItem(LEGACY_DISCOVERY_PHRASE_PREF_KEY);
+    } catch {}
+    return prefs.showDiscoveryPhrase;
+  }
+
+  function discoveryPhraseEnabled() {
+    const prefs = getPrefs();
+    if (typeof prefs.showDiscoveryPhrase === 'boolean') {
+      return prefs.showDiscoveryPhrase;
+    }
+    const legacy = readLegacyDiscoveryPhrasePreference();
+    if (legacy != null) {
+      return writeDiscoveryPhrasePreference(legacy);
+    }
+    return defaultDiscoveryPhrasePreference();
+  }
+
+  function getDiscoveryPhraseForId(id) {
+    return normalizeDiscoveryPhrase(idToDiscoveryPhrase.get(id));
+  }
+
+  function formatDiscoveryPhrasePillText(phrase, max = 28) {
+    const normalized = normalizeDiscoveryPhrase(phrase);
+    if (!normalized) return null;
+    return truncateInline(normalized, max);
   }
 
   const ESC_MAP = { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' };
@@ -1692,6 +1752,9 @@ function badgeEmojiFor(id, meta) {
     // Duration
     const duration = idToDuration.get(id);
     const durationStr = duration ? formatDuration(duration) : null;
+    const discoveryPhrase = discoveryPhraseEnabled() ? getDiscoveryPhraseForId(id) : null;
+    const discoveryPhraseStr = formatDiscoveryPhrasePillText(discoveryPhrase);
+    const discoveryPhraseTip = discoveryPhrase ? `Discovery phrase: ${discoveryPhrase}` : null;
 
     const viewsStr = uv != null ? `👀 ${fmt(uv)}` : null;
     const irStr = irDisp ? `${irDisp} IR` : null;
@@ -1715,7 +1778,7 @@ function badgeEmojiFor(id, meta) {
     badge.style.background = 'transparent';
     const pillBg = bg || 'rgba(37,37,37,0.7)';
 
-    const newKey = JSON.stringify([durationStr, viewsStr, irStr, rrStr, impactStr, timeEmojiStr, rateStr, flamesStr, pillBg]);
+    const newKey = JSON.stringify([durationStr, discoveryPhraseStr, viewsStr, irStr, rrStr, impactStr, timeEmojiStr, rateStr, flamesStr, pillBg]);
     if (badge.dataset.key === newKey) {
       badge.style.boxShadow = 'none';
       return;
@@ -1767,6 +1830,10 @@ function badgeEmojiFor(id, meta) {
       }
       const tooltip = `${durationStr}${modelName} video`;
       const el = createPill(badge, `${durationStr}`, tooltip, true);
+      el.style.background = pillBg;
+    }
+    if (discoveryPhraseStr) {
+      const el = createPill(badge, discoveryPhraseStr, discoveryPhraseTip, true);
       el.style.background = pillBg;
     }
     if (flamesStr) {
@@ -2080,6 +2147,8 @@ function badgeEmojiFor(id, meta) {
       if (metrics?.users) {
         // Helper function to load post data from a post object
         const loadPostData = (post, postId) => {
+          const discoveryPhrase = normalizeDiscoveryPhrase(post?.discovery_phrase);
+          if (discoveryPhrase) idToDiscoveryPhrase.set(postId, discoveryPhrase);
           const latest = __sorauv_latestSnapshot(post.snapshots);
           if (latest) {
             // Only set values if they're not null/undefined
@@ -2439,9 +2508,12 @@ function badgeEmojiFor(id, meta) {
     }
     
     const durationStr = duration ? formatDuration(duration) : null;
+    const discoveryPhrase = discoveryPhraseEnabled() ? getDiscoveryPhraseForId(sid) : null;
+    const discoveryPhraseStr = formatDiscoveryPhrasePillText(discoveryPhrase);
+    const discoveryPhraseTip = discoveryPhrase ? `Discovery phrase: ${discoveryPhrase}` : null;
 
     // Determine if we have any data to display
-    if (viewsStr == null && irStr == null && rrStr == null && impactStr == null && timeEmojiStr == null && durationStr == null && rateStr == null && !flamesStr) {
+    if (viewsStr == null && irStr == null && rrStr == null && impactStr == null && timeEmojiStr == null && durationStr == null && discoveryPhraseStr == null && rateStr == null && !flamesStr) {
       el.innerHTML = '';
       return;
     }
@@ -2449,7 +2521,7 @@ function badgeEmojiFor(id, meta) {
     // Use a key to prevent unnecessary DOM updates - match feed badge key format
     const bg = badgeBgFor(sid, meta);
     const pillBg = bg || 'rgba(37,37,37,0.7)';
-    const newKey = JSON.stringify([durationStr, viewsStr, irStr, rrStr, impactStr, timeEmojiStr, rateStr, flamesStr, pillBg]);
+    const newKey = JSON.stringify([durationStr, discoveryPhraseStr, viewsStr, irStr, rrStr, impactStr, timeEmojiStr, rateStr, flamesStr, pillBg]);
     const hasPills = el.querySelectorAll('.sora-uv-pill').length > 0;
     if (el.dataset.key === newKey && hasPills) return;
     el.dataset.key = newKey;
@@ -2521,7 +2593,14 @@ function badgeEmojiFor(id, meta) {
       metEl.style.pointerEvents = 'auto';
     }
 
-    // 7. Flames Pill - always last
+    // 7. Discovery Phrase Pill
+    if (discoveryPhraseStr) {
+      const phraseEl = createPill(el, discoveryPhraseStr, discoveryPhraseTip, true);
+      phraseEl.style.background = pillBg;
+      phraseEl.style.pointerEvents = 'auto';
+    }
+
+    // 8. Flames Pill - always last
     if (flamesStr) {
       const flameEl = createPill(el, flamesStr, flamesTip, true);
       flameEl.style.background = pillBg;
@@ -2997,7 +3076,79 @@ function badgeEmojiFor(id, meta) {
       };
       filterDropdown.appendChild(option);
     });
-    
+
+    const filterDivider = document.createElement('div');
+    Object.assign(filterDivider.style, {
+      height: '1px',
+      margin: '8px 4px',
+      background: 'rgba(255, 255, 255, 0.12)',
+    });
+    filterDropdown.appendChild(filterDivider);
+
+    const discoveryPhraseToggle = document.createElement('button');
+    discoveryPhraseToggle.type = 'button';
+    discoveryPhraseToggle.className = 'sora-uv-filter-option sora-uv-discovery-phrase-toggle';
+    Object.assign(discoveryPhraseToggle.style, {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: '12px',
+      padding: '8px 12px',
+      background: 'transparent',
+      border: 'none',
+      color: 'var(--token-text-primary, #fff)',
+      textAlign: 'left',
+      cursor: 'pointer',
+      borderRadius: '8px',
+      fontSize: '14px',
+      fontWeight: '500',
+      transition: 'background 120ms ease',
+    });
+
+    const discoveryPhraseLabel = document.createElement('span');
+    discoveryPhraseLabel.textContent = 'Discovery phrase';
+    discoveryPhraseToggle.appendChild(discoveryPhraseLabel);
+
+    const discoveryPhraseState = document.createElement('span');
+    Object.assign(discoveryPhraseState.style, {
+      minWidth: '2.2em',
+      textAlign: 'right',
+      fontSize: '12px',
+      fontWeight: '700',
+      letterSpacing: '0.02em',
+      textTransform: 'uppercase',
+    });
+    discoveryPhraseToggle.appendChild(discoveryPhraseState);
+
+    const updateDiscoveryPhraseToggleState = () => {
+      const enabled = discoveryPhraseEnabled();
+      discoveryPhraseToggle.style.background = enabled
+        ? 'var(--token-bg-active, rgba(255, 255, 255, 0.15))'
+        : 'transparent';
+      discoveryPhraseToggle.style.fontWeight = enabled ? '600' : '500';
+      discoveryPhraseState.textContent = enabled ? 'On' : 'Off';
+      discoveryPhraseState.style.opacity = enabled ? '1' : '0.65';
+    };
+
+    discoveryPhraseToggle.onmouseenter = () => {
+      if (discoveryPhraseEnabled()) return;
+      discoveryPhraseToggle.style.background = 'var(--token-bg-light, rgba(255, 255, 255, 0.1))';
+    };
+    discoveryPhraseToggle.onmouseleave = () => {
+      updateDiscoveryPhraseToggleState();
+    };
+    discoveryPhraseToggle.onclick = (e) => {
+      e.stopPropagation();
+      writeDiscoveryPhrasePreference(!discoveryPhraseEnabled());
+      updateDiscoveryPhraseToggleState();
+      badgeDataGeneration++;
+      renderBadges();
+      renderDetailBadge();
+      filterDropdown.style.display = 'none';
+    };
+    updateDiscoveryPhraseToggleState();
+    filterDropdown.appendChild(discoveryPhraseToggle);
+
     filterContainer.appendChild(filterDropdown);
     buttonRow.appendChild(filterContainer);
 
@@ -5796,8 +5947,10 @@ async function renderAnalyzeTable(force = false) {
         p?.created_at ?? p?.uploaded_at ?? p?.createdAt ?? p?.created ?? p?.posted_at ?? p?.timestamp ?? null;
       const caption =
         (typeof p?.caption === 'string' && p.caption) ? p.caption : (typeof p?.text === 'string' && p.text ? p.text : null);
+      const discoveryPhrase = normalizeDiscoveryPhrase(p?.discovery_phrase);
       const ageMin = minutesSince(created_at);
       const th = getThumbnail(it);
+      if (discoveryPhrase) idToDiscoveryPhrase.set(id, discoveryPhrase);
 
       // Extract video duration from n_frames (Sora uses 30 fps for published posts)
       try {
@@ -5949,6 +6102,7 @@ async function renderAnalyzeTable(force = false) {
         followers,
         created_at,
         caption,
+        discovery_phrase: discoveryPhrase,
         ageMin,
         thumb: th,
         url: absUrl,
@@ -5989,8 +6143,10 @@ async function renderAnalyzeTable(force = false) {
           const remixP = remixItem?.post || remixItem || {};
           const remixCreatedAt = remixP?.created_at ?? remixP?.uploaded_at ?? remixP?.createdAt ?? remixP?.created ?? remixP?.posted_at ?? remixP?.timestamp ?? null;
           const remixCaption = (typeof remixP?.caption === 'string' && remixP.caption) ? remixP.caption : (typeof remixP?.text === 'string' && remixP.text ? remixP.text : null);
+          const remixDiscoveryPhrase = normalizeDiscoveryPhrase(remixP?.discovery_phrase);
           const remixAgeMin = minutesSince(remixCreatedAt);
           const remixTh = getThumbnail(remixItem);
+          if (remixDiscoveryPhrase) idToDiscoveryPhrase.set(remixId, remixDiscoveryPhrase);
           
           // Extract duration and dimensions for remix
           try {
@@ -6077,6 +6233,7 @@ async function renderAnalyzeTable(force = false) {
             followers: remixFollowers,
             created_at: remixCreatedAt,
             caption: remixCaption,
+            discovery_phrase: remixDiscoveryPhrase,
             ageMin: remixAgeMin,
             thumb: remixTh,
             url: remixAbsUrl,
@@ -7450,7 +7607,15 @@ async function renderAnalyzeTable(force = false) {
     }
     if (e.key !== PREF_KEY) return;
     try {
+      const oldPrefs = JSON.parse(e.oldValue || '{}');
       const newPrefs = JSON.parse(e.newValue || '{}');
+      const oldShowDiscoveryPhrase = readDiscoveryPhrasePreferenceFromPrefs(oldPrefs);
+      const newShowDiscoveryPhrase = readDiscoveryPhrasePreferenceFromPrefs(newPrefs);
+      if (oldShowDiscoveryPhrase !== newShowDiscoveryPhrase) {
+        badgeDataGeneration++;
+        renderBadges();
+        renderDetailBadge();
+      }
       if (newPrefs.gatherSpeed == null) return;
       const slider = document.querySelector('.sora-uv-controls input[type="range"]');
       if (slider && slider.value !== newPrefs.gatherSpeed) slider.value = newPrefs.gatherSpeed;

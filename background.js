@@ -123,6 +123,8 @@ function sanitizeMetricsSnapshot(raw) {
   if (thumb) snap.thumb = thumb;
   const caption = sanitizeString(raw.caption, 4096);
   if (caption) snap.caption = caption;
+  const discoveryPhrase = sanitizeString(raw.discovery_phrase, 4096);
+  if (discoveryPhrase) snap.discovery_phrase = discoveryPhrase;
 
   const cameoUsernames = sanitizeCameoUsernames(raw.cameo_usernames);
   if (cameoUsernames) snap.cameo_usernames = cameoUsernames;
@@ -376,6 +378,7 @@ function trimPostForResponse(post, snapshotMode) {
     url: post.url ?? null,
     thumb: post.thumb ?? null,
     caption: typeof post.caption === 'string' ? post.caption : null,
+    discovery_phrase: typeof post.discovery_phrase === 'string' ? post.discovery_phrase : null,
     text: typeof post.text === 'string' ? post.text : null,
     ownerKey: post.ownerKey ?? null,
     ownerHandle: post.ownerHandle ?? null,
@@ -549,6 +552,11 @@ async function flush() {
           if (typeof snap.caption === 'string' && snap.caption) {
             if (!post.caption) { post.caption = snap.caption; dirty = true; }
             else if (post.caption !== snap.caption) { post.caption = snap.caption; dirty = true; }
+          }
+          // Capture/refresh discovery phrase
+          if (typeof snap.discovery_phrase === 'string' && snap.discovery_phrase) {
+            if (!post.discovery_phrase) { post.discovery_phrase = snap.discovery_phrase; dirty = true; }
+            else if (post.discovery_phrase !== snap.discovery_phrase) { post.discovery_phrase = snap.discovery_phrase; dirty = true; }
           }
           // Capture/refresh cameo_usernames
           if (snap.cameo_usernames != null) {
