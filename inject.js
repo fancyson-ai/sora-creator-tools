@@ -1332,6 +1332,35 @@
     return downloadBtn;
   }
 
+  function extractDraftRemixTargetId(item) {
+    const candidates = [
+      item?.creation_config?.remix_target_post?.post?.id,
+      item?.creation_config?.remix_target_post?.id,
+      item?.remix_target_post_id,
+    ];
+    for (const candidate of candidates) {
+      const value = typeof candidate === 'string' ? candidate.trim() : '';
+      if (value) return value;
+    }
+    return null;
+  }
+
+  function applyDraftRemixTargetMetadata(draftId, item) {
+    const remixTargetId = extractDraftRemixTargetId(item);
+    if (!remixTargetId) return null;
+    if (/^gen_/i.test(remixTargetId)) {
+      idToRemixTargetDraft.set(draftId, remixTargetId);
+    } else {
+      idToRemixTarget.set(draftId, remixTargetId);
+    }
+    return remixTargetId;
+  }
+
+  function isDraftRemix(draftId) {
+    if (!draftId) return false;
+    return idToRemixTarget.has(draftId) || idToRemixTargetDraft.has(draftId);
+  }
+
   function ensureRedoButton(draftCard, draftId) {
     if (!draftId) return null;
 
@@ -1373,12 +1402,12 @@
 
       redoBtn.addEventListener('mouseenter', () => {
         if (!redoBtn.disabled) {
-          redoBtn.style.background = 'rgba(0,0,0,0.9)';
+          redoBtn.style.background = isDraftRemix(draftId) ? 'rgba(37,99,235,0.96)' : 'rgba(0,0,0,0.9)';
           redoBtn.style.transform = 'scale(1.05)';
         }
       });
       redoBtn.addEventListener('mouseleave', () => {
-        redoBtn.style.background = 'rgba(0,0,0,0.75)';
+        redoBtn.style.background = isDraftRemix(draftId) ? 'rgba(59,130,246,0.85)' : 'rgba(0,0,0,0.75)';
         redoBtn.style.transform = 'scale(1)';
       });
 
@@ -1435,9 +1464,14 @@
 
     // Update button state based on whether prompt exists
     const hasPrompt = idToPrompt.has(draftId);
+    const remixDraft = isDraftRemix(draftId);
     redoBtn.disabled = !hasPrompt;
     redoBtn.style.opacity = hasPrompt ? '1' : '0.4';
     redoBtn.style.cursor = hasPrompt ? 'pointer' : 'not-allowed';
+    redoBtn.style.background = remixDraft ? 'rgba(59,130,246,0.85)' : 'rgba(0,0,0,0.75)';
+    redoBtn.style.boxShadow = remixDraft ? '0 0 0 1px rgba(255,255,255,0.12) inset' : 'none';
+    redoBtn.title = remixDraft ? 'Redo from remix source' : 'Redo generation';
+    redoBtn.setAttribute('aria-label', remixDraft ? 'Redo generation (this draft is a remix)' : 'Redo generation');
 
     return redoBtn;
   }
@@ -1507,6 +1541,10 @@
       draftCard.appendChild(remixBtn);
     }
 
+    remixBtn.style.background = 'rgba(0,0,0,0.75)';
+    remixBtn.style.boxShadow = 'none';
+    remixBtn.title = 'Remix this draft';
+    remixBtn.setAttribute('aria-label', 'Remix this draft');
     return remixBtn;
   }
 
@@ -1904,16 +1942,17 @@ function badgeEmojiFor(id, meta) {
     }
 
     for (const draftCard of draftCards) {
-      // Skip if we've already processed this card
-      if (processedDraftCards.has(draftCard)) continue;
-
       const draftId = extractDraftIdFromCard(draftCard);
       if (!draftId) continue;
+
+      ensureRedoButton(draftCard, draftId);
+
+      // Skip if we've already processed this card
+      if (processedDraftCards.has(draftCard)) continue;
 
       ensureDurationBadge(draftCard, draftId);
       ensureCopyPromptButton(draftCard, draftId);
       ensureDownloadButton(draftCard, draftId);
-      ensureRedoButton(draftCard, draftId);
       ensureRemixButton(draftCard, draftId);
       processedDraftCards.add(draftCard);
       processedDraftCardsCount++; // Increment count for early exit optimization
@@ -6314,10 +6353,7 @@ async function renderAnalyzeTable(force = false) {
         }
 
         // Extract remix target post ID if this is a remix of a post
-        const remixTargetPostId = item?.creation_config?.remix_target_post?.post?.id;
-        if (remixTargetPostId && typeof remixTargetPostId === 'string') {
-          idToRemixTarget.set(draftId, remixTargetPostId);
-        }
+        applyDraftRemixTargetMetadata(draftId, item);
 
         // Check if this draft is a remix of another draft (only if not already mapped)
         if (!idToRemixTargetDraft.has(draftId)) {
